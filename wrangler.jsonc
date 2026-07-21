@@ -1,11 +1,29 @@
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "xtelegram-cf",
-	"main": "src/index.ts",
-	"compatibility_date": "2025-10-08",
-	"compatibility_flags": ["nodejs_compat"],
-	"observability": {
-		"enabled": true
-	},
-	"upload_source_maps": true
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "generic-telegram-media-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-21",
+  "containers": [
+    {
+      "class_name": "FfmpegContainer",
+      "image": "./Dockerfile",
+      "max_instances": 3
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "FFMPEG_CONTAINER",
+        "class_name": "FfmpegContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "FfmpegContainer"
+      ]
+    }
+  ]
 }
