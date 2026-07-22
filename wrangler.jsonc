@@ -2,8 +2,5 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "xtelegram-cf",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-22",
-  "limits": {
-    "cpu_ms": 300000
-  }
+  "compatibility_date": "2026-07-22"
 }
