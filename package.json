@@ -1,18 +1,20 @@
 {
   "name": "generic-telegram-media-relay",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "dev": "wrangler dev",
+    "lockfile:refresh": "npm install --package-lock-only --ignore-scripts"
   },
   "dependencies": {
-    "@cloudflare/containers": "latest"
+    "mux.js": "7.1.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "latest",
-    "typescript": "latest",
-    "wrangler": "latest"
-  }
+    "typescript": "^5.8.3",
+    "wrangler": "^4.0.0"
+  },
+  "packageManager": "npm@10.9.2"
 }
