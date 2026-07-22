@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "generic-telegram-media-relay",
+  "name": "xtelegram-cf",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-22",
   "limits": {
