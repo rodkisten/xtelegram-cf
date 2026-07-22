@@ -36,17 +36,26 @@ Direct files small enough for Telegram's remote URL fetch path are still sent by
 ## Install
 
 ```bash
-pnpm install
-pnpm typecheck
+npm install
+npm run typecheck
 ```
 
 ## Secrets
 
+Required:
+
 ```bash
-pnpm wrangler secret put TELEGRAM_BOT_TOKEN
-pnpm wrangler secret put TELEGRAM_CHAT_ID
-pnpm wrangler secret put RELAY_TOKEN
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put RELAY_TOKEN
 ```
+
+Optional default destination:
+
+```bash
+npx wrangler secret put TELEGRAM_CHAT_ID
+```
+
+`TELEGRAM_CHAT_ID` is now only a fallback. When the request contains `channel` or `channels`, those request values take priority.
 
 ## Optional Worker variables
 
@@ -65,8 +74,24 @@ Controls simultaneous HLS resource downloads. Values are clamped between 1 and 8
 ## Deploy
 
 ```bash
-pnpm deploy
+npm run deploy
 ```
+
+## Fixing an out-of-sync npm lock file
+
+Cloudflare uses `npm ci` when a `package-lock.json` is committed. `npm ci` intentionally fails when `package.json` contains dependencies that are missing from the lock file.
+
+If the repository still contains the old lock file from before `mux.js` was added, regenerate and commit it once:
+
+```bash
+rm -rf node_modules package-lock.json
+npm install
+npm run typecheck
+git add package.json package-lock.json
+git commit -m "chore: sync npm lockfile"
+```
+
+After that, Cloudflare can run `npm ci` normally. Do not keep the stale lock file.
 
 ## API
 
@@ -87,6 +112,7 @@ Example:
   "caption": "Example",
   "parseMode": "HTML",
   "mediaType": "video",
+  "channel": "-1001234567890",
   "mediaHeaders": {
     "Referer": "https://example.com/"
   },
@@ -95,6 +121,35 @@ Example:
   }
 }
 ```
+
+
+### Dynamic Telegram destinations
+
+The Worker accepts the same fields already produced by the userscript.
+
+Send to one channel:
+
+```json
+{
+  "mediaUrl": "https://example.com/video.mp4",
+  "channel": "-1001234567890"
+}
+```
+
+Send to multiple channels:
+
+```json
+{
+  "mediaUrl": "https://example.com/master.m3u8",
+  "channels": [
+    "-1001234567890",
+    "-1009876543210",
+    "@my_public_channel"
+  ]
+}
+```
+
+When both `channel` and `channels` are present, the Worker merges and de-duplicates them. When neither is present, it falls back to `TELEGRAM_CHAT_ID`. The media is resolved/downloaded/remuxed once, then delivered to each requested destination sequentially.
 
 ## Supported HLS behavior
 

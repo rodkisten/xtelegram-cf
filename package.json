@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "lockfile:refresh": "npm install --package-lock-only --ignore-scripts"
   },
   "dependencies": {
     "mux.js": "7.1.0"
@@ -14,5 +15,6 @@
   "devDependencies": {
     "typescript": "^5.8.3",
     "wrangler": "^4.0.0"
-  }
+  },
+  "packageManager": "npm@10.9.2"
 }
