@@ -1,6 +1,6 @@
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
-  TELEGRAM_CHAT_ID: string;
+  TELEGRAM_CHAT_ID?: string;
   RELAY_TOKEN: string;
   MAX_MEDIA_BYTES?: string;
   HLS_CONCURRENCY?: string;
@@ -16,6 +16,7 @@ export interface RelayInput {
   parseMode: ParseMode | null;
   mediaType: MediaType | null;
   mediaHeaders: Record<string, string>;
+  channels: string[];
   metadata: Record<string, string> | null;
 }
 

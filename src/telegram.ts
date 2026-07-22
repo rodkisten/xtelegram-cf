@@ -83,10 +83,6 @@ export function validateEnvironment(env: Env): string | null {
     return "Missing TELEGRAM_BOT_TOKEN secret";
   }
 
-  if (!env.TELEGRAM_CHAT_ID) {
-    return "Missing TELEGRAM_CHAT_ID secret";
-  }
-
   if (!env.RELAY_TOKEN) {
     return "Missing RELAY_TOKEN secret";
   }

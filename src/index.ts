@@ -17,6 +17,7 @@ import type {
   Env,
   MediaType,
   ParseMode,
+  PreparedMedia,
   RelayInput,
   TelegramApiResult,
   TelegramMessage,
@@ -130,9 +131,25 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
   }
 
   const input = validation.value;
+  const chatIds = resolveTelegramChatIds(
+    input.channels,
+    env.TELEGRAM_CHAT_ID,
+  );
+
+  if (!chatIds.length) {
+    return json(
+      {
+        ok: false,
+        error:
+          "No Telegram channel was provided. Send channel/channels in the request or configure TELEGRAM_CHAT_ID as the default.",
+      },
+      400,
+    );
+  }
+
   const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
   const concurrency = resolveConcurrency(env.HLS_CONCURRENCY);
-  let prepared;
+  let prepared: PreparedMedia;
 
   try {
     prepared = await prepareMedia(input, {
@@ -144,6 +161,7 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
     console.error("[media-relay] Failed to prepare media", {
       inputUrl: input.mediaUrl.href,
       sourceUrl: input.sourceUrl,
+      channels: chatIds,
       error: getErrorMessage(error),
       metadata: input.metadata,
     });
@@ -157,6 +175,7 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
           inputUrl: input.mediaUrl.href,
           sourceUrl: input.sourceUrl,
         },
+        channels: chatIds,
         metadata: input.metadata,
       },
       422,
@@ -168,52 +187,52 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
     (prepared.type === "file"
       ? inferTelegramMediaType(prepared.url, prepared.contentType)
       : prepared.mediaType);
+  const delivery =
+    prepared.type === "file"
+      ? "telegram-url"
+      : "multipart-upload";
 
   console.log("[media-relay] Sending media", {
     inputUrl: input.mediaUrl.href,
     sourceUrl: input.sourceUrl,
-    delivery: prepared.type === "file" ? "telegram-url" : "multipart-upload",
+    channels: chatIds,
+    delivery,
     mediaType,
-    resolvedUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
+    resolvedUrl:
+      prepared.type === "file"
+        ? prepared.url
+        : prepared.sourceUrl,
     selectedBitrate: prepared.selectedBitrate,
     selectedResolution: prepared.selectedResolution,
     playlistDepth: prepared.playlistDepth,
-    size: prepared.type === "file" ? prepared.contentLength : prepared.bytes.byteLength,
+    size:
+      prepared.type === "file"
+        ? prepared.contentLength
+        : prepared.bytes.byteLength,
     hls: prepared.type === "file" ? false : prepared.hls,
     remuxed: prepared.type === "file" ? false : prepared.remuxed,
     metadata: input.metadata,
   });
 
-  let telegramResult: TelegramApiResult<TelegramMessage>;
+  const deliveries = await sendPreparedMediaToChats({
+    botToken: env.TELEGRAM_BOT_TOKEN,
+    chatIds,
+    prepared,
+    mediaType,
+    caption: input.caption,
+    parseMode: input.parseMode,
+  });
+  const failedDeliveries = deliveries.filter(
+    (deliveryResult) => !deliveryResult.result.ok,
+  );
 
-  if (prepared.type === "file") {
-    telegramResult = await sendTelegramUrl({
-      botToken: env.TELEGRAM_BOT_TOKEN,
-      chatId: env.TELEGRAM_CHAT_ID,
-      mediaUrl: prepared.url,
-      mediaType,
-      caption: input.caption,
-      parseMode: input.parseMode,
-    });
-  } else {
-    telegramResult = await sendTelegramUpload({
-      botToken: env.TELEGRAM_BOT_TOKEN,
-      chatId: env.TELEGRAM_CHAT_ID,
-      bytes: prepared.bytes,
-      filename: prepared.filename,
-      contentType: prepared.contentType,
-      mediaType,
-      caption: input.caption,
-      parseMode: input.parseMode,
-    });
-  }
-
-  if (!telegramResult.ok) {
-    console.error("[media-relay] Telegram rejected media", {
+  if (failedDeliveries.length) {
+    console.error("[media-relay] Telegram rejected one or more deliveries", {
       inputUrl: input.mediaUrl.href,
-      delivery: prepared.type === "file" ? "telegram-url" : "multipart-upload",
+      delivery,
       mediaType,
-      telegram: telegramResult,
+      channels: chatIds,
+      failedDeliveries,
       metadata: input.metadata,
     });
 
@@ -221,10 +240,9 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
       {
         ok: false,
         error:
-          telegramResult.description ||
-          "Telegram rejected the media request",
+          failedDeliveries[0]?.result.description ||
+          "Telegram rejected one or more media deliveries",
         stage: "telegram",
-        telegram: telegramResult,
         source: {
           inputUrl: input.mediaUrl.href,
           resolvedUrl:
@@ -233,36 +251,31 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
               : prepared.sourceUrl,
           sourceUrl: input.sourceUrl,
         },
+        channels: chatIds,
         resolution: {
           selectedBitrate: prepared.selectedBitrate,
           selectedResolution: prepared.selectedResolution,
           playlistDepth: prepared.playlistDepth,
         },
-        processing:
-          prepared.type === "file"
-            ? {
-                delivery: "telegram-url",
-                contentLength: prepared.contentLength,
-              }
-            : {
-                delivery: "multipart-upload",
-                size: prepared.bytes.byteLength,
-                hls: prepared.hls,
-                segmentCount: prepared.segmentCount,
-                encrypted: prepared.encrypted,
-                remuxed: prepared.remuxed,
-              },
+        processing: buildProcessingResult(prepared),
+        telegram: {
+          method: getTelegramMethodName(mediaType),
+          deliveries: deliveries.map(formatTelegramDelivery),
+        },
         metadata: input.metadata,
       },
       502,
     );
   }
 
-  const message = telegramResult.result;
+  const firstMessage = deliveries[0]?.result.result;
 
   return json({
     ok: true,
-    message: "Media sent to Telegram",
+    message:
+      chatIds.length === 1
+        ? "Media sent to Telegram"
+        : `Media sent to ${chatIds.length} Telegram channels`,
     source: {
       inputUrl: input.mediaUrl.href,
       resolvedUrl:
@@ -271,41 +284,126 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
           : prepared.sourceUrl,
       sourceUrl: input.sourceUrl,
     },
+    channels: chatIds,
     resolution: {
       selectedBitrate: prepared.selectedBitrate,
       selectedResolution: prepared.selectedResolution,
       playlistDepth: prepared.playlistDepth,
     },
-    processing:
-      prepared.type === "file"
-        ? {
-            delivery: "telegram-url",
-            contentLength: prepared.contentLength,
-            contentType: prepared.contentType,
-          }
-        : {
-            delivery: "multipart-upload",
-            filename: prepared.filename,
-            contentType: prepared.contentType,
-            size: prepared.bytes.byteLength,
-            hls: prepared.hls,
-            segmentCount: prepared.segmentCount,
-            encrypted: prepared.encrypted,
-            remuxed: prepared.remuxed,
-          },
+    processing: buildProcessingResult(prepared),
     telegram: {
-      method:
-        mediaType === "audio"
-          ? "sendAudio"
-          : mediaType === "document"
-            ? "sendDocument"
-            : "sendVideo",
-      messageId: message?.message_id ?? null,
-      chatId: message?.chat?.id ?? null,
-      chatTitle: message?.chat?.title ?? null,
+      method: getTelegramMethodName(mediaType),
+      messageId: firstMessage?.message_id ?? null,
+      chatId: firstMessage?.chat?.id ?? null,
+      chatTitle: firstMessage?.chat?.title ?? null,
+      deliveries: deliveries.map(formatTelegramDelivery),
     },
     metadata: input.metadata,
   });
+}
+
+interface TelegramDelivery {
+  requestedChatId: string;
+  result: TelegramApiResult<TelegramMessage>;
+}
+
+async function sendPreparedMediaToChats(options: {
+  botToken: string;
+  chatIds: string[];
+  prepared: PreparedMedia;
+  mediaType: MediaType;
+  caption: string;
+  parseMode: ParseMode | null;
+}): Promise<TelegramDelivery[]> {
+  const deliveries: TelegramDelivery[] = [];
+
+  // Send sequentially so a large multipart payload is not duplicated in memory
+  // for several concurrent Bot API requests inside the same Worker isolate.
+  for (const chatId of options.chatIds) {
+    const result =
+      options.prepared.type === "file"
+        ? await sendTelegramUrl({
+            botToken: options.botToken,
+            chatId,
+            mediaUrl: options.prepared.url,
+            mediaType: options.mediaType,
+            caption: options.caption,
+            parseMode: options.parseMode,
+          })
+        : await sendTelegramUpload({
+            botToken: options.botToken,
+            chatId,
+            bytes: options.prepared.bytes,
+            filename: options.prepared.filename,
+            contentType: options.prepared.contentType,
+            mediaType: options.mediaType,
+            caption: options.caption,
+            parseMode: options.parseMode,
+          });
+
+    deliveries.push({
+      requestedChatId: chatId,
+      result,
+    });
+  }
+
+  return deliveries;
+}
+
+function formatTelegramDelivery(delivery: TelegramDelivery) {
+  const message = delivery.result.result;
+
+  return {
+    requestedChatId: delivery.requestedChatId,
+    ok: delivery.result.ok,
+    messageId: message?.message_id ?? null,
+    chatId: message?.chat?.id ?? null,
+    chatTitle: message?.chat?.title ?? null,
+    error: delivery.result.ok
+      ? null
+      : delivery.result.description || "Telegram rejected the media request",
+    httpStatus: delivery.result.httpStatus ?? null,
+  };
+}
+
+function buildProcessingResult(prepared: PreparedMedia) {
+  return prepared.type === "file"
+    ? {
+        delivery: "telegram-url",
+        contentLength: prepared.contentLength,
+        contentType: prepared.contentType,
+      }
+    : {
+        delivery: "multipart-upload",
+        filename: prepared.filename,
+        contentType: prepared.contentType,
+        size: prepared.bytes.byteLength,
+        hls: prepared.hls,
+        segmentCount: prepared.segmentCount,
+        encrypted: prepared.encrypted,
+        remuxed: prepared.remuxed,
+      };
+}
+
+function getTelegramMethodName(mediaType: MediaType) {
+  return mediaType === "audio"
+    ? "sendAudio"
+    : mediaType === "document"
+      ? "sendDocument"
+      : "sendVideo";
+}
+
+function resolveTelegramChatIds(
+  requestedChannels: string[],
+  defaultChatId?: string,
+): string[] {
+  if (requestedChannels.length) {
+    return requestedChannels;
+  }
+
+  const fallback = String(defaultChatId || "").trim();
+
+  return fallback ? [fallback] : [];
 }
 
 function isAuthorized(request: Request, env: Env): boolean {
@@ -394,6 +492,18 @@ function validateRequestBody(body: unknown): ValidationResult {
     };
   }
 
+  const channelValidation = normalizeTelegramChannels(
+    record.channel,
+    record.channels,
+  );
+
+  if (!channelValidation.ok) {
+    return {
+      ok: false,
+      error: channelValidation.error,
+    };
+  }
+
   return {
     ok: true,
     value: {
@@ -403,8 +513,77 @@ function validateRequestBody(body: unknown): ValidationResult {
       parseMode,
       mediaType,
       mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
+      channels: channelValidation.value,
       metadata: normalizeMetadata(record.metadata),
     },
+  };
+}
+
+type ChannelValidationResult =
+  | {
+      ok: true;
+      value: string[];
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+function normalizeTelegramChannels(
+  channelValue: unknown,
+  channelsValue: unknown,
+): ChannelValidationResult {
+  const hasChannel = channelValue !== undefined && channelValue !== null;
+  const hasChannels = channelsValue !== undefined && channelsValue !== null;
+  const values: unknown[] = [];
+
+  if (hasChannel) {
+    values.push(channelValue);
+  }
+
+  if (hasChannels) {
+    if (Array.isArray(channelsValue)) {
+      values.push(...channelsValue);
+    } else {
+      values.push(channelsValue);
+    }
+  }
+
+  const channels: string[] = [];
+
+  for (const value of values) {
+    if (typeof value !== "string" && typeof value !== "number") {
+      return {
+        ok: false,
+        error:
+          "Invalid Telegram channel. channel/channels must contain chat IDs or @channel usernames.",
+      };
+    }
+
+    const normalized = String(value).trim();
+
+    if (!normalized || normalized.length > 128 || /[\u0000-\u001F]/.test(normalized)) {
+      return {
+        ok: false,
+        error: "Invalid Telegram channel value.",
+      };
+    }
+
+    if (!channels.includes(normalized)) {
+      channels.push(normalized);
+    }
+  }
+
+  if (channels.length > 20) {
+    return {
+      ok: false,
+      error: "A maximum of 20 Telegram channels can be targeted per request.",
+    };
+  }
+
+  return {
+    ok: true,
+    value: channels,
   };
 }
 
