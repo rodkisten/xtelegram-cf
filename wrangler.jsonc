@@ -2,28 +2,8 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "generic-telegram-media-relay",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-21",
-  "containers": [
-    {
-      "class_name": "FfmpegContainer",
-      "image": "./Dockerfile",
-      "max_instances": 3
-    }
-  ],
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "FFMPEG_CONTAINER",
-        "class_name": "FfmpegContainer"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": [
-        "FfmpegContainer"
-      ]
-    }
-  ]
+  "compatibility_date": "2026-07-22",
+  "limits": {
+    "cpu_ms": 300000
+  }
 }
