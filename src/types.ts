@@ -4,6 +4,8 @@ export interface Env {
   RELAY_TOKEN: string;
   MAX_MEDIA_BYTES?: string;
   HLS_CONCURRENCY?: string;
+  HLS_MAX_MEDIA_BYTES?: string;
+  MULTIPART_MAX_TOTAL_BYTES?: string;
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";

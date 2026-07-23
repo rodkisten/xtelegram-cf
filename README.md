@@ -289,3 +289,59 @@ Errors now identify the failing stage, such as:
 Multipart responses include a per-file and per-channel delivery list with the Telegram method, HTTP status, Telegram error code, description, response parameters, and raw response body when available.
 
 A multi-file request can return HTTP `207` when only part of the delivery matrix succeeds. A complete Telegram failure returns `502`.
+
+## Efficient large-media architecture
+
+This Worker is optimized to keep memory usage predictable inside the Cloudflare Workers runtime.
+
+### Recommended client behavior
+
+For local files, especially from an iOS Shortcut or Safari Downloads automation, send exactly one file per `POST /send` request and wait for the response before sending the next file.
+
+```text
+file-1.mp4 -> POST /send -> wait for response
+file-2.mp4 -> POST /send -> wait for response
+file-3.mp4 -> POST /send -> wait for response
+```
+
+Avoid sending many large files concurrently. Cloudflare Workers isolates share a 128 MB memory ceiling, so sequential delivery is substantially safer than concurrent buffering.
+
+### Multipart forwarding
+
+Uploaded `File` objects are forwarded directly to Telegram through `FormData`. The Worker no longer converts each incoming file through `arrayBuffer() -> Uint8Array -> Blob`, avoiding a full extra in-memory copy of every uploaded file.
+
+Multiple repeated `file` fields remain supported for convenience, but the Worker enforces a combined multipart forwarding budget. For large batches, one file per request is strongly recommended.
+
+Optional environment variables:
+
+- `MAX_MEDIA_BYTES`: maximum size of one uploaded/direct-buffered file. Hard-capped by the Worker implementation.
+- `MULTIPART_MAX_TOTAL_BYTES`: maximum combined size of files accepted in one multipart request. Defaults to a conservative budget derived from `MAX_MEDIA_BYTES`.
+- `HLS_MAX_MEDIA_BYTES`: separate and intentionally smaller in-memory budget for HLS download/remux. Default: 16 MB. Hard cap: 24 MB.
+- `HLS_CONCURRENCY`: HLS segment download concurrency. Default: 2. Maximum: 4.
+
+### HLS
+
+HLS remuxing still requires in-memory segment and mux buffers because `mux.js` produces an in-memory MP4 result. For this reason HLS has a separate, smaller memory budget and lower default concurrency. Large HLS assets should be muxed on the client/device or by a dedicated media-processing service rather than inside this Worker.
+
+### Processing strategy
+
+```text
+Direct public URL small enough for Telegram remote fetch
+  -> Worker sends URL to Telegram
+
+Direct public URL that must be uploaded
+  -> Worker downloads within the configured bounded buffer
+  -> Worker uploads to Telegram
+
+Local MP4/File
+  -> multipart POST
+  -> File forwarded directly without arrayBuffer duplication
+
+HLS
+  -> resolve playlist
+  -> bounded segment download
+  -> bounded in-memory remux
+  -> upload to Telegram
+```
+
+The Worker intentionally prefers predictable memory use over accepting arbitrarily large HLS mux jobs.

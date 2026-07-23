@@ -10,8 +10,10 @@ import type {
 } from "./types";
 
 const TELEGRAM_REMOTE_URL_LIMIT = 20_000_000;
-const DEFAULT_MAX_MEDIA_BYTES = 32_000_000;
+const DEFAULT_MAX_MEDIA_BYTES = 49_000_000;
 const HARD_MAX_MEDIA_BYTES = 49_000_000;
+const DEFAULT_HLS_MAX_MEDIA_BYTES = 16_000_000;
+const HARD_HLS_MAX_MEDIA_BYTES = 24_000_000;
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm"]);
 const AUDIO_EXTENSIONS = new Set([
@@ -27,6 +29,7 @@ const AUDIO_EXTENSIONS = new Set([
 export interface PrepareMediaOptions {
   maxMediaBytes?: number;
   concurrency?: number;
+  hlsMaxMediaBytes?: number;
   signal?: AbortSignal;
 }
 
@@ -35,6 +38,7 @@ export async function prepareMedia(
   options: PrepareMediaOptions = {},
 ): Promise<PreparedMedia> {
   const maxMediaBytes = clampMaxMediaBytes(options.maxMediaBytes);
+  const hlsMaxMediaBytes = clampHlsMaxMediaBytes(options.hlsMaxMediaBytes);
   const resolver = new HlsResolver({
     maxDepth: 8,
     maxPlaylistBytes: 2 * 1024 * 1024,
@@ -103,7 +107,7 @@ export async function prepareMedia(
   const downloader = new HlsDownloader({
     headers: input.mediaHeaders,
     concurrency: options.concurrency,
-    maxMediaBytes,
+    maxMediaBytes: hlsMaxMediaBytes,
   });
   const downloaded = await downloader.download(resolved, {
     signal: options.signal,
@@ -112,9 +116,9 @@ export async function prepareMedia(
   const baseName = baseNameFromUrl(input.sourceUrl || input.mediaUrl.href);
   const remuxed = remuxer.remux(downloaded, baseName);
 
-  if (remuxed.bytes.byteLength > maxMediaBytes) {
+  if (remuxed.bytes.byteLength > hlsMaxMediaBytes) {
     throw new Error(
-      `Remuxed HLS output is ${remuxed.bytes.byteLength} bytes, above the configured upload limit of ${maxMediaBytes} bytes`,
+      `Remuxed HLS output is ${remuxed.bytes.byteLength} bytes, above the configured in-memory HLS limit of ${hlsMaxMediaBytes} bytes`,
     );
   }
 
@@ -154,10 +158,16 @@ export function resolveConcurrency(rawValue: string | undefined): number {
   const value = Number(rawValue);
 
   if (!Number.isFinite(value)) {
-    return 4;
+    return 2;
   }
 
-  return Math.min(8, Math.max(1, Math.floor(value)));
+  return Math.min(4, Math.max(1, Math.floor(value)));
+}
+
+export function resolveHlsMaxMediaBytes(rawValue: string | undefined): number {
+  const value = Number(rawValue);
+
+  return clampHlsMaxMediaBytes(Number.isFinite(value) ? value : undefined);
 }
 
 export function inferTelegramMediaType(
@@ -185,6 +195,17 @@ export function inferTelegramMediaType(
   }
 
   return "document";
+}
+
+function clampHlsMaxMediaBytes(value?: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_HLS_MAX_MEDIA_BYTES;
+  }
+
+  return Math.min(
+    HARD_HLS_MAX_MEDIA_BYTES,
+    Math.max(1_000_000, Math.floor(value!)),
+  );
 }
 
 function clampMaxMediaBytes(value?: number): number {
