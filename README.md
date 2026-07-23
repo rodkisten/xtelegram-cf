@@ -202,3 +202,90 @@ Not treated as generic decryptable HLS:
 ## Memory note
 
 This implementation intentionally uses a conservative default media budget because HLS assembly and transmuxing can temporarily hold input and output buffers at the same time. For large videos, a storage-backed architecture using R2 plus a dedicated media processing service is safer than raising the in-memory limit aggressively.
+
+
+## Multipart file forwarding
+
+`POST /send` also accepts `multipart/form-data`. This is the preferred mode when the caller already has the final MP4 bytes, such as the All-in-One Video Downloader userscript.
+
+The Worker accepts:
+
+- `payload`: JSON string with the same metadata used by the JSON API.
+- `file`: one or more media files. The field may be repeated.
+- `files`: optional repeated file field. Any non-empty multipart `File` field is accepted.
+- `audioFile`: optional separate audio track. It is forwarded with `sendAudio`.
+
+A single MP4:
+
+```js
+const form = new FormData();
+form.append("payload", JSON.stringify({
+  channels: ["-1001234567890"],
+  caption: "<b>Example</b>",
+  parseMode: "HTML",
+  mediaType: "video",
+  sourceUrl: "https://example.com/post/123",
+}));
+form.append("file", videoBlob, "video.mp4");
+
+await fetch("https://your-worker.example/send", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer <RELAY_TOKEN>",
+  },
+  body: form,
+});
+```
+
+Multiple MP4 files:
+
+```js
+const form = new FormData();
+form.append("payload", JSON.stringify({
+  channels: ["-1001234567890", "-1009876543210"],
+  caption: "Multiple videos",
+  mediaType: "video",
+}));
+
+for (const file of videoFiles) {
+  form.append("file", file, file.name);
+}
+
+await fetch("https://your-worker.example/send", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer <RELAY_TOKEN>",
+  },
+  body: form,
+});
+```
+
+The files are forwarded sequentially to each requested Telegram destination. This avoids duplicating several large multipart bodies in Worker memory at once.
+
+The userscript payload is accepted directly:
+
+```text
+payload = JSON string
+file = prepared video Blob
+ audioFile = optional prepared audio Blob
+```
+
+When a `file` is already present, the Worker does not fetch `mediaUrl` again. It forwards the uploaded bytes directly to Telegram. `mediaUrl`, `videoUrl`, `sourceUrl`, `pageUrl`, `frameUrl`, `title`, `text`, and `metadata` remain available as descriptive payload metadata.
+
+### Verbose error responses
+
+Errors now identify the failing stage, such as:
+
+- `authorization`
+- `parse-multipart`
+- `parse-payload`
+- `validate-channels`
+- `validate-payload`
+- `validate-files`
+- `prepare-media`
+- `telegram`
+- `telegram-forward`
+
+Multipart responses include a per-file and per-channel delivery list with the Telegram method, HTTP status, Telegram error code, description, response parameters, and raw response body when available.
+
+A multi-file request can return HTTP `207` when only part of the delivery matrix succeeds. A complete Telegram failure returns `502`.

@@ -134,15 +134,24 @@ async function requestTelegram<T>(
     };
   }
 
+  const rawResponse = await response.text();
   let result: TelegramApiResult<T>;
 
   try {
-    result = (await response.json()) as TelegramApiResult<T>;
+    result = rawResponse
+      ? (JSON.parse(rawResponse) as TelegramApiResult<T>)
+      : ({ ok: response.ok } as TelegramApiResult<T>);
   } catch {
     return {
       ok: false,
       httpStatus: response.status,
-      description: `Telegram returned HTTP ${response.status}`,
+      requestMethod: method,
+      rawResponse,
+      description: [
+        `Telegram returned a non-JSON response for ${method}.`,
+        `HTTP status: ${response.status} ${response.statusText}`.trim(),
+        rawResponse ? `Response body: ${rawResponse.slice(0, 4000)}` : "Response body was empty.",
+      ].join(" ") ,
     };
   }
 
@@ -151,13 +160,20 @@ async function requestTelegram<T>(
       ...result,
       ok: false,
       httpStatus: response.status,
-      description:
-        result.description ||
-        `Telegram returned HTTP ${response.status}`,
+      requestMethod: method,
+      rawResponse,
+      description: [
+        result.description || `Telegram rejected ${method}.`,
+        `HTTP ${response.status}${result.error_code ? ` / Telegram error ${result.error_code}` : ""}.`,
+      ].join(" ") ,
     };
   }
 
-  return result;
+  return {
+    ...result,
+    httpStatus: response.status,
+    requestMethod: method,
+  };
 }
 
 function getErrorMessage(error: unknown): string {

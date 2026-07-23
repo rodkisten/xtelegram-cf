@@ -99,9 +99,20 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
       {
         ok: false,
         error: "Unauthorized",
+        stage: "authorization",
+        details: {
+          expectedScheme: "Authorization: Bearer <RELAY_TOKEN>",
+          authorizationHeaderPresent: Boolean(request.headers.get("Authorization")),
+        },
       },
       401,
     );
+  }
+
+  const contentType = request.headers.get("Content-Type") || "";
+
+  if (/^multipart\/form-data\b/i.test(contentType)) {
+    return handleMultipartSend(request, env);
   }
 
   let body: unknown;
@@ -688,4 +699,410 @@ function json(value: unknown, status = 200): Response {
       "Cache-Control": "no-store",
     },
   });
+}
+
+
+interface MultipartPayload {
+  channel?: string | number;
+  channels?: Array<string | number> | string | number;
+  caption?: string;
+  parseMode?: string;
+  mediaType?: string;
+  title?: string;
+  text?: string;
+  pageUrl?: string;
+  frameUrl?: string;
+  sourceUrl?: string;
+  mediaUrl?: string;
+  videoUrl?: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface UploadedFileRecord {
+  field: string;
+  file: File;
+  mediaType: MediaType;
+}
+
+async function handleMultipartSend(request: Request, env: Env): Promise<Response> {
+  let form: FormData;
+
+  try {
+    form = await request.formData();
+  } catch (error) {
+    return json(
+      {
+        ok: false,
+        error: "Could not parse multipart/form-data request.",
+        stage: "parse-multipart",
+        details: {
+          reason: getErrorMessage(error),
+          contentType: request.headers.get("Content-Type"),
+          expectedFields: [
+            "payload: JSON string",
+            "file: one or more MP4/video files",
+            "files: optional repeated file field",
+            "audioFile: optional separate audio track",
+          ],
+        },
+      },
+      400,
+    );
+  }
+
+  const rawPayload = form.get("payload");
+  let payload: MultipartPayload = {};
+
+  if (typeof rawPayload === "string" && rawPayload.trim()) {
+    try {
+      const parsed = JSON.parse(rawPayload);
+
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("payload must decode to a JSON object");
+      }
+
+      payload = parsed as MultipartPayload;
+    } catch (error) {
+      return json(
+        {
+          ok: false,
+          error: "Invalid JSON in multipart payload field.",
+          stage: "parse-payload",
+          details: {
+            reason: getErrorMessage(error),
+            payloadPreview: rawPayload.slice(0, 2000),
+          },
+        },
+        400,
+      );
+    }
+  }
+
+  const channelValidation = normalizeTelegramChannels(
+    payload.channel,
+    payload.channels,
+  );
+
+  if (!channelValidation.ok) {
+    return json(
+      {
+        ok: false,
+        error: channelValidation.error,
+        stage: "validate-channels",
+        details: {
+          channel: payload.channel ?? null,
+          channels: payload.channels ?? null,
+        },
+      },
+      400,
+    );
+  }
+
+  const chatIds = resolveTelegramChatIds(
+    channelValidation.value,
+    env.TELEGRAM_CHAT_ID,
+  );
+
+  if (!chatIds.length) {
+    return json(
+      {
+        ok: false,
+        error: "No Telegram channel was provided.",
+        stage: "validate-channels",
+        details: {
+          hint: "Send channel/channels inside payload or configure TELEGRAM_CHAT_ID.",
+        },
+      },
+      400,
+    );
+  }
+
+  const parseMode = normalizeParseMode(payload.parseMode);
+
+  if (payload.parseMode && !parseMode) {
+    return json(
+      {
+        ok: false,
+        error: "Invalid parseMode. Allowed values: HTML, MarkdownV2",
+        stage: "validate-payload",
+        details: {
+          received: payload.parseMode,
+        },
+      },
+      400,
+    );
+  }
+
+  const requestedMediaType = normalizeMediaType(payload.mediaType);
+
+  if (payload.mediaType && !requestedMediaType) {
+    return json(
+      {
+        ok: false,
+        error: "Invalid mediaType. Use video, audio, or document",
+        stage: "validate-payload",
+        details: {
+          received: payload.mediaType,
+        },
+      },
+      400,
+    );
+  }
+
+  const uploadedFiles: UploadedFileRecord[] = [];
+
+  form.forEach((value, field) => {
+    if (!(value instanceof File) || value.size === 0) {
+      return;
+    }
+
+    const mediaType =
+      field === "audioFile"
+        ? "audio"
+        : requestedMediaType || inferUploadedFileMediaType(value);
+
+    uploadedFiles.push({
+      field,
+      file: value,
+      mediaType,
+    });
+  });
+
+  if (!uploadedFiles.length) {
+    return json(
+      {
+        ok: false,
+        error: "Multipart request did not contain any non-empty files.",
+        stage: "validate-files",
+        details: {
+          receivedFields: collectFormFieldNames(form),
+          acceptedFileFields: ["file", "files", "audioFile", "any repeated File field"],
+          hint: "Append one or more File/Blob values to FormData. Example: form.append('file', blob, 'video.mp4').",
+        },
+      },
+      400,
+    );
+  }
+
+  const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+  const oversized = uploadedFiles.filter(({ file }) => file.size > maxMediaBytes);
+
+  if (oversized.length) {
+    return json(
+      {
+        ok: false,
+        error: "One or more uploaded files exceed the configured Worker upload limit.",
+        stage: "validate-files",
+        details: {
+          maxMediaBytes,
+          files: oversized.map(({ field, file }) => ({
+            field,
+            name: file.name,
+            type: file.type,
+            size: file.size,
+          })),
+        },
+      },
+      413,
+    );
+  }
+
+  const caption = normalizeCaption(payload.caption);
+  const deliveries: Array<{
+    fileIndex: number;
+    field: string;
+    filename: string;
+    contentType: string;
+    size: number;
+    mediaType: MediaType;
+    requestedChatId: string;
+    result: TelegramApiResult<TelegramMessage>;
+  }> = [];
+
+  for (let fileIndex = 0; fileIndex < uploadedFiles.length; fileIndex += 1) {
+    const uploaded = uploadedFiles[fileIndex]!;
+    const bytes = new Uint8Array(await uploaded.file.arrayBuffer());
+
+    for (const chatId of chatIds) {
+      let result: TelegramApiResult<TelegramMessage>;
+
+      try {
+        result = await sendTelegramUpload({
+          botToken: env.TELEGRAM_BOT_TOKEN,
+          chatId,
+          bytes,
+          filename: sanitizeUploadedFilename(uploaded.file.name, fileIndex),
+          contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
+          mediaType: uploaded.mediaType,
+          caption,
+          parseMode,
+        });
+      } catch (error) {
+        result = {
+          ok: false,
+          description: `Unexpected exception while forwarding uploaded file: ${getErrorMessage(error)}`,
+        };
+      }
+
+      deliveries.push({
+        fileIndex,
+        field: uploaded.field,
+        filename: uploaded.file.name,
+        contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
+        size: uploaded.file.size,
+        mediaType: uploaded.mediaType,
+        requestedChatId: chatId,
+        result,
+      });
+    }
+  }
+
+  const failed = deliveries.filter((entry) => !entry.result.ok);
+  const succeeded = deliveries.filter((entry) => entry.result.ok);
+
+  const formattedDeliveries = deliveries.map((entry) => ({
+    fileIndex: entry.fileIndex,
+    field: entry.field,
+    filename: entry.filename,
+    contentType: entry.contentType,
+    size: entry.size,
+    mediaType: entry.mediaType,
+    requestedChatId: entry.requestedChatId,
+    ok: entry.result.ok,
+    telegramMethod: entry.result.requestMethod || getTelegramMethodName(entry.mediaType),
+    httpStatus: entry.result.httpStatus ?? null,
+    telegramErrorCode: entry.result.error_code ?? null,
+    description: entry.result.description ?? null,
+    parameters: entry.result.parameters ?? null,
+    rawResponse: entry.result.rawResponse ?? null,
+    messageId: entry.result.result?.message_id ?? null,
+    chatId: entry.result.result?.chat?.id ?? null,
+    chatTitle: entry.result.result?.chat?.title ?? null,
+  }));
+
+  if (failed.length) {
+    console.error("[media-relay] Multipart forwarding partially or fully failed", {
+      files: uploadedFiles.map(({ field, file, mediaType }) => ({
+        field,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        mediaType,
+      })),
+      channels: chatIds,
+      deliveries: formattedDeliveries,
+      payload,
+    });
+
+    return json(
+      {
+        ok: false,
+        error:
+          succeeded.length > 0
+            ? `${failed.length} of ${deliveries.length} Telegram deliveries failed.`
+            : "All Telegram deliveries failed.",
+        stage: "telegram-forward",
+        summary: {
+          filesReceived: uploadedFiles.length,
+          channelsRequested: chatIds.length,
+          deliveriesAttempted: deliveries.length,
+          deliveriesSucceeded: succeeded.length,
+          deliveriesFailed: failed.length,
+        },
+        files: uploadedFiles.map(({ field, file, mediaType }, index) => ({
+          index,
+          field,
+          filename: file.name,
+          contentType: file.type || inferUploadedContentType(file.name),
+          size: file.size,
+          mediaType,
+        })),
+        channels: chatIds,
+        telegram: {
+          deliveries: formattedDeliveries,
+        },
+        payload,
+      },
+      succeeded.length > 0 ? 207 : 502,
+    );
+  }
+
+  return json({
+    ok: true,
+    message:
+      uploadedFiles.length === 1
+        ? "Uploaded file forwarded to Telegram"
+        : `${uploadedFiles.length} uploaded files forwarded to Telegram`,
+    mode: "multipart-file-forward",
+    summary: {
+      filesReceived: uploadedFiles.length,
+      channelsRequested: chatIds.length,
+      deliveriesAttempted: deliveries.length,
+      deliveriesSucceeded: succeeded.length,
+      deliveriesFailed: 0,
+    },
+    files: uploadedFiles.map(({ field, file, mediaType }, index) => ({
+      index,
+      field,
+      filename: file.name,
+      contentType: file.type || inferUploadedContentType(file.name),
+      size: file.size,
+      mediaType,
+    })),
+    channels: chatIds,
+    telegram: {
+      deliveries: formattedDeliveries,
+    },
+    payload,
+  });
+}
+
+function inferUploadedFileMediaType(file: File): MediaType {
+  const contentType = String(file.type || "").toLowerCase();
+  const filename = String(file.name || "").toLowerCase();
+
+  if (contentType.startsWith("video/") || /\.(mp4|m4v|mov|webm)$/i.test(filename)) {
+    return "video";
+  }
+
+  if (contentType.startsWith("audio/") || /\.(mp3|m4a|aac|ogg|oga|wav|flac)$/i.test(filename)) {
+    return "audio";
+  }
+
+  return "document";
+}
+
+function inferUploadedContentType(filename: string): string {
+  const value = String(filename || "").toLowerCase();
+
+  if (/\.mp4$/i.test(value)) return "video/mp4";
+  if (/\.webm$/i.test(value)) return "video/webm";
+  if (/\.(m4v|mov)$/i.test(value)) return "video/mp4";
+  if (/\.mp3$/i.test(value)) return "audio/mpeg";
+  if (/\.m4a$/i.test(value)) return "audio/mp4";
+  if (/\.aac$/i.test(value)) return "audio/aac";
+
+  return "application/octet-stream";
+}
+
+function sanitizeUploadedFilename(value: string, index: number): string {
+  const normalized = String(value || `media-${index + 1}`)
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+
+  return normalized || `media-${index + 1}.mp4`;
+}
+
+function collectFormFieldNames(form: FormData): string[] {
+  const fields: string[] = [];
+
+  form.forEach((_value, key) => {
+    if (!fields.includes(key)) {
+      fields.push(key);
+    }
+  });
+
+  return fields;
 }
