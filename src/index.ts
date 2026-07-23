@@ -2,6 +2,7 @@ import {
   inferTelegramMediaType,
   prepareMedia,
   resolveConcurrency,
+  resolveHlsMaxMediaBytes,
   resolveMaxMediaBytes,
 } from "./media";
 import {
@@ -160,11 +161,13 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
 
   const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
   const concurrency = resolveConcurrency(env.HLS_CONCURRENCY);
+  const hlsMaxMediaBytes = resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES);
   let prepared: PreparedMedia;
 
   try {
     prepared = await prepareMedia(input, {
       maxMediaBytes,
+      hlsMaxMediaBytes,
       concurrency,
       signal: request.signal,
     });
@@ -344,7 +347,9 @@ async function sendPreparedMediaToChats(options: {
         : await sendTelegramUpload({
             botToken: options.botToken,
             chatId,
-            bytes: options.prepared.bytes,
+            file: new Blob([options.prepared.bytes], {
+              type: options.prepared.contentType,
+            }),
             filename: options.prepared.filename,
             contentType: options.prepared.contentType,
             mediaType: options.mediaType,
@@ -907,6 +912,37 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
     );
   }
 
+  const multipartTotalBytes = uploadedFiles.reduce((sum, entry) => {
+    return sum + entry.file.size;
+  }, 0);
+  const multipartMaxTotalBytes = resolveMultipartMaxTotalBytes(
+    env.MULTIPART_MAX_TOTAL_BYTES,
+    maxMediaBytes,
+  );
+
+  if (multipartTotalBytes > multipartMaxTotalBytes) {
+    return json(
+      {
+        ok: false,
+        error: "The combined multipart file size exceeds the safe per-request forwarding budget.",
+        stage: "validate-files",
+        details: {
+          multipartTotalBytes,
+          multipartMaxTotalBytes,
+          recommendation:
+            "Send one file per POST and wait for the response before sending the next file.",
+          files: uploadedFiles.map(({ field, file }) => ({
+            field,
+            name: file.name,
+            type: file.type,
+            size: file.size,
+          })),
+        },
+      },
+      413,
+    );
+  }
+
   const caption = normalizeCaption(payload.caption);
   const deliveries: Array<{
     fileIndex: number;
@@ -921,7 +957,6 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
 
   for (let fileIndex = 0; fileIndex < uploadedFiles.length; fileIndex += 1) {
     const uploaded = uploadedFiles[fileIndex]!;
-    const bytes = new Uint8Array(await uploaded.file.arrayBuffer());
 
     for (const chatId of chatIds) {
       let result: TelegramApiResult<TelegramMessage>;
@@ -930,7 +965,7 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
         result = await sendTelegramUpload({
           botToken: env.TELEGRAM_BOT_TOKEN,
           chatId,
-          bytes,
+          file: uploaded.file,
           filename: sanitizeUploadedFilename(uploaded.file.name, fileIndex),
           contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
           mediaType: uploaded.mediaType,
@@ -1093,6 +1128,20 @@ function sanitizeUploadedFilename(value: string, index: number): string {
     .slice(0, 160);
 
   return normalized || `media-${index + 1}.mp4`;
+}
+
+function resolveMultipartMaxTotalBytes(
+  rawValue: string | undefined,
+  perFileMaximum: number,
+): number {
+  const configured = Number(rawValue);
+  const fallback = Math.min(64_000_000, perFileMaximum * 2);
+
+  if (!Number.isFinite(configured)) {
+    return fallback;
+  }
+
+  return Math.min(80_000_000, Math.max(perFileMaximum, Math.floor(configured)));
 }
 
 function collectFormFieldNames(form: FormData): string[] {

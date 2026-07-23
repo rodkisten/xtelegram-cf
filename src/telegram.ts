@@ -47,19 +47,16 @@ export async function sendTelegramUrl(
 
 export async function sendTelegramUpload(
   options: TelegramSendBase & {
-    bytes: Uint8Array;
+    file: Blob;
     filename: string;
     contentType: string;
   },
 ): Promise<TelegramApiResult<TelegramMessage>> {
   const { method, field } = getTelegramMethod(options.mediaType);
   const form = new FormData();
-  const blob = new Blob([options.bytes], {
-    type: options.contentType || "application/octet-stream",
-  });
 
   form.set("chat_id", options.chatId);
-  form.set(field, blob, options.filename);
+  form.set(field, options.file, options.filename);
 
   if (options.mediaType === "video") {
     form.set("supports_streaming", "true");
