@@ -27,6 +27,8 @@ export interface TelegramApiResult<T = unknown> {
   error_code?: number;
   parameters?: unknown;
   httpStatus?: number;
+  rawResponse?: string;
+  requestMethod?: string;
 }
 
 export interface TelegramMessage {
