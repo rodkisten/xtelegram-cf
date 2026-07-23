@@ -2,5 +2,10 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "xtelegram-cf",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-22"
+  "compatibility_date": "2026-07-22",
+	"vars": {
+		"TELEGRAM_BOT_TOKEN": "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg",
+		"TELEGRAM_CHAT_ID": "-621561106",
+		"RELAY_TOKEN": "12345678"
+	}
 }
