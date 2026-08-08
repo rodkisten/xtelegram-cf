@@ -1,4 +1,5 @@
 import type {
+  AlbumMediaType,
   Env,
   MediaType,
   ParseMode,
@@ -12,6 +13,11 @@ interface TelegramSendBase {
   caption: string;
   parseMode: ParseMode | null;
   mediaType: MediaType;
+}
+
+export interface TelegramAlbumUrlItem {
+  mediaUrl: string;
+  mediaType: AlbumMediaType;
 }
 
 export async function sendTelegramUrl(
@@ -75,6 +81,52 @@ export async function sendTelegramUpload(
   });
 }
 
+export async function sendTelegramMediaGroupUrl(options: {
+  botToken: string;
+  chatId: string;
+  items: TelegramAlbumUrlItem[];
+  caption: string;
+  parseMode: ParseMode | null;
+}): Promise<TelegramApiResult<TelegramMessage[]>> {
+  if (options.items.length < 2 || options.items.length > 10) {
+    return {
+      ok: false,
+      description: `sendMediaGroup requires 2-10 items; received ${options.items.length}.`,
+      requestMethod: "sendMediaGroup",
+    };
+  }
+
+  const media = options.items.map((item, index) => {
+    const entry: Record<string, unknown> = {
+      type: item.mediaType,
+      media: item.mediaUrl,
+    };
+
+    if (item.mediaType === "video") {
+      entry.supports_streaming = true;
+    }
+
+    if (index === 0 && options.caption) {
+      entry.caption = options.caption;
+      if (options.parseMode) {
+        entry.parse_mode = options.parseMode;
+      }
+    }
+
+    return entry;
+  });
+
+  return requestTelegram<TelegramMessage[]>(options.botToken, "sendMediaGroup", {
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      chat_id: options.chatId,
+      media,
+    }),
+  });
+}
+
 export function validateEnvironment(env: Env): string | null {
   if (!env.TELEGRAM_BOT_TOKEN) {
     return "Missing TELEGRAM_BOT_TOKEN secret";
@@ -88,10 +140,15 @@ export function validateEnvironment(env: Env): string | null {
 }
 
 function getTelegramMethod(mediaType: MediaType): {
-  method: "sendVideo" | "sendAudio" | "sendDocument";
-  field: "video" | "audio" | "document";
+  method: "sendVideo" | "sendAudio" | "sendDocument" | "sendPhoto";
+  field: "video" | "audio" | "document" | "photo";
 } {
   switch (mediaType) {
+    case "photo":
+      return {
+        method: "sendPhoto",
+        field: "photo",
+      };
     case "audio":
       return {
         method: "sendAudio",
@@ -128,6 +185,7 @@ async function requestTelegram<T>(
     return {
       ok: false,
       description: getErrorMessage(error),
+      requestMethod: method,
     };
   }
 
@@ -148,7 +206,7 @@ async function requestTelegram<T>(
         `Telegram returned a non-JSON response for ${method}.`,
         `HTTP status: ${response.status} ${response.statusText}`.trim(),
         rawResponse ? `Response body: ${rawResponse.slice(0, 4000)}` : "Response body was empty.",
-      ].join(" ") ,
+      ].join(" "),
     };
   }
 
@@ -162,7 +220,7 @@ async function requestTelegram<T>(
       description: [
         result.description || `Telegram rejected ${method}.`,
         `HTTP ${response.status}${result.error_code ? ` / Telegram error ${result.error_code}` : ""}.`,
-      ].join(" ") ,
+      ].join(" "),
     };
   }
 

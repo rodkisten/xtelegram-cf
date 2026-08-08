@@ -16,6 +16,7 @@ const DEFAULT_HLS_MAX_MEDIA_BYTES = 16_000_000;
 const HARD_HLS_MAX_MEDIA_BYTES = 24_000_000;
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm"]);
+const PHOTO_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avif", "gif"]);
 const AUDIO_EXTENSIONS = new Set([
   "mp3",
   "m4a",
@@ -176,6 +177,10 @@ export function inferTelegramMediaType(
 ): MediaType {
   const type = getBaseContentType(contentType);
 
+  if (type.startsWith("image/")) {
+    return "photo";
+  }
+
   if (type.startsWith("video/")) {
     return "video";
   }
@@ -185,6 +190,10 @@ export function inferTelegramMediaType(
   }
 
   const extension = getFileExtension(mediaUrl);
+
+  if (PHOTO_EXTENSIONS.has(extension)) {
+    return "photo";
+  }
 
   if (VIDEO_EXTENSIONS.has(extension)) {
     return "video";
@@ -256,6 +265,11 @@ async function downloadDirectFile(
 
 function inferContentTypeFromUrl(value: string): string {
   const extension = getFileExtension(value);
+
+  if (PHOTO_EXTENSIONS.has(extension)) {
+    if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+    return `image/${extension}`;
+  }
 
   if (VIDEO_EXTENSIONS.has(extension)) {
     return extension === "webm" ? "video/webm" : "video/mp4";

@@ -9,15 +9,39 @@ export interface Env {
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";
-export type MediaType = "video" | "audio" | "document";
+export type MediaType = "video" | "audio" | "document" | "photo";
+export type AlbumMediaType = "video" | "photo";
 
 export interface RelayInput {
   mediaUrl: URL;
   sourceUrl: string | null;
+  pageUrl: string | null;
+  provider: string | null;
+  title: string;
+  text: string;
   caption: string;
   parseMode: ParseMode | null;
   mediaType: MediaType | null;
   mediaHeaders: Record<string, string>;
+  channels: string[];
+  metadata: Record<string, string> | null;
+}
+
+export interface RelayAlbumItem {
+  mediaUrl: URL;
+  mediaType: AlbumMediaType;
+  metadata: Record<string, string> | null;
+}
+
+export interface RelayAlbumInput {
+  items: RelayAlbumItem[];
+  sourceUrl: string | null;
+  pageUrl: string | null;
+  provider: string | null;
+  title: string;
+  text: string;
+  caption: string;
+  parseMode: ParseMode | null;
   channels: string[];
   metadata: Record<string, string> | null;
 }

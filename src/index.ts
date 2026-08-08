@@ -10,15 +10,18 @@ import {
   normalizePublicHttpUrl,
 } from "./lib/http";
 import {
+  sendTelegramMediaGroupUrl,
   sendTelegramUpload,
   sendTelegramUrl,
   validateEnvironment,
 } from "./telegram";
 import type {
+  AlbumMediaType,
   Env,
   MediaType,
   ParseMode,
   PreparedMedia,
+  RelayAlbumInput,
   RelayInput,
   TelegramApiResult,
   TelegramMessage,
@@ -44,6 +47,7 @@ const ALLOWED_MEDIA_TYPES = new Set<MediaType>([
   "video",
   "audio",
   "document",
+  "photo",
 ]);
 
 export default {
@@ -76,8 +80,9 @@ function handleHealth(): Response {
   return json({
     ok: true,
     service: "generic-telegram-media-relay",
+    version: "2.2.0",
     status: "online",
-    runtime: "typescript-hls-remux",
+    runtime: "typescript-hls-remux-photo-album",
     timestamp: new Date().toISOString(),
   });
 }
@@ -128,6 +133,22 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
       },
       400,
     );
+  }
+
+  const albumValidation = validateAlbumRequestBody(body);
+
+  if (albumValidation.kind === "invalid") {
+    return json(
+      {
+        ok: false,
+        error: albumValidation.error,
+      },
+      400,
+    );
+  }
+
+  if (albumValidation.kind === "valid") {
+    return handleJsonAlbumSend(albumValidation.value, env);
   }
 
   const validation = validateRequestBody(body);
@@ -316,6 +337,160 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
   });
 }
 
+interface TelegramAlbumBatchDelivery {
+  requestedChatId: string;
+  batchIndex: number;
+  itemOffset: number;
+  itemCount: number;
+  result: TelegramApiResult<TelegramMessage[]>;
+}
+
+async function handleJsonAlbumSend(
+  input: RelayAlbumInput,
+  env: Env,
+): Promise<Response> {
+  const chatIds = resolveTelegramChatIds(input.channels, env.TELEGRAM_CHAT_ID);
+
+  if (!chatIds.length) {
+    return json(
+      {
+        ok: false,
+        error:
+          "No Telegram channel was provided. Send channel/channels in the request or configure TELEGRAM_CHAT_ID as the default.",
+      },
+      400,
+    );
+  }
+
+  const batches: RelayAlbumInput["items"][] = [];
+  let batchCursor = 0;
+
+  while (batchCursor < input.items.length) {
+    const remaining = input.items.length - batchCursor;
+    const batchSize = remaining > 10 && remaining % 10 === 1 ? 9 : Math.min(10, remaining);
+    batches.push(input.items.slice(batchCursor, batchCursor + batchSize));
+    batchCursor += batchSize;
+  }
+
+  const deliveries: TelegramAlbumBatchDelivery[] = [];
+
+  for (const chatId of chatIds) {
+    let itemOffset = 0;
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      const batch = batches[batchIndex]!;
+      const result = await sendTelegramMediaGroupUrl({
+        botToken: env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        items: batch.map((item) => ({
+          mediaUrl: item.mediaUrl.href,
+          mediaType: item.mediaType,
+        })),
+        caption: batchIndex === 0 ? input.caption : "",
+        parseMode: batchIndex === 0 ? input.parseMode : null,
+      });
+
+      deliveries.push({
+        requestedChatId: chatId,
+        batchIndex,
+        itemOffset,
+        itemCount: batch.length,
+        result,
+      });
+      itemOffset += batch.length;
+    }
+  }
+
+  const failed = deliveries.filter((delivery) => !delivery.result.ok);
+  const formatted = deliveries.map((delivery) => ({
+    requestedChatId: delivery.requestedChatId,
+    batchIndex: delivery.batchIndex,
+    itemOffset: delivery.itemOffset,
+    itemCount: delivery.itemCount,
+    ok: delivery.result.ok,
+    httpStatus: delivery.result.httpStatus ?? null,
+    error: delivery.result.ok
+      ? null
+      : delivery.result.description || "Telegram rejected sendMediaGroup",
+    messageIds: Array.isArray(delivery.result.result)
+      ? delivery.result.result.map((message) => message?.message_id ?? null)
+      : [],
+  }));
+
+  if (failed.length) {
+    console.error("[media-relay] Telegram rejected one or more album batches", {
+      sourceUrl: input.sourceUrl,
+      pageUrl: input.pageUrl,
+      provider: input.provider,
+      channels: chatIds,
+      items: input.items.map((item) => ({
+        url: item.mediaUrl.href,
+        mediaType: item.mediaType,
+      })),
+      deliveries: formatted,
+      metadata: input.metadata,
+    });
+
+    return json(
+      {
+        ok: false,
+        error:
+          failed[0]?.result.description ||
+          "Telegram rejected one or more album batches",
+        stage: "telegram-media-group",
+        source: {
+          sourceUrl: input.sourceUrl,
+          pageUrl: input.pageUrl,
+        },
+        channels: chatIds,
+        media: {
+          count: input.items.length,
+          batches: batches.length,
+          items: input.items.map((item, index) => ({
+            index,
+            mediaType: item.mediaType,
+            mediaUrl: item.mediaUrl.href,
+          })),
+        },
+        telegram: {
+          method: "sendMediaGroup",
+          deliveries: formatted,
+        },
+        metadata: input.metadata,
+      },
+      502,
+    );
+  }
+
+  return json({
+    ok: true,
+    message:
+      chatIds.length === 1
+        ? `Album with ${input.items.length} media items sent to Telegram`
+        : `Album with ${input.items.length} media items sent to ${chatIds.length} Telegram channels`,
+    mode: "telegram-media-group",
+    source: {
+      sourceUrl: input.sourceUrl,
+      pageUrl: input.pageUrl,
+    },
+    channels: chatIds,
+    media: {
+      count: input.items.length,
+      batches: batches.length,
+      items: input.items.map((item, index) => ({
+        index,
+        mediaType: item.mediaType,
+        mediaUrl: item.mediaUrl.href,
+      })),
+    },
+    telegram: {
+      method: "sendMediaGroup",
+      deliveries: formatted,
+    },
+    metadata: input.metadata,
+  });
+}
+
 interface TelegramDelivery {
   requestedChatId: string;
   result: TelegramApiResult<TelegramMessage>;
@@ -402,11 +577,13 @@ function buildProcessingResult(prepared: PreparedMedia) {
 }
 
 function getTelegramMethodName(mediaType: MediaType) {
-  return mediaType === "audio"
-    ? "sendAudio"
-    : mediaType === "document"
-      ? "sendDocument"
-      : "sendVideo";
+  return mediaType === "photo"
+    ? "sendPhoto"
+    : mediaType === "audio"
+      ? "sendAudio"
+      : mediaType === "document"
+        ? "sendDocument"
+        : "sendVideo";
 }
 
 function resolveTelegramChatIds(
@@ -475,6 +652,7 @@ function validateRequestBody(body: unknown): ValidationResult {
   const record = body as Record<string, unknown>;
   const rawMediaUrl =
     record.mediaUrl ??
+    record.photoUrl ??
     record.videoUrl ??
     record.fileUrl ??
     record.url;
@@ -483,12 +661,13 @@ function validateRequestBody(body: unknown): ValidationResult {
   if (!mediaUrl) {
     return {
       ok: false,
-      error: "Invalid mediaUrl or videoUrl",
+      error: "Invalid mediaUrl, photoUrl, or videoUrl",
     };
   }
 
+  const pageUrl = normalizeOptionalSourceUrl(record.pageUrl);
   const sourceUrl = normalizeOptionalSourceUrl(
-    record.sourceUrl ?? record.tweetUrl,
+    record.sourceUrl ?? record.tweetUrl ?? record.pageUrl,
   );
   const parseMode = normalizeParseMode(record.parseMode);
 
@@ -504,7 +683,7 @@ function validateRequestBody(body: unknown): ValidationResult {
   if (record.mediaType && !mediaType) {
     return {
       ok: false,
-      error: "Invalid mediaType. Use video, audio, or document",
+      error: "Invalid mediaType. Use photo, video, audio, or document",
     };
   }
 
@@ -525,14 +704,156 @@ function validateRequestBody(body: unknown): ValidationResult {
     value: {
       mediaUrl,
       sourceUrl,
-      caption: normalizeCaption(record.caption),
-      parseMode,
+      pageUrl,
+      provider: normalizeOptionalText(record.provider, 120),
+      title: normalizeOptionalText(record.title, 1000),
+      text: normalizeOptionalText(record.text, 20_000),
+      caption: resolvePayloadCaption(record),
+      parseMode: normalizeCaption(record.caption) ? parseMode : null,
       mediaType,
       mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
       channels: channelValidation.value,
       metadata: normalizeMetadata(record.metadata),
     },
   };
+}
+
+type AlbumValidationResult =
+  | { kind: "none" }
+  | { kind: "valid"; value: RelayAlbumInput }
+  | { kind: "invalid"; error: string };
+
+function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { kind: "none" };
+  }
+
+  const record = body as Record<string, unknown>;
+  const rawItems = Array.isArray(record.mediaItems)
+    ? record.mediaItems
+    : Array.isArray(record.mediaUrls)
+      ? record.mediaUrls
+      : Array.isArray(record.photoUrls)
+        ? record.photoUrls.map((mediaUrl) => ({ mediaUrl, mediaType: "photo" }))
+        : null;
+
+  if (!rawItems) {
+    return { kind: "none" };
+  }
+
+  if (rawItems.length < 2) {
+    return {
+      kind: "invalid",
+      error: "mediaItems/mediaUrls must contain at least 2 items for an album request.",
+    };
+  }
+
+  if (rawItems.length > 100) {
+    return {
+      kind: "invalid",
+      error: "A maximum of 100 media items can be relayed in one album request.",
+    };
+  }
+
+  const items: RelayAlbumInput["items"] = [];
+
+  for (let index = 0; index < rawItems.length; index += 1) {
+    const rawItem = rawItems[index];
+    let rawUrl: unknown = rawItem;
+    let rawType: unknown = null;
+    let itemMetadata: unknown = null;
+
+    if (rawItem && typeof rawItem === "object" && !Array.isArray(rawItem)) {
+      const item = rawItem as Record<string, unknown>;
+      rawUrl = item.mediaUrl ?? item.photoUrl ?? item.videoUrl ?? item.url;
+      rawType =
+        item.mediaType ??
+        (item.photoUrl ? "photo" : item.videoUrl ? "video" : null);
+      itemMetadata = item.metadata;
+    }
+
+    const mediaUrl = normalizePublicHttpUrl(rawUrl);
+    if (!mediaUrl) {
+      return {
+        kind: "invalid",
+        error: `Invalid public media URL at mediaItems[${index}].`,
+      };
+    }
+
+    if (/\.m3u8(?:$|[?#])/i.test(mediaUrl.href) || /\.mpd(?:$|[?#])/i.test(mediaUrl.href)) {
+      return {
+        kind: "invalid",
+        error: `Album item ${index + 1} is HLS/DASH. Albums require direct photo/video URLs; use the single-media endpoint for prepared streaming media.`,
+      };
+    }
+
+    const mediaType = normalizeAlbumMediaType(rawType, mediaUrl.href);
+    if (!mediaType) {
+      return {
+        kind: "invalid",
+        error: `Invalid album mediaType at item ${index + 1}. Use photo or video.`,
+      };
+    }
+
+    items.push({
+      mediaUrl,
+      mediaType,
+      metadata: normalizeMetadata(itemMetadata),
+    });
+  }
+
+  const parseMode = normalizeParseMode(record.parseMode);
+  if (record.parseMode && !parseMode) {
+    return {
+      kind: "invalid",
+      error: "Invalid parseMode. Allowed values: HTML, MarkdownV2",
+    };
+  }
+
+  const channelValidation = normalizeTelegramChannels(
+    record.channel,
+    record.channels,
+  );
+  if (!channelValidation.ok) {
+    return { kind: "invalid", error: channelValidation.error };
+  }
+
+  const pageUrl = normalizeOptionalSourceUrl(record.pageUrl);
+  const explicitCaption = normalizeCaption(record.caption);
+
+  return {
+    kind: "valid",
+    value: {
+      items,
+      sourceUrl: normalizeOptionalSourceUrl(
+        record.sourceUrl ?? record.tweetUrl ?? record.pageUrl,
+      ),
+      pageUrl,
+      provider: normalizeOptionalText(record.provider, 120),
+      title: normalizeOptionalText(record.title, 1000),
+      text: normalizeOptionalText(record.text, 20_000),
+      caption: resolvePayloadCaption(record),
+      parseMode: explicitCaption ? parseMode : null,
+      channels: channelValidation.value,
+      metadata: normalizeMetadata(record.metadata),
+    },
+  };
+}
+
+function normalizeAlbumMediaType(
+  value: unknown,
+  mediaUrl: string,
+): AlbumMediaType | null {
+  if (value) {
+    const normalized = String(value).toLowerCase();
+    return normalized === "photo" || normalized === "video"
+      ? normalized
+      : null;
+  }
+
+  return /\.(mp4|m4v|mov|webm)(?:$|[?#])/i.test(mediaUrl)
+    ? "video"
+    : "photo";
 }
 
 type ChannelValidationResult =
@@ -601,6 +922,24 @@ function normalizeTelegramChannels(
     ok: true,
     value: channels,
   };
+}
+
+function normalizeOptionalText(value: unknown, maximumLength: number): string {
+  if (value == null) return "";
+  return String(value).trim().slice(0, maximumLength);
+}
+
+function resolvePayloadCaption(record: Record<string, unknown>): string {
+  const explicit = normalizeCaption(record.caption);
+  if (explicit) return explicit;
+
+  const title = normalizeOptionalText(record.title, 1000);
+  const text = normalizeOptionalText(record.text, 20_000);
+  const pageUrl = normalizeOptionalSourceUrl(
+    record.pageUrl ?? record.sourceUrl ?? record.tweetUrl,
+  );
+
+  return [title, text, pageUrl || ""].filter(Boolean).join("\n\n");
 }
 
 function normalizeCaption(value: unknown): string {
@@ -719,7 +1058,9 @@ interface MultipartPayload {
   frameUrl?: string;
   sourceUrl?: string;
   mediaUrl?: string;
+  photoUrl?: string;
   videoUrl?: string;
+  provider?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -745,7 +1086,7 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
           contentType: request.headers.get("Content-Type"),
           expectedFields: [
             "payload: JSON string",
-            "file: one or more MP4/video files",
+            "file: one or more photo/video/audio/document files",
             "files: optional repeated file field",
             "audioFile: optional separate audio track",
           ],
@@ -844,7 +1185,7 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
     return json(
       {
         ok: false,
-        error: "Invalid mediaType. Use video, audio, or document",
+        error: "Invalid mediaType. Use photo, video, audio, or document",
         stage: "validate-payload",
         details: {
           received: payload.mediaType,
@@ -943,7 +1284,7 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
     );
   }
 
-  const caption = normalizeCaption(payload.caption);
+  const caption = resolvePayloadCaption(payload as Record<string, unknown>);
   const deliveries: Array<{
     fileIndex: number;
     field: string;
@@ -969,8 +1310,8 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
           filename: sanitizeUploadedFilename(uploaded.file.name, fileIndex),
           contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
           mediaType: uploaded.mediaType,
-          caption,
-          parseMode,
+          caption: fileIndex === 0 ? caption : "",
+          parseMode: fileIndex === 0 ? parseMode : null,
         });
       } catch (error) {
         result = {
@@ -1096,6 +1437,10 @@ function inferUploadedFileMediaType(file: File): MediaType {
   const contentType = String(file.type || "").toLowerCase();
   const filename = String(file.name || "").toLowerCase();
 
+  if (contentType.startsWith("image/") || /\.(jpe?g|png|webp|avif|gif)$/i.test(filename)) {
+    return "photo";
+  }
+
   if (contentType.startsWith("video/") || /\.(mp4|m4v|mov|webm)$/i.test(filename)) {
     return "video";
   }
@@ -1110,6 +1455,11 @@ function inferUploadedFileMediaType(file: File): MediaType {
 function inferUploadedContentType(filename: string): string {
   const value = String(filename || "").toLowerCase();
 
+  if (/\.jpe?g$/i.test(value)) return "image/jpeg";
+  if (/\.png$/i.test(value)) return "image/png";
+  if (/\.webp$/i.test(value)) return "image/webp";
+  if (/\.avif$/i.test(value)) return "image/avif";
+  if (/\.gif$/i.test(value)) return "image/gif";
   if (/\.mp4$/i.test(value)) return "video/mp4";
   if (/\.webm$/i.test(value)) return "video/webm";
   if (/\.(m4v|mov)$/i.test(value)) return "video/mp4";
