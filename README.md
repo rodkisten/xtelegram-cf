@@ -1,4 +1,4 @@
-# Generic Telegram Media Relay v2
+# Generic Telegram Media Relay v2.2
 
 Cloudflare Worker written in TypeScript with a native HLS pipeline.
 
@@ -151,6 +151,50 @@ Send to multiple channels:
 
 When both `channel` and `channels` are present, the Worker merges and de-duplicates them. When neither is present, it falls back to `TELEGRAM_CHAT_ID`. The media is resolved/downloaded/remuxed once, then delivered to each requested destination sequentially.
 
+
+## Photo and carousel support
+
+The same `/send` endpoint now accepts photos as first-class Telegram media. Set `mediaType` to `photo` and send `mediaUrl` or `photoUrl`. The Worker routes the request through Telegram `sendPhoto`, including multipart uploads when the caller already has the image bytes.
+
+Single photo:
+
+```json
+{
+  "mediaUrl": "https://pbs.twimg.com/media/example.jpg?format=jpg&name=orig",
+  "photoUrl": "https://pbs.twimg.com/media/example.jpg?format=jpg&name=orig",
+  "mediaType": "photo",
+  "title": "@author",
+  "text": "Full tweet text",
+  "pageUrl": "https://x.com/author/status/123",
+  "caption": "<b>@author</b>\n\nFull tweet text\n\n<a href=\"https://x.com/author/status/123\">x.com</a>",
+  "parseMode": "HTML",
+  "channels": ["-1001234567890"]
+}
+```
+
+Photo/video carousel or album:
+
+```json
+{
+  "mediaItems": [
+    { "mediaUrl": "https://example.com/1.jpg", "mediaType": "photo" },
+    { "mediaUrl": "https://example.com/2.jpg", "mediaType": "photo" },
+    { "mediaUrl": "https://example.com/3.mp4", "mediaType": "video" }
+  ],
+  "provider": "instagram",
+  "title": "Instagram",
+  "text": "Full Instagram post/caption text",
+  "pageUrl": "https://www.instagram.com/p/example/",
+  "caption": "<b>Instagram</b>\n\nFull Instagram post/caption text\n\n<a href=\"https://www.instagram.com/p/example/\">instagram.com</a>",
+  "parseMode": "HTML",
+  "channels": ["-1001234567890"]
+}
+```
+
+Album requests accept 2-100 direct HTTP(S) photo/video items. The Worker splits them into Telegram `sendMediaGroup` batches of at most 10 items and places the post caption on the first item of the first batch. HLS/DASH items remain on the single-media path so they can be prepared/remuxed first.
+
+For compatibility with the All-in-One Video Downloader userscript, the old item-by-item payload still works. The Worker also accepts `photoUrl` as an alias for `mediaUrl`. If `caption` is omitted, the Worker builds a plain-text caption from `title`, `text`, and `pageUrl`.
+
 ## Supported HLS behavior
 
 - Nested master playlists.
@@ -211,9 +255,10 @@ This implementation intentionally uses a conservative default media budget becau
 The Worker accepts:
 
 - `payload`: JSON string with the same metadata used by the JSON API.
-- `file`: one or more media files. The field may be repeated.
+- `file`: one or more media files, including photos. The field may be repeated.
 - `files`: optional repeated file field. Any non-empty multipart `File` field is accepted.
 - `audioFile`: optional separate audio track. It is forwarded with `sendAudio`.
+- Image uploads (`image/jpeg`, `image/png`, `image/webp`, `image/avif`, `image/gif`) are forwarded with `sendPhoto`.
 
 A single MP4:
 
