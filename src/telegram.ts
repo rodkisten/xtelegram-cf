@@ -18,6 +18,8 @@ interface TelegramSendBase {
 export interface TelegramAlbumUrlItem {
   mediaUrl: string;
   mediaType: AlbumMediaType;
+  caption?: string;
+  parseMode?: ParseMode | null;
 }
 
 export async function sendTelegramUrl(
@@ -106,10 +108,17 @@ export async function sendTelegramMediaGroupUrl(options: {
       entry.supports_streaming = true;
     }
 
-    if (index === 0 && options.caption) {
-      entry.caption = options.caption;
-      if (options.parseMode) {
-        entry.parse_mode = options.parseMode;
+    const caption = item.caption || (index === 0 ? options.caption : "");
+    const parseMode = item.caption
+      ? item.parseMode ?? options.parseMode
+      : index === 0
+        ? options.parseMode
+        : null;
+
+    if (caption) {
+      entry.caption = caption;
+      if (parseMode) {
+        entry.parse_mode = parseMode;
       }
     }
 

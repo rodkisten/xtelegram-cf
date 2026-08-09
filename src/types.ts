@@ -30,6 +30,8 @@ export interface RelayInput {
 export interface RelayAlbumItem {
   mediaUrl: URL;
   mediaType: AlbumMediaType;
+  caption: string;
+  parseMode: ParseMode | null;
   metadata: Record<string, string> | null;
 }
 

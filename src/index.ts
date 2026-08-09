@@ -80,7 +80,7 @@ function handleHealth(): Response {
   return json({
     ok: true,
     service: "generic-telegram-media-relay",
-    version: "2.2.0",
+    version: "2.3.0",
     status: "online",
     runtime: "typescript-hls-remux-photo-album",
     timestamp: new Date().toISOString(),
@@ -385,6 +385,8 @@ async function handleJsonAlbumSend(
         items: batch.map((item) => ({
           mediaUrl: item.mediaUrl.href,
           mediaType: item.mediaType,
+          caption: item.caption,
+          parseMode: item.parseMode,
         })),
         caption: batchIndex === 0 ? input.caption : "",
         parseMode: batchIndex === 0 ? input.parseMode : null,
@@ -755,12 +757,22 @@ function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
     };
   }
 
+  const parseMode = normalizeParseMode(record.parseMode);
+  if (record.parseMode && !parseMode) {
+    return {
+      kind: "invalid",
+      error: "Invalid parseMode. Allowed values: HTML, MarkdownV2",
+    };
+  }
+
   const items: RelayAlbumInput["items"] = [];
 
   for (let index = 0; index < rawItems.length; index += 1) {
     const rawItem = rawItems[index];
     let rawUrl: unknown = rawItem;
     let rawType: unknown = null;
+    let rawCaption: unknown = null;
+    let rawItemParseMode: unknown = null;
     let itemMetadata: unknown = null;
 
     if (rawItem && typeof rawItem === "object" && !Array.isArray(rawItem)) {
@@ -769,6 +781,8 @@ function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       rawType =
         item.mediaType ??
         (item.photoUrl ? "photo" : item.videoUrl ? "video" : null);
+      rawCaption = item.caption;
+      rawItemParseMode = item.parseMode ?? item.parse_mode;
       itemMetadata = item.metadata;
     }
 
@@ -795,19 +809,25 @@ function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       };
     }
 
+    const itemCaption = normalizeCaption(rawCaption);
+    const itemParseMode = itemCaption
+      ? normalizeParseMode(rawItemParseMode ?? record.parseMode)
+      : null;
+
+    if (rawItemParseMode && !itemParseMode) {
+      return {
+        kind: "invalid",
+        error: `Invalid parseMode at mediaItems[${index}]. Allowed values: HTML, MarkdownV2`,
+      };
+    }
+
     items.push({
       mediaUrl,
       mediaType,
+      caption: itemCaption,
+      parseMode: itemParseMode,
       metadata: normalizeMetadata(itemMetadata),
     });
-  }
-
-  const parseMode = normalizeParseMode(record.parseMode);
-  if (record.parseMode && !parseMode) {
-    return {
-      kind: "invalid",
-      error: "Invalid parseMode. Allowed values: HTML, MarkdownV2",
-    };
   }
 
   const channelValidation = normalizeTelegramChannels(
