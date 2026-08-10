@@ -15,6 +15,7 @@ import {
   sendTelegramUrl,
   validateEnvironment,
 } from "./telegram";
+import { resolveSocialMedia, SocialResolverError, toRelayMediaType } from "./social";
 import type {
   AlbumMediaType,
   Env,
@@ -66,6 +67,14 @@ export default {
       return handleSend(request, env);
     }
 
+    if (request.method === "POST" && url.pathname === "/resolve") {
+      return handleResolve(request, env, false);
+    }
+
+    if (request.method === "POST" && url.pathname === "/resolve-and-send") {
+      return handleResolve(request, env, true);
+    }
+
     return json(
       {
         ok: false,
@@ -76,11 +85,65 @@ export default {
   },
 };
 
+interface ResolveRequestBody {
+  url?: unknown; sourceUrl?: unknown; channel?: unknown; channels?: unknown;
+  caption?: unknown; parseMode?: unknown; metadata?: unknown;
+}
+
+async function handleResolve(request: Request, env: Env, send: boolean): Promise<Response> {
+  if (!isAuthorized(request, env)) return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+  let body: ResolveRequestBody;
+  try { body = (await request.json()) as ResolveRequestBody; } catch { return json({ ok: false, error: "Invalid JSON body" }, 400); }
+  const sourceUrl = typeof body.url === "string" ? body.url.trim() : typeof body.sourceUrl === "string" ? body.sourceUrl.trim() : "";
+  const normalized = normalizePublicHttpUrl(sourceUrl);
+  if (!normalized) return json({ ok: false, error: "url/sourceUrl must be a public HTTP(S) URL" }, 400);
+  let resolution;
+  try { resolution = await resolveSocialMedia(normalized.href, env); } catch (error) {
+    return json({ ok: false, error: getErrorMessage(error), stage: "social-resolver", attempts: error instanceof SocialResolverError ? error.attempts : undefined }, 422);
+  }
+  if (!send) return json({ ok: true, ...resolution });
+
+  const channels = normalizeResolveChannels(body);
+  const caption = typeof body.caption === "string" ? body.caption : resolution.caption || resolution.title || "";
+  const parseMode = ALLOWED_PARSE_MODES.has(body.parseMode as ParseMode) ? body.parseMode as ParseMode : null;
+  const common = { sourceUrl: resolution.sourceUrl, pageUrl: resolution.sourceUrl, provider: resolution.source, caption, parseMode, channels, metadata: body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) ? body.metadata : { resolver: resolution.resolver } };
+  const albumCompatible = resolution.media.length >= 2 && resolution.media.every((item) => item.type === "photo" || item.type === "video");
+  if (albumCompatible) {
+    const relayBody = { ...common, mediaItems: resolution.media.map((item) => ({ mediaUrl: item.url, mediaType: toRelayMediaType(item.type) })) };
+    const response = await handleSend(cloneAuthorizedJsonRequest(request, relayBody), env);
+    return mergeResolveResponse(response, resolution);
+  }
+
+  const deliveries: unknown[] = [];
+  for (const item of resolution.media) {
+    const response = await handleSend(cloneAuthorizedJsonRequest(request, { ...common, mediaUrl: item.url, mediaType: toRelayMediaType(item.type) }), env);
+    const result = await response.json();
+    deliveries.push({ media: item, status: response.status, result });
+    if (!response.ok) return json({ ok: false, stage: "resolved-delivery", resolution, deliveries }, response.status);
+  }
+  return json({ ok: true, message: `Resolved and sent ${deliveries.length} media item(s)`, resolution, deliveries });
+}
+
+function normalizeResolveChannels(body: ResolveRequestBody): string[] {
+  const values: string[] = [];
+  if (typeof body.channel === "string") values.push(body.channel);
+  if (Array.isArray(body.channels)) for (const value of body.channels) if (typeof value === "string") values.push(value);
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+function cloneAuthorizedJsonRequest(request: Request, body: unknown): Request {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  const authorization = request.headers.get("Authorization"); if (authorization) headers.set("Authorization", authorization);
+  return new Request(new URL("/send", request.url), { method: "POST", headers, body: JSON.stringify(body) });
+}
+async function mergeResolveResponse(response: Response, resolution: unknown): Promise<Response> {
+  const payload = (await response.json()) as Record<string, unknown>; return json({ ...payload, resolution }, response.status);
+}
+
 function handleHealth(): Response {
   return json({
     ok: true,
     service: "generic-telegram-media-relay",
-    version: "2.3.0",
+    version: "2.4.0",
     status: "online",
     runtime: "typescript-hls-remux-photo-album",
     timestamp: new Date().toISOString(),
