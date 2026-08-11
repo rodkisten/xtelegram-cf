@@ -11,6 +11,8 @@ export interface ResolvedSocialMedia {
   width: number | null;
   height: number | null;
   thumbnail: string | null;
+  /** Headers used when the relay itself must fetch the resolved CDN URL. */
+  mediaHeaders: Record<string, string>;
 }
 
 export interface ResolverAttempt {
@@ -136,7 +138,16 @@ async function resolveTwirrl(sourceUrl: string, token?: string) {
       if (!url || seen.has(url)) continue;
       seen.add(url);
       const resolution = resolutionFromUrl(url);
-      variants.push({ index: variants.length, url, type: "video", quality: resolution.label || "best", width: resolution.width, height: resolution.height, thumbnail: null });
+      variants.push({
+        index: variants.length,
+        url,
+        type: "video",
+        quality: resolution.label || "best",
+        width: resolution.width,
+        height: resolution.height,
+        thumbnail: null,
+        mediaHeaders: mediaHeadersForUrl(url),
+      });
     }
   }
   variants.sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)));
@@ -148,10 +159,20 @@ async function resolveTwirrl(sourceUrl: string, token?: string) {
 async function resolveDTwitter(sourceUrl: string) {
   const version = { dtwitter: { api: "https://dtwitter.heismauri.com/" }, id: "6166", name: "DTwitter", version: "4.2.1" };
   const selector = { selector: false };
-  const body = new URLSearchParams({ url: sourceUrl, version: JSON.stringify(version), selector: JSON.stringify(selector) });
+
+  // Match the Apple Shortcuts "Form" request as closely as possible.
+  // Do not set Content-Type manually: fetch adds the multipart boundary.
+  const body = new FormData();
+  body.set("url", sourceUrl);
+  body.set("version", JSON.stringify(version));
+  body.set("selector", JSON.stringify(selector));
+
   const data = await fetchJson<any>("https://dtwitter.heismauri.com/", {
     method: "POST",
-    headers: { Accept: "application/json, text/plain, */*", "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "User-Agent": USER_AGENT },
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      "User-Agent": USER_AGENT,
+    },
     body,
   });
   const status = String(data?.status || "").trim().toLowerCase();
@@ -169,10 +190,22 @@ async function resolveDTwitter(sourceUrl: string) {
 }
 
 async function resolveDTikTok(sourceUrl: string) {
-  const body = new URLSearchParams({ url: sourceUrl, version: "4.3.3" });
-  const data = await fetchJson<any>("https://dtiktok.heismauri.com", {
+  // DTikTok's own Worker validates a canonical URL in the form
+  // https://www.tiktok.com/@user/video/<id> (or /photo/<id>).
+  // Share-sheet URLs are often vt.tiktok.com / vm.tiktok.com, so resolve
+  // redirects first instead of handing the short URL directly to DTikTok.
+  const canonicalSourceUrl = await canonicalizeTikTokUrl(sourceUrl);
+
+  const body = new FormData();
+  body.set("url", canonicalSourceUrl);
+  body.set("version", "4.3.3");
+
+  const data = await fetchJson<any>("https://dtiktok.heismauri.com/", {
     method: "POST",
-    headers: { Accept: "application/json, text/plain, */*", "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "User-Agent": USER_AGENT },
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      "User-Agent": USER_AGENT,
+    },
     body,
   });
   const status = String(data?.status || "").trim().toLowerCase();
@@ -192,6 +225,7 @@ function mediaItem(index: number, url: string, type: ResolvedSocialMediaType, it
   const fromUrl = resolutionFromUrl(url);
   const width = explicitWidth || fromUrl.width;
   const height = explicitHeight || fromUrl.height;
+
   return {
     index,
     url,
@@ -200,6 +234,7 @@ function mediaItem(index: number, url: string, type: ResolvedSocialMediaType, it
     width,
     height,
     thumbnail: firstString(item?.thumbnail, item?.thumb, item?.poster, item?.cover),
+    mediaHeaders: mediaHeadersForUrl(url),
   };
 }
 
@@ -234,11 +269,111 @@ function unwrapKnownProxyUrl(value: string): string {
 
 function normalizeProviderUrl(value: unknown): string | null {
   if (typeof value !== "string" || !value.trim()) return null;
-  const decoded = decodeRepeatedly(value.trim());
+
+  // CRITICAL: media CDN URLs are frequently signed. Never run
+  // decodeURIComponent() over the complete URL and never return new URL(...).href,
+  // because either operation can change an encoded query value and invalidate the
+  // signature. Only undo JSON slash escaping / HTML ampersands, then validate.
+  const raw = value
+    .trim()
+    .replace(/\\\//g, "/")
+    .replace(/&amp;/gi, "&");
+
   try {
-    const url = new URL(decoded);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch { return null; }
+    const parsed = new URL(raw);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? raw
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function mediaHeadersForUrl(url: string): Record<string, string> {
+  let hostname = "";
+
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    return { "User-Agent": USER_AGENT };
+  }
+
+  if (hostname === "video.twimg.com" || hostname.endsWith(".twimg.com")) {
+    return {
+      "User-Agent": USER_AGENT,
+      Referer: "https://x.com/",
+    };
+  }
+
+  if (
+    hostname.endsWith(".tiktok.com") ||
+    hostname.endsWith(".tiktokcdn.com") ||
+    hostname.endsWith(".tiktokcdn-us.com")
+  ) {
+    return {
+      "User-Agent": USER_AGENT,
+      Referer: "https://www.tiktok.com/",
+    };
+  }
+
+  if (
+    hostname.endsWith(".cdninstagram.com") ||
+    hostname.endsWith(".fbcdn.net")
+  ) {
+    return {
+      "User-Agent": USER_AGENT,
+      Referer: "https://www.instagram.com/",
+    };
+  }
+
+  return { "User-Agent": USER_AGENT };
+}
+
+async function canonicalizeTikTokUrl(sourceUrl: string): Promise<string> {
+  const canonicalPattern =
+    /^https:\/\/(?:www\.)?tiktok\.com\/@[^/]+\/(?:video|photo)\/\d{8,}/i;
+
+  if (canonicalPattern.test(sourceUrl)) {
+    return sourceUrl;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("TikTok canonicalization timeout"), PROVIDER_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(sourceUrl, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": USER_AGENT,
+      },
+    });
+
+    const finalUrl = response.url || sourceUrl;
+
+    if (canonicalPattern.test(finalUrl)) {
+      return finalUrl;
+    }
+
+    // Some TikTok responses expose the canonical URL in HTML even when the
+    // redirect chain terminates on an interstitial. Read only a bounded prefix.
+    const html = (await response.text()).slice(0, 250_000);
+    const canonicalMatch = html.match(
+      /<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i,
+    );
+
+    if (canonicalMatch?.[1] && canonicalPattern.test(canonicalMatch[1])) {
+      return canonicalMatch[1].replace(/&amp;/gi, "&");
+    }
+  } catch {
+    // Keep the original URL so DTikTok can return a useful provider error.
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return sourceUrl;
 }
 
 function decodeRepeatedly(value: string): string {
