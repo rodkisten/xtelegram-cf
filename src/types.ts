@@ -1,4 +1,5 @@
 export interface Env {
+  RELAY_DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID?: string;
   RELAY_TOKEN: string;
@@ -6,6 +7,7 @@ export interface Env {
   HLS_CONCURRENCY?: string;
   HLS_MAX_MEDIA_BYTES?: string;
   MULTIPART_MAX_TOTAL_BYTES?: string;
+  TWIRRL_VERSION_TOKEN?: string;
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";
@@ -25,6 +27,9 @@ export interface RelayInput {
   mediaHeaders: Record<string, string>;
   channels: string[];
   metadata: Record<string, string> | null;
+  mediaId: string | null;
+  mediaKey: string | null;
+  force: boolean;
 }
 
 export interface RelayAlbumItem {
@@ -46,6 +51,9 @@ export interface RelayAlbumInput {
   parseMode: ParseMode | null;
   channels: string[];
   metadata: Record<string, string> | null;
+  mediaId: string | null;
+  mediaKey: string | null;
+  force: boolean;
 }
 
 export interface TelegramApiResult<T = unknown> {

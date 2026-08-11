@@ -1,4 +1,12 @@
 import {
+  createMediaIdentity,
+  findStoredMedia,
+  getAlreadyDeliveredChannels,
+  getStoredMedia,
+  persistSuccessfulDeliveries,
+  requireRelayDb,
+} from "./db";
+import {
   inferTelegramMediaType,
   prepareMedia,
   resolveConcurrency,
@@ -63,6 +71,10 @@ export default {
       return handleHealth();
     }
 
+    if (request.method === "GET" && (url.pathname === "/media" || url.pathname.startsWith("/media/"))) {
+      return handleMediaQuery(request, env);
+    }
+
     if (request.method === "POST" && url.pathname === "/send") {
       return handleSend(request, env);
     }
@@ -73,6 +85,10 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/resolve-and-send") {
       return handleResolve(request, env, true);
+    }
+
+    if (request.method === "POST" && url.pathname === "/batch") {
+      return handleBatch(request, env);
     }
 
     return json(
@@ -88,6 +104,7 @@ export default {
 interface ResolveRequestBody {
   url?: unknown; sourceUrl?: unknown; channel?: unknown; channels?: unknown;
   caption?: unknown; parseMode?: unknown; metadata?: unknown;
+  mediaId?: unknown; mediaKey?: unknown; force?: unknown;
 }
 
 async function handleResolve(request: Request, env: Env, send: boolean): Promise<Response> {
@@ -106,7 +123,7 @@ async function handleResolve(request: Request, env: Env, send: boolean): Promise
   const channels = normalizeResolveChannels(body);
   const caption = typeof body.caption === "string" ? body.caption : resolution.caption || resolution.title || "";
   const parseMode = ALLOWED_PARSE_MODES.has(body.parseMode as ParseMode) ? body.parseMode as ParseMode : null;
-  const common = { sourceUrl: resolution.sourceUrl, pageUrl: resolution.sourceUrl, provider: resolution.source, caption, parseMode, channels, metadata: body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) ? body.metadata : { resolver: resolution.resolver } };
+  const common = { sourceUrl: resolution.sourceUrl, pageUrl: resolution.sourceUrl, provider: resolution.source, caption, parseMode, channels, mediaId: typeof body.mediaId === "string" ? body.mediaId : undefined, mediaKey: typeof body.mediaKey === "string" ? body.mediaKey : undefined, force: body.force === true, metadata: body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) ? body.metadata : { resolver: resolution.resolver } };
   const albumCompatible = resolution.media.length >= 2 && resolution.media.every((item) => item.type === "photo" || item.type === "video");
   if (albumCompatible) {
     const relayBody = {
@@ -128,6 +145,8 @@ async function handleResolve(request: Request, env: Env, send: boolean): Promise
         mediaUrl: item.url,
         mediaType: toRelayMediaType(item.type),
         mediaHeaders: item.mediaHeaders,
+        mediaKey: common.mediaKey ? `${common.mediaKey}:${item.index}` : undefined,
+        mediaId: common.mediaId ? `${common.mediaId}:${item.index}` : undefined,
       }),
       env,
     );
@@ -153,13 +172,101 @@ async function mergeResolveResponse(response: Response, resolution: unknown): Pr
   const payload = (await response.json()) as Record<string, unknown>; return json({ ...payload, resolution }, response.status);
 }
 
+
+async function handleMediaQuery(request: Request, env: Env): Promise<Response> {
+  if (!isAuthorized(request, env)) return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+  let db: D1Database;
+  try { db = requireRelayDb(env); } catch (error) { return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500); }
+  const url = new URL(request.url);
+  const pathKey = url.pathname.startsWith("/media/") ? decodeURIComponent(url.pathname.slice("/media/".length)) : "";
+  const key = pathKey || url.searchParams.get("key") || "";
+  if (key) {
+    const record = await getStoredMedia(db, key);
+    return record ? json({ ok: true, ...record }) : json({ ok: false, error: "Media not found", key }, 404);
+  }
+  const limitValue = Number(url.searchParams.get("limit") || 25);
+  const items = await findStoredMedia(db, {
+    provider: url.searchParams.get("provider"),
+    mediaId: url.searchParams.get("mediaId"),
+    sourceUrl: url.searchParams.get("sourceUrl"),
+    limit: Number.isFinite(limitValue) ? limitValue : 25,
+  });
+  return json({ ok: true, count: items.length, items });
+}
+
+interface BatchBody {
+  links?: unknown;
+  items?: unknown;
+  channel?: unknown;
+  channels?: unknown;
+  force?: unknown;
+  caption?: unknown;
+  parseMode?: unknown;
+  metadata?: unknown;
+}
+
+async function handleBatch(request: Request, env: Env): Promise<Response> {
+  if (!isAuthorized(request, env)) return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+  let body: BatchBody;
+  try { body = await request.json() as BatchBody; } catch { return json({ ok: false, error: "Invalid JSON body" }, 400); }
+  const rawItems = Array.isArray(body.items) ? body.items : Array.isArray(body.links) ? body.links : null;
+  if (!rawItems?.length) return json({ ok: false, error: "Batch requires a non-empty links[] or items[] array." }, 400);
+  if (rawItems.length > 50) return json({ ok: false, error: "A batch can contain at most 50 links/items." }, 400);
+
+  const channelValidation = normalizeTelegramChannels(body.channel, body.channels);
+  if (!channelValidation.ok) return json({ ok: false, error: channelValidation.error }, 400);
+  const sharedChannels = resolveTelegramChatIds(channelValidation.value, env.TELEGRAM_CHAT_ID);
+  if (!sharedChannels.length) return json({ ok: false, error: "No Telegram channel was provided." }, 400);
+
+  const results: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < rawItems.length; index += 1) {
+    const raw = rawItems[index];
+    const item = typeof raw === "string" ? { url: raw } : raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    if (!item) {
+      results.push({ index, ok: false, status: 400, error: "Batch item must be a URL string or object." });
+      continue;
+    }
+    const itemChannels = item.channel !== undefined || item.channels !== undefined
+      ? normalizeTelegramChannels(item.channel, item.channels)
+      : { ok: true as const, value: sharedChannels };
+    if (!itemChannels.ok) {
+      results.push({ index, ok: false, status: 400, error: itemChannels.error });
+      continue;
+    }
+    const payload: Record<string, unknown> = {
+      ...item,
+      channels: itemChannels.value.length ? itemChannels.value : sharedChannels,
+      force: item.force === true || (item.force === undefined && body.force === true),
+      caption: item.caption ?? body.caption,
+      parseMode: item.parseMode ?? body.parseMode,
+      metadata: item.metadata ?? body.metadata,
+    };
+    const isDirect = "mediaUrl" in payload || "photoUrl" in payload || "videoUrl" in payload || "fileUrl" in payload || "mediaItems" in payload || "mediaUrls" in payload || "photoUrls" in payload;
+    const internal = cloneAuthorizedJsonRequest(request, payload);
+    const response = isDirect ? await handleSend(internal, env) : await handleResolve(internal, env, true);
+    const result = await response.json() as Record<string, unknown>;
+    results.push({ index, status: response.status, ...result });
+  }
+
+  const succeeded = results.filter((item) => item.ok === true).length;
+  const conflicts = results.filter((item) => item.status === 409).length;
+  const failed = results.length - succeeded;
+  const status = succeeded === results.length ? 200 : succeeded > 0 ? 207 : conflicts === results.length ? 409 : 502;
+  return json({
+    ok: succeeded > 0,
+    partial: succeeded > 0 && failed > 0,
+    summary: { requested: results.length, succeeded, failed, conflicts },
+    results,
+  }, status);
+}
+
 function handleHealth(): Response {
   return json({
     ok: true,
     service: "generic-telegram-media-relay",
-    version: "2.4.1",
+    version: "2.5.0",
     status: "online",
-    runtime: "typescript-hls-remux-photo-album",
+    runtime: "typescript-hls-remux-photo-album-d1-dedupe",
     timestamp: new Date().toISOString(),
   });
 }
@@ -257,6 +364,40 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
     );
   }
 
+  let db: D1Database;
+  try { db = requireRelayDb(env); } catch (error) {
+    return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
+  }
+
+  const identity = await createMediaIdentity({
+    provider: input.provider,
+    mediaId: input.mediaId,
+    mediaKey: input.mediaKey,
+    sourceUrl: input.sourceUrl,
+    pageUrl: input.pageUrl,
+    mediaUrl: input.mediaUrl.href,
+  });
+  const alreadyDelivered = input.force
+    ? new Set<string>()
+    : await getAlreadyDeliveredChannels(db, identity.key, chatIds);
+  const channelsToSend = input.force
+    ? chatIds
+    : chatIds.filter((chatId) => !alreadyDelivered.has(chatId));
+  const skippedAlreadySent = chatIds
+    .filter((chatId) => alreadyDelivered.has(chatId))
+    .map((channelId) => ({ channelId, reason: "already_sent" as const }));
+
+  if (!channelsToSend.length) {
+    return json({
+      ok: false,
+      conflict: true,
+      error: "Media was already sent to every requested Telegram channel.",
+      media: identity,
+      channels: { requested: chatIds, inserted: [], notSent: skippedAlreadySent },
+      hint: "Pass force=true to resend and increment send_count.",
+    }, 409);
+  }
+
   const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
   const concurrency = resolveConcurrency(env.HLS_CONCURRENCY);
   const hlsMaxMediaBytes = resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES);
@@ -328,75 +469,55 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
 
   const deliveries = await sendPreparedMediaToChats({
     botToken: env.TELEGRAM_BOT_TOKEN,
-    chatIds,
+    chatIds: channelsToSend,
     prepared,
     mediaType,
     caption: input.caption,
     parseMode: input.parseMode,
   });
-  const failedDeliveries = deliveries.filter(
-    (deliveryResult) => !deliveryResult.result.ok,
-  );
-
-  if (failedDeliveries.length) {
-    console.error("[media-relay] Telegram rejected one or more deliveries", {
-      inputUrl: input.mediaUrl.href,
-      delivery,
-      mediaType,
-      channels: chatIds,
-      failedDeliveries,
-      metadata: input.metadata,
-    });
-
-    return json(
-      {
-        ok: false,
-        error:
-          failedDeliveries[0]?.result.description ||
-          "Telegram rejected one or more media deliveries",
-        stage: "telegram",
-        source: {
-          inputUrl: input.mediaUrl.href,
-          resolvedUrl:
-            prepared.type === "file"
-              ? prepared.url
-              : prepared.sourceUrl,
-          sourceUrl: input.sourceUrl,
-        },
-        channels: chatIds,
-        resolution: {
-          selectedBitrate: prepared.selectedBitrate,
-          selectedResolution: prepared.selectedResolution,
-          playlistDepth: prepared.playlistDepth,
-        },
-        processing: buildProcessingResult(prepared),
-        telegram: {
-          method: getTelegramMethodName(mediaType),
-          deliveries: deliveries.map(formatTelegramDelivery),
-        },
-        metadata: input.metadata,
-      },
-      502,
-    );
-  }
-
-  const firstMessage = deliveries[0]?.result.result;
-
-  return json({
-    ok: true,
-    message:
-      chatIds.length === 1
-        ? "Media sent to Telegram"
-        : `Media sent to ${chatIds.length} Telegram channels`,
+  const failedDeliveries = deliveries.filter((deliveryResult) => !deliveryResult.result.ok);
+  const successfulDeliveries = deliveries.filter((deliveryResult) => deliveryResult.result.ok);
+  const insertedChannelIds = await persistSuccessfulDeliveries(db, {
+    identity,
+    sourceUrl: input.sourceUrl,
+    pageUrl: input.pageUrl,
+    mediaType,
+    mediaCount: 1,
+    metadata: input.metadata,
+    deliveries: successfulDeliveries.map((deliveryResult) => ({
+      requestedChatId: deliveryResult.requestedChatId,
+      telegramChatId: deliveryResult.result.result?.chat?.id ?? null,
+      telegramChatTitle: deliveryResult.result.result?.chat?.title ?? null,
+      messageIds: [deliveryResult.result.result?.message_id ?? null],
+    })),
+  });
+  const failedChannels = failedDeliveries.map((deliveryResult) => ({
+    channelId: deliveryResult.requestedChatId,
+    reason: "telegram_error" as const,
+    error: deliveryResult.result.description || "Telegram rejected the media request",
+    httpStatus: deliveryResult.result.httpStatus ?? null,
+  }));
+  const notSent = [...skippedAlreadySent, ...failedChannels];
+  const firstMessage = successfulDeliveries[0]?.result.result;
+  const payload = {
+    ok: successfulDeliveries.length > 0,
+    partial: notSent.length > 0,
+    conflict: successfulDeliveries.length === 0 && skippedAlreadySent.length > 0,
+    message: successfulDeliveries.length > 0
+      ? `Media sent to ${successfulDeliveries.length} Telegram channel(s)`
+      : "Media was not sent to Telegram",
+    media: identity,
     source: {
       inputUrl: input.mediaUrl.href,
-      resolvedUrl:
-        prepared.type === "file"
-          ? prepared.url
-          : prepared.sourceUrl,
+      resolvedUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
       sourceUrl: input.sourceUrl,
     },
-    channels: chatIds,
+    channels: {
+      requested: chatIds,
+      attempted: channelsToSend,
+      inserted: insertedChannelIds,
+      notSent,
+    },
     resolution: {
       selectedBitrate: prepared.selectedBitrate,
       selectedResolution: prepared.selectedResolution,
@@ -411,7 +532,14 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
       deliveries: deliveries.map(formatTelegramDelivery),
     },
     metadata: input.metadata,
-  });
+  };
+
+  if (!successfulDeliveries.length) {
+    console.error("[media-relay] Telegram rejected every attempted delivery", { media: identity, notSent });
+    return json(payload, 502);
+  }
+
+  return json(payload, notSent.length ? 207 : 200);
 }
 
 interface TelegramAlbumBatchDelivery {
@@ -439,6 +567,32 @@ async function handleJsonAlbumSend(
     );
   }
 
+  let db: D1Database;
+  try { db = requireRelayDb(env); } catch (error) {
+    return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
+  }
+  const identity = await createMediaIdentity({
+    provider: input.provider,
+    mediaId: input.mediaId,
+    mediaKey: input.mediaKey,
+    sourceUrl: input.sourceUrl,
+    pageUrl: input.pageUrl,
+    mediaUrl: input.items[0]?.mediaUrl.href || null,
+  });
+  const alreadyDelivered = input.force ? new Set<string>() : await getAlreadyDeliveredChannels(db, identity.key, chatIds);
+  const channelsToSend = input.force ? chatIds : chatIds.filter((chatId) => !alreadyDelivered.has(chatId));
+  const skippedAlreadySent = chatIds.filter((chatId) => alreadyDelivered.has(chatId)).map((channelId) => ({ channelId, reason: "already_sent" as const }));
+  if (!channelsToSend.length) {
+    return json({
+      ok: false,
+      conflict: true,
+      error: "Media was already sent to every requested Telegram channel.",
+      media: identity,
+      channels: { requested: chatIds, inserted: [], notSent: skippedAlreadySent },
+      hint: "Pass force=true to resend the album.",
+    }, 409);
+  }
+
   const batches: RelayAlbumInput["items"][] = [];
   let batchCursor = 0;
 
@@ -451,7 +605,7 @@ async function handleJsonAlbumSend(
 
   const deliveries: TelegramAlbumBatchDelivery[] = [];
 
-  for (const chatId of chatIds) {
+  for (const chatId of channelsToSend) {
     let itemOffset = 0;
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
@@ -480,7 +634,6 @@ async function handleJsonAlbumSend(
     }
   }
 
-  const failed = deliveries.filter((delivery) => !delivery.result.ok);
   const formatted = deliveries.map((delivery) => ({
     requestedChatId: delivery.requestedChatId,
     batchIndex: delivery.batchIndex,
@@ -488,86 +641,62 @@ async function handleJsonAlbumSend(
     itemCount: delivery.itemCount,
     ok: delivery.result.ok,
     httpStatus: delivery.result.httpStatus ?? null,
-    error: delivery.result.ok
-      ? null
-      : delivery.result.description || "Telegram rejected sendMediaGroup",
+    error: delivery.result.ok ? null : delivery.result.description || "Telegram rejected sendMediaGroup",
     messageIds: Array.isArray(delivery.result.result)
       ? delivery.result.result.map((message) => message?.message_id ?? null)
       : [],
   }));
-
-  if (failed.length) {
-    console.error("[media-relay] Telegram rejected one or more album batches", {
-      sourceUrl: input.sourceUrl,
-      pageUrl: input.pageUrl,
-      provider: input.provider,
-      channels: chatIds,
-      items: input.items.map((item) => ({
-        url: item.mediaUrl.href,
-        mediaType: item.mediaType,
-      })),
-      deliveries: formatted,
-      metadata: input.metadata,
-    });
-
-    return json(
-      {
-        ok: false,
-        error:
-          failed[0]?.result.description ||
-          "Telegram rejected one or more album batches",
-        stage: "telegram-media-group",
-        source: {
-          sourceUrl: input.sourceUrl,
-          pageUrl: input.pageUrl,
-        },
-        channels: chatIds,
-        media: {
-          count: input.items.length,
-          batches: batches.length,
-          items: input.items.map((item, index) => ({
-            index,
-            mediaType: item.mediaType,
-            mediaUrl: item.mediaUrl.href,
-          })),
-        },
-        telegram: {
-          method: "sendMediaGroup",
-          deliveries: formatted,
-        },
-        metadata: input.metadata,
-      },
-      502,
-    );
-  }
-
-  return json({
-    ok: true,
-    message:
-      chatIds.length === 1
-        ? `Album with ${input.items.length} media items sent to Telegram`
-        : `Album with ${input.items.length} media items sent to ${chatIds.length} Telegram channels`,
+  const completedChannels = channelsToSend.filter((chatId) => {
+    const channelDeliveries = deliveries.filter((delivery) => delivery.requestedChatId === chatId);
+    return channelDeliveries.length === batches.length && channelDeliveries.every((delivery) => delivery.result.ok);
+  });
+  const failedChannels = channelsToSend.filter((chatId) => !completedChannels.includes(chatId)).map((channelId) => {
+    const errors = deliveries.filter((delivery) => delivery.requestedChatId === channelId && !delivery.result.ok);
+    return {
+      channelId,
+      reason: "telegram_error" as const,
+      errors: errors.map((delivery) => ({ batchIndex: delivery.batchIndex, error: delivery.result.description || "Telegram rejected sendMediaGroup", httpStatus: delivery.result.httpStatus ?? null })),
+    };
+  });
+  const insertedChannelIds = await persistSuccessfulDeliveries(db, {
+    identity,
+    sourceUrl: input.sourceUrl,
+    pageUrl: input.pageUrl,
+    mediaType: "album",
+    mediaCount: input.items.length,
+    metadata: input.metadata,
+    deliveries: completedChannels.map((chatId) => {
+      const channelDeliveries = deliveries.filter((delivery) => delivery.requestedChatId === chatId);
+      const messages = channelDeliveries.flatMap((delivery) => Array.isArray(delivery.result.result) ? delivery.result.result : []);
+      return {
+        requestedChatId: chatId,
+        telegramChatId: messages[0]?.chat?.id ?? null,
+        telegramChatTitle: messages[0]?.chat?.title ?? null,
+        messageIds: messages.map((message) => message.message_id ?? null),
+      };
+    }),
+  });
+  const notSent = [...skippedAlreadySent, ...failedChannels];
+  const payload = {
+    ok: completedChannels.length > 0,
+    partial: notSent.length > 0,
+    media: identity,
+    message: completedChannels.length > 0
+      ? `Album delivered completely to ${completedChannels.length} Telegram channel(s)`
+      : "Album was not completely delivered to any Telegram channel",
     mode: "telegram-media-group",
-    source: {
-      sourceUrl: input.sourceUrl,
-      pageUrl: input.pageUrl,
-    },
-    channels: chatIds,
-    media: {
+    source: { sourceUrl: input.sourceUrl, pageUrl: input.pageUrl },
+    channels: { requested: chatIds, attempted: channelsToSend, inserted: insertedChannelIds, notSent },
+    mediaSet: {
       count: input.items.length,
       batches: batches.length,
-      items: input.items.map((item, index) => ({
-        index,
-        mediaType: item.mediaType,
-        mediaUrl: item.mediaUrl.href,
-      })),
+      items: input.items.map((item, index) => ({ index, mediaType: item.mediaType, mediaUrl: item.mediaUrl.href })),
     },
-    telegram: {
-      method: "sendMediaGroup",
-      deliveries: formatted,
-    },
+    telegram: { method: "sendMediaGroup", deliveries: formatted },
     metadata: input.metadata,
-  });
+  };
+  if (!completedChannels.length) return json(payload, 502);
+  return json(payload, notSent.length ? 207 : 200);
 }
 
 interface TelegramDelivery {
@@ -793,6 +922,9 @@ function validateRequestBody(body: unknown): ValidationResult {
       mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
       channels: channelValidation.value,
       metadata: normalizeMetadata(record.metadata),
+      mediaId: normalizeNullableText(record.mediaId, 240),
+      mediaKey: normalizeNullableText(record.mediaKey, 300),
+      force: record.force === true,
     },
   };
 }
@@ -933,6 +1065,9 @@ function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       parseMode: explicitCaption ? parseMode : null,
       channels: channelValidation.value,
       metadata: normalizeMetadata(record.metadata),
+      mediaId: normalizeNullableText(record.mediaId, 240),
+      mediaKey: normalizeNullableText(record.mediaKey, 300),
+      force: record.force === true,
     },
   };
 }
@@ -1019,6 +1154,11 @@ function normalizeTelegramChannels(
     ok: true,
     value: channels,
   };
+}
+
+function normalizeNullableText(value: unknown, maximumLength: number): string | null {
+  const normalized = normalizeOptionalText(value, maximumLength);
+  return normalized || null;
 }
 
 function normalizeOptionalText(value: unknown, maximumLength: number): string {
@@ -1159,6 +1299,9 @@ interface MultipartPayload {
   videoUrl?: string;
   provider?: string;
   metadata?: Record<string, unknown>;
+  mediaId?: string;
+  mediaKey?: string;
+  force?: boolean;
 }
 
 interface UploadedFileRecord {
@@ -1381,6 +1524,34 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
     );
   }
 
+  let db: D1Database;
+  try { db = requireRelayDb(env); } catch (error) {
+    return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
+  }
+  const multipartIdentityFallback = payload.sourceUrl || payload.pageUrl || payload.mediaUrl || payload.photoUrl || payload.videoUrl ||
+    `multipart:${uploadedFiles.map(({ file }) => `${file.name}:${file.size}:${file.type}`).join("|")}`;
+  const identity = await createMediaIdentity({
+    provider: payload.provider || "multipart",
+    mediaId: payload.mediaId || null,
+    mediaKey: payload.mediaKey || null,
+    sourceUrl: payload.sourceUrl || payload.pageUrl || null,
+    pageUrl: payload.pageUrl || null,
+    mediaUrl: multipartIdentityFallback,
+  });
+  const alreadyDelivered = payload.force === true ? new Set<string>() : await getAlreadyDeliveredChannels(db, identity.key, chatIds);
+  const channelsToSend = payload.force === true ? chatIds : chatIds.filter((chatId) => !alreadyDelivered.has(chatId));
+  const skippedAlreadySent = chatIds.filter((chatId) => alreadyDelivered.has(chatId)).map((channelId) => ({ channelId, reason: "already_sent" as const }));
+  if (!channelsToSend.length) {
+    return json({
+      ok: false,
+      conflict: true,
+      error: "Media was already sent to every requested Telegram channel.",
+      media: identity,
+      channels: { requested: chatIds, inserted: [], notSent: skippedAlreadySent },
+      hint: "Pass force=true in the multipart payload to resend.",
+    }, 409);
+  }
+
   const caption = resolvePayloadCaption(payload as Record<string, unknown>);
   const deliveries: Array<{
     fileIndex: number;
@@ -1396,7 +1567,7 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
   for (let fileIndex = 0; fileIndex < uploadedFiles.length; fileIndex += 1) {
     const uploaded = uploadedFiles[fileIndex]!;
 
-    for (const chatId of chatIds) {
+    for (const chatId of channelsToSend) {
       let result: TelegramApiResult<TelegramMessage>;
 
       try {
@@ -1432,6 +1603,37 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
 
   const failed = deliveries.filter((entry) => !entry.result.ok);
   const succeeded = deliveries.filter((entry) => entry.result.ok);
+  const completedChannels = channelsToSend.filter((chatId) => {
+    const channelDeliveries = deliveries.filter((entry) => entry.requestedChatId === chatId);
+    return channelDeliveries.length === uploadedFiles.length && channelDeliveries.every((entry) => entry.result.ok);
+  });
+  const failedChannels = channelsToSend.filter((chatId) => !completedChannels.includes(chatId)).map((channelId) => ({
+    channelId,
+    reason: "telegram_error" as const,
+    errors: deliveries.filter((entry) => entry.requestedChatId === channelId && !entry.result.ok).map((entry) => ({
+      fileIndex: entry.fileIndex,
+      error: entry.result.description || "Telegram rejected uploaded media",
+      httpStatus: entry.result.httpStatus ?? null,
+    })),
+  }));
+  const insertedChannelIds = await persistSuccessfulDeliveries(db, {
+    identity,
+    sourceUrl: payload.sourceUrl || payload.pageUrl || null,
+    pageUrl: payload.pageUrl || null,
+    mediaType: uploadedFiles.length > 1 ? "album" : uploadedFiles[0]!.mediaType,
+    mediaCount: uploadedFiles.length,
+    metadata: normalizeMetadata(payload.metadata),
+    deliveries: completedChannels.map((chatId) => {
+      const messages = deliveries.filter((entry) => entry.requestedChatId === chatId && entry.result.ok).map((entry) => entry.result.result).filter((message): message is TelegramMessage => Boolean(message));
+      return {
+        requestedChatId: chatId,
+        telegramChatId: messages[0]?.chat?.id ?? null,
+        telegramChatTitle: messages[0]?.chat?.title ?? null,
+        messageIds: messages.map((message) => message.message_id ?? null),
+      };
+    }),
+  });
+  const notSent = [...skippedAlreadySent, ...failedChannels];
 
   const formattedDeliveries = deliveries.map((entry) => ({
     fileIndex: entry.fileIndex,
@@ -1490,7 +1692,8 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
           size: file.size,
           mediaType,
         })),
-        channels: chatIds,
+        media: identity,
+        channels: { requested: chatIds, attempted: channelsToSend, inserted: insertedChannelIds, notSent },
         telegram: {
           deliveries: formattedDeliveries,
         },
@@ -1522,7 +1725,8 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
       size: file.size,
       mediaType,
     })),
-    channels: chatIds,
+    media: identity,
+    channels: { requested: chatIds, attempted: channelsToSend, inserted: insertedChannelIds, notSent },
     telegram: {
       deliveries: formattedDeliveries,
     },
