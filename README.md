@@ -1,8 +1,8 @@
-# xtelegram-cf · Telegram Media Relay v2.6
+# xtelegram-cf · Telegram Media Relay v2.7
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
-## O que a v2.6 adiciona
+## O que a v2.7 adiciona
 
 - D1/SQLite como registro persistente das mídias enviadas.
 - Identidade estável no formato `provider:media_id` sempre que possível.
@@ -14,7 +14,7 @@ Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos,
 - `force=true` para reenviar mesmo se já existir; o registro existente é atualizado e `send_count` é incrementado.
 - Entrega parcial: se um canal falhar e outro funcionar, o válido continua sendo enviado e persistido.
 - Resposta uniforme com IDs inseridos e canais não enviados.
-- `POST /batch` para vários links/posts em uma chamada.
+- `POST /batch` para enviar vários links/posts em uma chamada com preflight D1 único, concorrência limitada, deduplicação por mídia+canal e resultados parciais item a item.
 - `GET /media` e `GET /media/:key` para consulta do histórico.
 - `POST /media/check` para consultar até 100 mídias/URLs em lote com **uma única query D1**, opcionalmente filtrada por até 100 canais.
 - Fotos, vídeos, HLS, arquivos multipart e carrosséis continuam suportados.
@@ -443,7 +443,15 @@ Fotos e vídeos múltiplos compatíveis são enviados como álbum. Um item únic
 
 # Batch
 
-## `POST /batch` · vários links para os mesmos canais
+## `POST /batch` · envio real de vários posts/mídias
+
+O `/batch` aceita até **50 itens** e pode enviar todos para um canal, vários canais compartilhados ou destinos diferentes por item.
+
+Antes de iniciar o trabalho caro, o Worker resolve as identidades conhecidas e faz **uma única consulta D1** para descobrir quais combinações mídia+canal já existem. Canais já entregues são removidos do envio antes de download, resolução social, HLS/remux ou chamada ao Telegram.
+
+O `/send` continua validando duplicidade novamente durante a entrega. O preflight do batch é uma otimização, não a única garantia de integridade.
+
+### Lista simples de links
 
 ```json
 {
@@ -456,44 +464,29 @@ Fotos e vídeos múltiplos compatíveis são enviados como álbum. Um item únic
 }
 ```
 
-Cada link é resolvido, deduplicado e enviado independentemente. O batch continua mesmo se um item falhar.
+Cada link é resolvido e enviado independentemente. Uma falha não cancela os outros itens.
 
-Resposta resumida:
-
-```json
-{
-  "ok": true,
-  "partial": true,
-  "summary": {
-    "requested": 3,
-    "succeeded": 2,
-    "failed": 1,
-    "conflicts": 1
-  },
-  "results": []
-}
-```
-
-## Batch com `force=true`
+### Batch para um único canal
 
 ```json
 {
   "links": [
     "https://x.com/user/status/111",
-    "https://x.com/user/status/222"
+    "https://x.com/user/status/222",
+    "https://www.instagram.com/p/ABC/"
   ],
-  "channel": "-100111",
-  "force": true
+  "channel": "-100111"
 }
 ```
 
-## Batch com objetos e overrides por item
+### Batch com objetos completos
 
 ```json
 {
   "items": [
     {
-      "url": "https://x.com/user/status/111"
+      "url": "https://x.com/user/status/111",
+      "caption": "Post do X"
     },
     {
       "url": "https://www.instagram.com/p/ABC/",
@@ -508,10 +501,11 @@ Resposta resumida:
     {
       "mediaItems": [
         { "mediaUrl": "https://example.com/a.jpg", "mediaType": "photo" },
-        { "mediaUrl": "https://example.com/b.jpg", "mediaType": "photo" }
+        { "mediaUrl": "https://example.com/b.mp4", "mediaType": "video" }
       ],
       "provider": "generic",
-      "mediaId": "album-10"
+      "mediaId": "album-10",
+      "caption": "Carrossel"
     }
   ],
   "channels": ["-100111"],
@@ -521,13 +515,142 @@ Resposta resumida:
 }
 ```
 
-Regras de herança do batch:
+Suporta no mesmo lote:
 
-- `channels` do item substitui o destino compartilhado para aquele item.
-- `force` do item substitui o `force` global.
-- `caption`, `parseMode` e `metadata` podem ser globais ou por item.
-- Máximo: 50 itens por batch.
-- O processamento é sequencial para limitar memória e evitar multiplicar downloads/uploads grandes no mesmo isolate.
+- posts sociais que precisam de `/resolve-and-send` internamente;
+- vídeo direto;
+- foto direta;
+- áudio/documento já suportado por `/send`;
+- HLS;
+- carrossel/álbum com foto+vídeo;
+- destinos específicos por item;
+- `caption`, `parseMode`, `metadata`, `mediaKey`, `provider` e `mediaId` por item.
+
+### `force=true`
+
+Global:
+
+```json
+{
+  "links": [
+    "https://x.com/user/status/111",
+    "https://x.com/user/status/222"
+  ],
+  "channel": "-100111",
+  "force": true
+}
+```
+
+Ou apenas para um item:
+
+```json
+{
+  "items": [
+    { "url": "https://x.com/user/status/111" },
+    { "url": "https://x.com/user/status/222", "force": true }
+  ],
+  "channel": "-100111"
+}
+```
+
+`force=true` ignora a deduplicação para aquele item e permite reenvio, incrementando `send_count` após sucesso.
+
+### Deduplicação do próprio batch
+
+Se a mesma mídia aparecer duas vezes no mesmo request para o mesmo canal e `force` não estiver ativo, somente a primeira combinação é agendada. As repetições recebem:
+
+```json
+{
+  "channelId": "-100111",
+  "reason": "duplicate_in_batch"
+}
+```
+
+Mídias que já estavam persistidas no D1 continuam usando:
+
+```json
+{
+  "channelId": "-100111",
+  "reason": "already_sent"
+}
+```
+
+Isso evita a race em que dois itens idênticos passariam pelo mesmo preflight antes da primeira entrega ser gravada.
+
+### Concorrência limitada
+
+O batch deixou de ser estritamente sequencial. Por padrão processa **3 itens simultaneamente**, equilibrando velocidade, memória e chamadas externas.
+
+Você pode reduzir ou aumentar dentro do limite seguro de 1 a 5:
+
+```json
+{
+  "links": ["...", "...", "..."],
+  "channel": "-100111",
+  "concurrency": 2
+}
+```
+
+Default: `3`  
+Máximo: `5`
+
+Para lotes pesados com HLS/remux grande, use `1` ou `2`. Para fotos/URLs diretas pequenas, `3` a `5` tende a ser adequado.
+
+### Resposta
+
+Exemplo de sucesso parcial:
+
+```json
+{
+  "ok": true,
+  "partial": true,
+  "summary": {
+    "requested": 4,
+    "succeeded": 2,
+    "failed": 2,
+    "conflicts": 1,
+    "insertedChannels": 3,
+    "skippedAlreadySent": 2,
+    "skippedDuplicateInBatch": 1,
+    "preflightQueries": 1,
+    "concurrency": 3
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "ok": true,
+      "channels": {
+        "requested": ["-100111", "-100222"],
+        "attempted": ["-100222"],
+        "inserted": ["-100222"],
+        "notSent": [
+          { "channelId": "-100111", "reason": "already_sent" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+A ordem de `results` é sempre a mesma ordem recebida em `items`/`links`.
+
+### Status HTTP do batch
+
+- `200`: todos os itens concluíram com sucesso;
+- `207 Multi-Status`: houve sucesso e falha/conflito no mesmo lote;
+- `409 Conflict`: nenhum item foi enviado porque todos conflitaram;
+- `502`: nenhum item conseguiu ser enviado e não foi um lote puramente conflitante;
+- `400`: payload global inválido.
+
+### Regras de herança
+
+- `channels` do item substitui os canais compartilhados naquele item;
+- `force` do item substitui o `force` global;
+- `caption`, `parseMode` e `metadata` podem ser globais ou por item;
+- máximo de 50 itens por request;
+- o preflight usa uma única query D1 para todas as identidades que já podem ser determinadas antes da resolução;
+- itens cuja identidade só fique disponível após resolver a mídia continuam protegidos pela deduplicação do `/send`.
 
 ---
 
