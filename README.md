@@ -1,392 +1,775 @@
-# Generic Telegram Media Relay v2.2
+# xtelegram-cf · Telegram Media Relay v2.5
 
-Cloudflare Worker written in TypeScript with a native HLS pipeline.
+Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
-## What changed
+## O que a v2.5 adiciona
 
-The old Worker only resolved an HLS master playlist to the best media playlist and returned HTTP 422 when the result still contained segments.
+- D1/SQLite como registro persistente das mídias enviadas.
+- Identidade estável no formato `provider:media_id` sempre que possível.
+- Fallback por SHA-256 curto da URL canônica quando o provedor não expõe um ID utilizável.
+- Registro de URL, provider, media ID, tipo, quantidade de itens, metadata e timestamps.
+- Registro por canal Telegram com primeiro/último `message_id`, chat retornado pelo Telegram, `send_count` e timestamps.
+- Deduplicação **por mídia + canal** antes de baixar/remuxar/enviar.
+- HTTP `409 Conflict` quando todos os canais solicitados já receberam a mídia.
+- `force=true` para reenviar mesmo se já existir; o registro existente é atualizado e `send_count` é incrementado.
+- Entrega parcial: se um canal falhar e outro funcionar, o válido continua sendo enviado e persistido.
+- Resposta uniforme com IDs inseridos e canais não enviados.
+- `POST /batch` para vários links/posts em uma chamada.
+- `GET /media` e `GET /media/:key` para consulta do histórico.
+- Fotos, vídeos, HLS, arquivos multipart e carrosséis continuam suportados.
 
-The new pipeline is:
+---
 
-1. Validate and probe the public media URL.
-2. Resolve HLS master/media playlists recursively.
-3. Select the best remux-friendly variant.
-4. Resolve alternate audio renditions when present.
-5. Download media segments with bounded concurrency.
-6. Respect `EXT-X-BYTERANGE` and `EXT-X-MAP`.
-7. Decode standard HLS `AES-128` with Web Crypto when `KEYFORMAT` is `identity`.
-8. Assemble existing fMP4/CMAF streams.
-9. Transmux MPEG-TS to fragmented MP4 with `mux.js` using `remux: true`.
-10. Upload the resulting media to Telegram with `multipart/form-data`.
+## Arquitetura de persistência
 
-Direct files small enough for Telegram's remote URL fetch path are still sent by URL to avoid unnecessary buffering.
+A persistência é propositalmente pequena e normalizada:
 
-## Files
+### `media`
 
-- `src/index.ts`: Worker routes, authentication, request validation, and response formatting.
-- `src/media.ts`: direct-file versus HLS preparation pipeline.
-- `src/hls/parser.ts`: typed M3U8 parser.
-- `src/hls/resolver.ts`: recursive HLS resolver and variant/rendition selection.
-- `src/hls/decoder.ts`: AES-128 HLS decoder using Web Crypto.
-- `src/hls/downloader.ts`: range-aware concurrent segment downloader.
-- `src/hls/remuxer.ts`: fMP4 assembly and MPEG-TS to fMP4 transmux/remux.
-- `src/telegram.ts`: Telegram URL and multipart upload transports.
-- `src/lib/http.ts`: public URL validation, redirect validation, and HTTP helpers.
+Uma linha por mídia lógica/post.
 
-## Install
+Campos principais:
+
+- `media_key`: chave primária, por exemplo `twitter:1823456789012345678`.
+- `provider`: `twitter`, `instagram`, `tiktok`, `generic`, etc.
+- `provider_media_id`: ID nativo ou hash de fallback.
+- `canonical_url`: URL usada para identidade depois de remover fragmentos e parâmetros de tracking conhecidos.
+- `source_url` / `page_url`.
+- `media_type`: `photo`, `video`, `audio`, `document` ou `album`.
+- `media_count`: número de itens da publicação.
+- `metadata_json`.
+- `first_seen_at` / `updated_at`.
+
+### `media_deliveries`
+
+Uma linha por par `media_key + channel_id`.
+
+Campos principais:
+
+- `channel_id`: ID ou `@username` solicitado.
+- `telegram_chat_id` e `telegram_chat_title` retornados pelo Telegram.
+- `first_message_ids_json`.
+- `last_message_ids_json`.
+- `send_count`.
+- `first_sent_at` / `last_sent_at`.
+
+A tabela usa `PRIMARY KEY (media_key, channel_id)`. Um reenvio forçado não duplica a linha: atualiza a última entrega e incrementa `send_count`.
+
+---
+
+# Instalação
 
 ```bash
 npm install
 npm run typecheck
 ```
 
-## Secrets
+## 1. Criar o banco D1
 
-Required:
+```bash
+npm run db:create
+```
+
+Equivalente a:
+
+```bash
+npx wrangler d1 create xtelegram-relay
+```
+
+O Wrangler retornará um `database_id` e um bloco de binding. Copie-o para `wrangler.jsonc` usando **exatamente** `RELAY_DB` como binding:
+
+```jsonc
+{
+  "d1_databases": [
+    {
+      "binding": "RELAY_DB",
+      "database_name": "xtelegram-relay",
+      "database_id": "SEU-UUID-AQUI"
+    }
+  ]
+}
+```
+
+## 2. Aplicar a migration
+
+Produção/remoto:
+
+```bash
+npm run db:migrate:remote
+```
+
+Local:
+
+```bash
+npm run db:migrate:local
+```
+
+Listar migrations:
+
+```bash
+npm run db:migrations:list
+```
+
+A migration inicial está em:
+
+```text
+migrations/0001_media_delivery_history.sql
+```
+
+## 3. Configurar secrets
+
+Nunca coloque token de bot ou `RELAY_TOKEN` em `wrangler.jsonc`.
 
 ```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put RELAY_TOKEN
 ```
 
-Optional default destination:
+Destino default opcional:
 
 ```bash
 npx wrangler secret put TELEGRAM_CHAT_ID
 ```
 
-`TELEGRAM_CHAT_ID` is now only a fallback. When the request contains `channel` or `channels`, those request values take priority.
+Para desenvolvimento local, copie:
 
-## Optional Worker variables
+```bash
+cp .dev.vars.example .dev.vars
+```
 
-`MAX_MEDIA_BYTES`
+E preencha os valores reais.
 
-Default: `32000000`.
+## 4. Typecheck e deploy
 
-Controls the maximum amount of media buffered for a single relay request. The code hard-caps this value at `49000000`.
+```bash
+npm run typecheck
+npm run deploy
+```
 
-`HLS_CONCURRENCY`
+---
 
-Default: `4`.
+# Autenticação
 
-Controls simultaneous HLS resource downloads. Values are clamped between 1 and 8.
+Endpoints de envio, batch e consultas usam:
 
-## Deploy
+```http
+Authorization: Bearer <RELAY_TOKEN>
+```
+
+---
+
+# Identidade e deduplicação
+
+A ordem de prioridade é:
+
+1. `mediaKey` explícito.
+2. `provider + mediaId` explícitos.
+3. ID extraído da URL do provider.
+4. Hash estável da URL canônica.
+
+Exemplos automáticos:
+
+```text
+https://x.com/user/status/1234567890
+→ twitter:1234567890
+
+https://www.instagram.com/p/ABCxyz/
+→ instagram:abcxyz
+
+https://www.tiktok.com/@user/video/7512345678901234567
+→ tiktok:7512345678901234567
+```
+
+Você pode controlar explicitamente a identidade:
+
+```json
+{
+  "provider": "my-provider",
+  "mediaId": "post-123"
+}
+```
+
+Resultado:
+
+```text
+my-provider:post-123
+```
+
+Ou definir a chave completa:
+
+```json
+{
+  "mediaKey": "archive:item-2026-0001"
+}
+```
+
+## Sem `force`
+
+Se a mídia já foi enviada para **todos** os canais pedidos:
+
+```http
+409 Conflict
+```
+
+Exemplo resumido:
+
+```json
+{
+  "ok": false,
+  "conflict": true,
+  "media": {
+    "key": "twitter:1234567890"
+  },
+  "channels": {
+    "requested": ["-100111"],
+    "inserted": [],
+    "notSent": [
+      {
+        "channelId": "-100111",
+        "reason": "already_sent"
+      }
+    ]
+  }
+}
+```
+
+Se apenas alguns canais já receberam a mídia, esses canais são pulados e os restantes continuam.
+
+## Com `force=true`
+
+```json
+{
+  "url": "https://x.com/user/status/1234567890",
+  "channels": ["-100111"],
+  "force": true
+}
+```
+
+A mídia é reenviada, `send_count` é incrementado e os IDs da última mensagem são atualizados.
+
+---
+
+# Formato de resposta de canais
+
+Nos caminhos persistidos, a resposta usa:
+
+```json
+{
+  "channels": {
+    "requested": ["-100111", "-100222"],
+    "attempted": ["-100111", "-100222"],
+    "inserted": ["-100111"],
+    "notSent": [
+      {
+        "channelId": "-100222",
+        "reason": "telegram_error",
+        "error": "Bad Request: chat not found"
+      }
+    ]
+  }
+}
+```
+
+`inserted` contém apenas canais cuja entrega completa foi aceita pelo Telegram e persistida no D1.
+
+### Status HTTP
+
+- `200`: tudo solicitado foi enviado.
+- `207`: houve sucesso parcial, por exemplo um canal válido e outro inválido ou já enviado.
+- `409`: nenhum envio foi necessário porque todos os destinos já tinham a mídia.
+- `400`: payload inválido.
+- `401`: `RELAY_TOKEN` inválido/ausente em endpoints protegidos.
+- `422`: mídia não pôde ser resolvida/preparada.
+- `502`: Telegram recusou todas as entregas tentadas.
+
+---
+
+# API
+
+## `GET /health`
+
+```bash
+curl https://SEU-WORKER/health
+```
+
+---
+
+## `POST /send` · mídia direta
+
+### Vídeo
+
+```bash
+curl -X POST https://SEU-WORKER/send \
+  -H 'Authorization: Bearer SEU_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mediaUrl": "https://example.com/video.mp4",
+    "sourceUrl": "https://example.com/post/123",
+    "provider": "generic",
+    "mediaId": "123",
+    "mediaType": "video",
+    "caption": "Vídeo",
+    "channels": ["-100111", "-100222"]
+  }'
+```
+
+### Foto
+
+```json
+{
+  "mediaUrl": "https://example.com/photo.jpg",
+  "mediaType": "photo",
+  "provider": "generic",
+  "mediaId": "photo-123",
+  "channel": "-100111"
+}
+```
+
+Aliases aceitos para mídia direta:
+
+- `mediaUrl`
+- `photoUrl`
+- `videoUrl`
+- `fileUrl`
+- `url`
+
+### HLS
+
+```json
+{
+  "mediaUrl": "https://example.com/master.m3u8",
+  "sourceUrl": "https://example.com/watch/42",
+  "mediaType": "video",
+  "channel": "-100111",
+  "mediaHeaders": {
+    "Referer": "https://example.com/"
+  }
+}
+```
+
+O HLS é preparado apenas depois da verificação de duplicidade. Se o mesmo post já tiver sido enviado ao canal, o Worker evita download, decrypt, remux e upload desnecessários.
+
+---
+
+## `POST /send` · carrossel/álbum
+
+```json
+{
+  "mediaItems": [
+    {
+      "mediaUrl": "https://example.com/1.jpg",
+      "mediaType": "photo"
+    },
+    {
+      "mediaUrl": "https://example.com/2.jpg",
+      "mediaType": "photo"
+    },
+    {
+      "mediaUrl": "https://example.com/3.mp4",
+      "mediaType": "video"
+    }
+  ],
+  "provider": "instagram",
+  "mediaId": "ABCxyz",
+  "sourceUrl": "https://www.instagram.com/p/ABCxyz/",
+  "caption": "Post",
+  "channels": ["-100111", "-100222"]
+}
+```
+
+Também são aceitos:
+
+```json
+{
+  "mediaUrls": [
+    "https://example.com/1.jpg",
+    "https://example.com/2.mp4"
+  ]
+}
+```
+
+E somente fotos:
+
+```json
+{
+  "photoUrls": [
+    "https://example.com/1.jpg",
+    "https://example.com/2.jpg"
+  ]
+}
+```
+
+O Worker divide automaticamente álbuns grandes em lotes compatíveis com Telegram. Um canal só entra em `inserted` quando todos os lotes daquele canal foram aceitos.
+
+---
+
+## `POST /resolve`
+
+Resolve uma URL social e retorna as mídias sem enviar.
+
+```json
+{
+  "url": "https://x.com/user/status/1234567890"
+}
+```
+
+---
+
+## `POST /resolve-and-send`
+
+Resolve Instagram/X/TikTok e envia o resultado.
+
+```json
+{
+  "url": "https://www.instagram.com/p/ABCxyz/",
+  "channels": ["-100111", "-100222"]
+}
+```
+
+Com reenvio:
+
+```json
+{
+  "url": "https://www.instagram.com/p/ABCxyz/",
+  "channels": ["-100111"],
+  "force": true
+}
+```
+
+Fotos e vídeos múltiplos compatíveis são enviados como álbum. Um item único usa o fluxo de mídia simples.
+
+---
+
+# Batch
+
+## `POST /batch` · vários links para os mesmos canais
+
+```json
+{
+  "links": [
+    "https://x.com/user/status/111",
+    "https://www.instagram.com/p/ABC/",
+    "https://www.tiktok.com/@user/video/222"
+  ],
+  "channels": ["-100111", "-100222"]
+}
+```
+
+Cada link é resolvido, deduplicado e enviado independentemente. O batch continua mesmo se um item falhar.
+
+Resposta resumida:
+
+```json
+{
+  "ok": true,
+  "partial": true,
+  "summary": {
+    "requested": 3,
+    "succeeded": 2,
+    "failed": 1,
+    "conflicts": 1
+  },
+  "results": []
+}
+```
+
+## Batch com `force=true`
+
+```json
+{
+  "links": [
+    "https://x.com/user/status/111",
+    "https://x.com/user/status/222"
+  ],
+  "channel": "-100111",
+  "force": true
+}
+```
+
+## Batch com objetos e overrides por item
+
+```json
+{
+  "items": [
+    {
+      "url": "https://x.com/user/status/111"
+    },
+    {
+      "url": "https://www.instagram.com/p/ABC/",
+      "channels": ["-100333"]
+    },
+    {
+      "mediaUrl": "https://example.com/photo.jpg",
+      "mediaType": "photo",
+      "provider": "generic",
+      "mediaId": "photo-9"
+    },
+    {
+      "mediaItems": [
+        { "mediaUrl": "https://example.com/a.jpg", "mediaType": "photo" },
+        { "mediaUrl": "https://example.com/b.jpg", "mediaType": "photo" }
+      ],
+      "provider": "generic",
+      "mediaId": "album-10"
+    }
+  ],
+  "channels": ["-100111"],
+  "metadata": {
+    "source": "userscript"
+  }
+}
+```
+
+Regras de herança do batch:
+
+- `channels` do item substitui o destino compartilhado para aquele item.
+- `force` do item substitui o `force` global.
+- `caption`, `parseMode` e `metadata` podem ser globais ou por item.
+- Máximo: 50 itens por batch.
+- O processamento é sequencial para limitar memória e evitar multiplicar downloads/uploads grandes no mesmo isolate.
+
+---
+
+# Multipart
+
+Quando o cliente já possui os bytes finais, envie `multipart/form-data` para `/send`.
+
+Campos:
+
+- `payload`: JSON com metadata/destinos.
+- `file`: um ou mais arquivos.
+- `files`: alias/repetido.
+- `audioFile`: força aquele arquivo para `audio`.
+
+Exemplo conceitual em JavaScript:
+
+```js
+const form = new FormData();
+
+form.append("payload", JSON.stringify({
+  provider: "twitter",
+  mediaId: "1234567890",
+  sourceUrl: "https://x.com/user/status/1234567890",
+  channels: ["-100111", "-100222"],
+  caption: "Post",
+  force: false
+}));
+
+form.append("file", videoBlob, "video.mp4");
+
+await fetch("https://SEU-WORKER/send", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer SEU_TOKEN"
+  },
+  body: form
+});
+```
+
+Para multipart, prefira sempre informar `mediaKey` ou `provider + mediaId` ou uma `sourceUrl` estável. Se nenhum identificador existir, o Worker usa um fallback derivado dos metadados dos arquivos.
+
+---
+
+# Consultas D1 pela API
+
+Todas exigem `Authorization`.
+
+## Buscar mídia pela chave
+
+```http
+GET /media/twitter:1234567890
+```
+
+Ou:
+
+```http
+GET /media?key=twitter:1234567890
+```
+
+Resposta inclui mídia e canais:
+
+```json
+{
+  "ok": true,
+  "media": {
+    "key": "twitter:1234567890",
+    "provider": "twitter",
+    "mediaId": "1234567890",
+    "mediaType": "video",
+    "mediaCount": 1
+  },
+  "deliveries": [
+    {
+      "channelId": "-100111",
+      "telegramChatId": "-100111",
+      "lastMessageIds": [987],
+      "sendCount": 2
+    }
+  ]
+}
+```
+
+## Buscar por provider + media ID
+
+```http
+GET /media?provider=twitter&mediaId=1234567890
+```
+
+## Buscar pela URL de origem
+
+```http
+GET /media?sourceUrl=https%3A%2F%2Fx.com%2Fuser%2Fstatus%2F1234567890
+```
+
+## Últimas mídias
+
+```http
+GET /media?limit=25
+```
+
+`limit` é limitado a 100.
+
+---
+
+# Consultas D1 via Wrangler
+
+Exemplo remoto:
+
+```bash
+npx wrangler d1 execute xtelegram-relay --remote --command \
+  "SELECT media_key, provider, provider_media_id, updated_at FROM media ORDER BY updated_at DESC LIMIT 20"
+```
+
+Canais de uma mídia:
+
+```bash
+npx wrangler d1 execute xtelegram-relay --remote --command \
+  "SELECT channel_id, send_count, last_message_ids_json, last_sent_at FROM media_deliveries WHERE media_key = 'twitter:1234567890'"
+```
+
+Mídias enviadas para um canal:
+
+```bash
+npx wrangler d1 execute xtelegram-relay --remote --command \
+  "SELECT media_key, send_count, last_sent_at FROM media_deliveries WHERE channel_id = '-100111' ORDER BY last_sent_at DESC"
+```
+
+---
+
+# Performance e custo
+
+A ordem do caminho de envio é importante:
+
+1. Validar payload e canais.
+2. Calcular `media_key`.
+3. Fazer uma consulta D1 apenas para os canais solicitados.
+4. Remover destinos já atendidos.
+5. Se nada restar, responder `409` **antes** de preparar a mídia.
+6. Preparar HLS/download uma única vez.
+7. Enviar sequencialmente para os canais restantes.
+8. Persistir apenas canais com sucesso usando `D1.batch()`.
+
+Isso evita gastar CPU, memória, tráfego e chamadas Telegram com duplicatas conhecidas.
+
+---
+
+# HLS
+
+O pipeline continua suportando:
+
+- Master playlists e playlists aninhadas.
+- Seleção de variante.
+- Alternate audio renditions.
+- `EXT-X-BYTERANGE`.
+- `EXT-X-MAP`.
+- AES-128 identity via Web Crypto.
+- MPEG-TS → fragmented MP4 com `mux.js`.
+- fMP4/CMAF compatível.
+- Download com concorrência limitada.
+- LL-HLS snapshots onde possível.
+
+Variáveis:
+
+### `MAX_MEDIA_BYTES`
+
+Default no `wrangler.jsonc`:
+
+```text
+32000000
+```
+
+### `HLS_CONCURRENCY`
+
+Default:
+
+```text
+4
+```
+
+### `HLS_MAX_MEDIA_BYTES`
+
+Opcional.
+
+### `MULTIPART_MAX_TOTAL_BYTES`
+
+Opcional.
+
+---
+
+# Arquivos importantes
+
+```text
+src/index.ts
+  Rotas, validação, batch, deduplicação e respostas.
+
+src/db.ts
+  Identidade, consultas D1 e persistência.
+
+migrations/0001_media_delivery_history.sql
+  Schema SQLite/D1.
+
+src/social.ts
+  Resolução social.
+
+src/media.ts
+  Preparação de arquivo/HLS.
+
+src/telegram.ts
+  Telegram Bot API.
+
+src/hls/*
+  Parser, downloader, decoder, resolver e remuxer HLS.
+```
+
+---
+
+# Desenvolvimento
+
+```bash
+npm run db:migrate:local
+npm run dev
+```
+
+Typecheck:
+
+```bash
+npm run typecheck
+```
+
+Build:
+
+```bash
+npm run build
+```
+
+Deploy:
 
 ```bash
 npm run deploy
 ```
 
-## Fixing an out-of-sync npm lock file
+---
 
-Cloudflare uses `npm ci` when a `package-lock.json` is committed. `npm ci` intentionally fails when `package.json` contains dependencies that are missing from the lock file.
+# Observação sobre segurança
 
-If the repository still contains the old lock file from before `mux.js` was added, regenerate and commit it once:
-
-```bash
-rm -rf node_modules package-lock.json
-npm install
-npm run typecheck
-git add package.json package-lock.json
-git commit -m "chore: sync npm lockfile"
-```
-
-After that, Cloudflare can run `npm ci` normally. Do not keep the stale lock file.
-
-## API
-
-The existing API remains compatible:
-
-```http
-POST /send
-Authorization: Bearer <RELAY_TOKEN>
-Content-Type: application/json
-```
-
-Example:
-
-```json
-{
-  "mediaUrl": "https://example.com/master.m3u8",
-  "sourceUrl": "https://example.com/post/123",
-  "caption": "Example",
-  "parseMode": "HTML",
-  "mediaType": "video",
-  "channel": "-1001234567890",
-  "mediaHeaders": {
-    "Referer": "https://example.com/"
-  },
-  "metadata": {
-    "provider": "generic"
-  }
-}
-```
-
-
-### Dynamic Telegram destinations
-
-The Worker accepts the same fields already produced by the userscript.
-
-Send to one channel:
-
-```json
-{
-  "mediaUrl": "https://example.com/video.mp4",
-  "channel": "-1001234567890"
-}
-```
-
-Send to multiple channels:
-
-```json
-{
-  "mediaUrl": "https://example.com/master.m3u8",
-  "channels": [
-    "-1001234567890",
-    "-1009876543210",
-    "@my_public_channel"
-  ]
-}
-```
-
-When both `channel` and `channels` are present, the Worker merges and de-duplicates them. When neither is present, it falls back to `TELEGRAM_CHAT_ID`. The media is resolved/downloaded/remuxed once, then delivered to each requested destination sequentially.
-
-
-## Photo and carousel support
-
-The same `/send` endpoint now accepts photos as first-class Telegram media. Set `mediaType` to `photo` and send `mediaUrl` or `photoUrl`. The Worker routes the request through Telegram `sendPhoto`, including multipart uploads when the caller already has the image bytes.
-
-Single photo:
-
-```json
-{
-  "mediaUrl": "https://pbs.twimg.com/media/example.jpg?format=jpg&name=orig",
-  "photoUrl": "https://pbs.twimg.com/media/example.jpg?format=jpg&name=orig",
-  "mediaType": "photo",
-  "title": "@author",
-  "text": "Full tweet text",
-  "pageUrl": "https://x.com/author/status/123",
-  "caption": "<b>@author</b>\n\nFull tweet text\n\n<a href=\"https://x.com/author/status/123\">x.com</a>",
-  "parseMode": "HTML",
-  "channels": ["-1001234567890"]
-}
-```
-
-Photo/video carousel or album:
-
-```json
-{
-  "mediaItems": [
-    { "mediaUrl": "https://example.com/1.jpg", "mediaType": "photo" },
-    { "mediaUrl": "https://example.com/2.jpg", "mediaType": "photo" },
-    { "mediaUrl": "https://example.com/3.mp4", "mediaType": "video" }
-  ],
-  "provider": "instagram",
-  "title": "Instagram",
-  "text": "Full Instagram post/caption text",
-  "pageUrl": "https://www.instagram.com/p/example/",
-  "caption": "<b>Instagram</b>\n\nFull Instagram post/caption text\n\n<a href=\"https://www.instagram.com/p/example/\">instagram.com</a>",
-  "parseMode": "HTML",
-  "channels": ["-1001234567890"]
-}
-```
-
-Album requests accept 2-100 direct HTTP(S) photo/video items. The Worker splits them into Telegram `sendMediaGroup` batches of at most 10 items and places the post caption on the first item of the first batch. HLS/DASH items remain on the single-media path so they can be prepared/remuxed first.
-
-For compatibility with the All-in-One Video Downloader userscript, the old item-by-item payload still works. The Worker also accepts `photoUrl` as an alias for `mediaUrl`. If `caption` is omitted, the Worker builds a plain-text caption from `title`, `text`, and `pageUrl`.
-
-## Supported HLS behavior
-
-- Nested master playlists.
-- `EXT-X-STREAM-INF`.
-- `AVERAGE-BANDWIDTH`, `BANDWIDTH`, `RESOLUTION`, `FRAME-RATE`, `SCORE`, and codec metadata.
-- `EXT-X-MEDIA` alternate audio renditions.
-- `EXT-X-DEFINE` variables with `NAME`/`VALUE`, `IMPORT`, and `QUERYPARAM`.
-- `EXTINF`.
-- `EXT-X-MEDIA-SEQUENCE`.
-- `EXT-X-BYTERANGE`, including implicit offsets for consecutive full segments using the same URI.
-- `EXT-X-KEY` with `METHOD=AES-128` and identity key format.
-- Default AES-128 IV derivation from the media sequence number.
-- `EXT-X-MAP` init segments.
-- `EXT-X-GAP`.
-- `EXT-X-DISCONTINUITY` metadata.
-- `EXT-X-PROGRAM-DATE-TIME` metadata.
-- `EXT-X-PART` parsing and trailing-part fallback for LL-HLS snapshots.
-- Live playlists are treated as snapshots of the currently listed media.
-
-## Remux behavior
-
-### MPEG-TS
-
-MPEG-TS media is fed through `mux.js`'s MP4 transmuxer with remuxing enabled, producing fragmented MP4 suitable for the Telegram video upload path.
-
-### Existing fMP4/CMAF
-
-For a single multiplexed track, the Worker keeps the initialization segment followed by the media fragments.
-
-### Separate audio/video renditions
-
-The lightweight Worker remuxer supports separate renditions when both tracks are MPEG-TS and `mux.js` can combine them. Independent fMP4 audio/video renditions require track-table/sample-level MP4 muxing and are rejected with an explicit error instead of generating a corrupt MP4.
-
-## Encryption limits
-
-Supported:
-
-- `METHOD=AES-128`
-- `KEYFORMAT=identity` or omitted
-
-Not treated as generic decryptable HLS:
-
-- `SAMPLE-AES`
-- FairPlay
-- Widevine
-- PlayReady
-- DRM-specific key formats
-
-## Memory note
-
-This implementation intentionally uses a conservative default media budget because HLS assembly and transmuxing can temporarily hold input and output buffers at the same time. For large videos, a storage-backed architecture using R2 plus a dedicated media processing service is safer than raising the in-memory limit aggressively.
-
-
-## Multipart file forwarding
-
-`POST /send` also accepts `multipart/form-data`. This is the preferred mode when the caller already has the final MP4 bytes, such as the All-in-One Video Downloader userscript.
-
-The Worker accepts:
-
-- `payload`: JSON string with the same metadata used by the JSON API.
-- `file`: one or more media files, including photos. The field may be repeated.
-- `files`: optional repeated file field. Any non-empty multipart `File` field is accepted.
-- `audioFile`: optional separate audio track. It is forwarded with `sendAudio`.
-- Image uploads (`image/jpeg`, `image/png`, `image/webp`, `image/avif`, `image/gif`) are forwarded with `sendPhoto`.
-
-A single MP4:
-
-```js
-const form = new FormData();
-form.append("payload", JSON.stringify({
-  channels: ["-1001234567890"],
-  caption: "<b>Example</b>",
-  parseMode: "HTML",
-  mediaType: "video",
-  sourceUrl: "https://example.com/post/123",
-}));
-form.append("file", videoBlob, "video.mp4");
-
-await fetch("https://your-worker.example/send", {
-  method: "POST",
-  headers: {
-    Authorization: "Bearer <RELAY_TOKEN>",
-  },
-  body: form,
-});
-```
-
-Multiple MP4 files:
-
-```js
-const form = new FormData();
-form.append("payload", JSON.stringify({
-  channels: ["-1001234567890", "-1009876543210"],
-  caption: "Multiple videos",
-  mediaType: "video",
-}));
-
-for (const file of videoFiles) {
-  form.append("file", file, file.name);
-}
-
-await fetch("https://your-worker.example/send", {
-  method: "POST",
-  headers: {
-    Authorization: "Bearer <RELAY_TOKEN>",
-  },
-  body: form,
-});
-```
-
-The files are forwarded sequentially to each requested Telegram destination. This avoids duplicating several large multipart bodies in Worker memory at once.
-
-The userscript payload is accepted directly:
-
-```text
-payload = JSON string
-file = prepared video Blob
- audioFile = optional prepared audio Blob
-```
-
-When a `file` is already present, the Worker does not fetch `mediaUrl` again. It forwards the uploaded bytes directly to Telegram. `mediaUrl`, `videoUrl`, `sourceUrl`, `pageUrl`, `frameUrl`, `title`, `text`, and `metadata` remain available as descriptive payload metadata.
-
-### Verbose error responses
-
-Errors now identify the failing stage, such as:
-
-- `authorization`
-- `parse-multipart`
-- `parse-payload`
-- `validate-channels`
-- `validate-payload`
-- `validate-files`
-- `prepare-media`
-- `telegram`
-- `telegram-forward`
-
-Multipart responses include a per-file and per-channel delivery list with the Telegram method, HTTP status, Telegram error code, description, response parameters, and raw response body when available.
-
-A multi-file request can return HTTP `207` when only part of the delivery matrix succeeds. A complete Telegram failure returns `502`.
-
-## Efficient large-media architecture
-
-This Worker is optimized to keep memory usage predictable inside the Cloudflare Workers runtime.
-
-### Recommended client behavior
-
-For local files, especially from an iOS Shortcut or Safari Downloads automation, send exactly one file per `POST /send` request and wait for the response before sending the next file.
-
-```text
-file-1.mp4 -> POST /send -> wait for response
-file-2.mp4 -> POST /send -> wait for response
-file-3.mp4 -> POST /send -> wait for response
-```
-
-Avoid sending many large files concurrently. Cloudflare Workers isolates share a 128 MB memory ceiling, so sequential delivery is substantially safer than concurrent buffering.
-
-### Multipart forwarding
-
-Uploaded `File` objects are forwarded directly to Telegram through `FormData`. The Worker no longer converts each incoming file through `arrayBuffer() -> Uint8Array -> Blob`, avoiding a full extra in-memory copy of every uploaded file.
-
-Multiple repeated `file` fields remain supported for convenience, but the Worker enforces a combined multipart forwarding budget. For large batches, one file per request is strongly recommended.
-
-Optional environment variables:
-
-- `MAX_MEDIA_BYTES`: maximum size of one uploaded/direct-buffered file. Hard-capped by the Worker implementation.
-- `MULTIPART_MAX_TOTAL_BYTES`: maximum combined size of files accepted in one multipart request. Defaults to a conservative budget derived from `MAX_MEDIA_BYTES`.
-- `HLS_MAX_MEDIA_BYTES`: separate and intentionally smaller in-memory budget for HLS download/remux. Default: 16 MB. Hard cap: 24 MB.
-- `HLS_CONCURRENCY`: HLS segment download concurrency. Default: 2. Maximum: 4.
-
-### HLS
-
-HLS remuxing still requires in-memory segment and mux buffers because `mux.js` produces an in-memory MP4 result. For this reason HLS has a separate, smaller memory budget and lower default concurrency. Large HLS assets should be muxed on the client/device or by a dedicated media-processing service rather than inside this Worker.
-
-### Processing strategy
-
-```text
-Direct public URL small enough for Telegram remote fetch
-  -> Worker sends URL to Telegram
-
-Direct public URL that must be uploaded
-  -> Worker downloads within the configured bounded buffer
-  -> Worker uploads to Telegram
-
-Local MP4/File
-  -> multipart POST
-  -> File forwarded directly without arrayBuffer duplication
-
-HLS
-  -> resolve playlist
-  -> bounded segment download
-  -> bounded in-memory remux
-  -> upload to Telegram
-```
-
-The Worker intentionally prefers predictable memory use over accepting arbitrarily large HLS mux jobs.
+Se um token real de Telegram ou relay já tiver sido commitado/publicado anteriormente, rotacione-o. A configuração desta versão deixa secrets fora de `wrangler.jsonc` e fornece apenas `.dev.vars.example` para desenvolvimento local.

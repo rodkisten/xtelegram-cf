@@ -3,9 +3,19 @@
   "name": "xtelegram-cf",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-22",
-	"vars": {
-		"TELEGRAM_BOT_TOKEN": "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg",
-		"TELEGRAM_CHAT_ID": "-621561106",
-		"RELAY_TOKEN": "12345678"
-	}
+
+  // After `npm run db:create`, paste the generated D1 binding here.
+  // Keep the binding name exactly RELAY_DB because src/types.ts uses env.RELAY_DB.
+  // "d1_databases": [
+  //   {
+  //     "binding": "RELAY_DB",
+  //     "database_name": "xtelegram-relay",
+  //     "database_id": "<UUID returned by wrangler d1 create>"
+  //   }
+  // ],
+
+  "vars": {
+    "MAX_MEDIA_BYTES": "32000000",
+    "HLS_CONCURRENCY": "4"
+  }
 }
