@@ -389,70 +389,290 @@ interface BatchBody {
   caption?: unknown;
   parseMode?: unknown;
   metadata?: unknown;
+  concurrency?: unknown;
 }
 
+type BatchPreparedItem = {
+  index: number;
+  input: Record<string, unknown>;
+  payload: Record<string, unknown>;
+  channels: string[];
+  force: boolean;
+  identity: Awaited<ReturnType<typeof resolveMediaIdentity>> | null;
+  isDirect: boolean;
+  preSkipped: Array<{ channelId: string; reason: "already_sent" | "duplicate_in_batch" }>;
+};
+
+const MAX_BATCH_ITEMS = 50;
+const DEFAULT_BATCH_CONCURRENCY = 3;
+const MAX_BATCH_CONCURRENCY = 5;
+
 async function handleBatch(request: Request, env: Env): Promise<Response> {
-  if (!isAuthorized(request, env)) return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+  if (!isAuthorized(request, env)) {
+    return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+  }
+
   let body: BatchBody;
-  try { body = await request.json() as BatchBody; } catch { return json({ ok: false, error: "Invalid JSON body" }, 400); }
+  try {
+    body = await request.json() as BatchBody;
+  } catch {
+    return json({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+
   const rawItems = Array.isArray(body.items) ? body.items : Array.isArray(body.links) ? body.links : null;
-  if (!rawItems?.length) return json({ ok: false, error: "Batch requires a non-empty links[] or items[] array." }, 400);
-  if (rawItems.length > 50) return json({ ok: false, error: "A batch can contain at most 50 links/items." }, 400);
+  if (!rawItems?.length) {
+    return json({ ok: false, error: "Batch requires a non-empty links[] or items[] array." }, 400);
+  }
+  if (rawItems.length > MAX_BATCH_ITEMS) {
+    return json({ ok: false, error: `A batch can contain at most ${MAX_BATCH_ITEMS} links/items.` }, 400);
+  }
 
   const channelValidation = normalizeTelegramChannels(body.channel, body.channels);
   if (!channelValidation.ok) return json({ ok: false, error: channelValidation.error }, 400);
   const sharedChannels = resolveTelegramChatIds(channelValidation.value, env.TELEGRAM_CHAT_ID);
   if (!sharedChannels.length) return json({ ok: false, error: "No Telegram channel was provided." }, 400);
 
-  const results: Array<Record<string, unknown>> = [];
-  for (let index = 0; index < rawItems.length; index += 1) {
-    const raw = rawItems[index];
-    const item = typeof raw === "string" ? { url: raw } : raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+  let db: D1Database;
+  try {
+    db = requireRelayDb(env);
+  } catch (error) {
+    return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
+  }
+
+  const invalidResults = new Map<number, Record<string, unknown>>();
+  const prepared: BatchPreparedItem[] = [];
+
+  await Promise.all(rawItems.map(async (raw, index) => {
+    const item = typeof raw === "string"
+      ? { url: raw }
+      : raw && typeof raw === "object" && !Array.isArray(raw)
+        ? raw as Record<string, unknown>
+        : null;
+
     if (!item) {
-      results.push({ index, ok: false, status: 400, error: "Batch item must be a URL string or object." });
-      continue;
+      invalidResults.set(index, { index, ok: false, status: 400, error: "Batch item must be a URL string or object." });
+      return;
     }
-    const itemChannels = item.channel !== undefined || item.channels !== undefined
+
+    const itemChannelsValidation = item.channel !== undefined || item.channels !== undefined
       ? normalizeTelegramChannels(item.channel, item.channels)
       : { ok: true as const, value: sharedChannels };
-    if (!itemChannels.ok) {
-      results.push({ index, ok: false, status: 400, error: itemChannels.error });
-      continue;
+    if (!itemChannelsValidation.ok) {
+      invalidResults.set(index, { index, ok: false, status: 400, error: itemChannelsValidation.error });
+      return;
     }
+
+    const channels = resolveTelegramChatIds(
+      itemChannelsValidation.value.length ? itemChannelsValidation.value : sharedChannels,
+      env.TELEGRAM_CHAT_ID,
+    );
+    if (!channels.length) {
+      invalidResults.set(index, { index, ok: false, status: 400, error: "No Telegram channel was provided for this batch item." });
+      return;
+    }
+
+    const force = item.force === true || (item.force === undefined && body.force === true);
     const payload: Record<string, unknown> = {
       ...item,
-      channels: itemChannels.value.length ? itemChannels.value : sharedChannels,
-      force: item.force === true || (item.force === undefined && body.force === true),
+      channels,
+      force,
       caption: item.caption ?? body.caption,
       parseMode: item.parseMode ?? body.parseMode,
       metadata: item.metadata ?? body.metadata,
     };
-    const isDirect = "mediaUrl" in payload || "photoUrl" in payload || "videoUrl" in payload || "fileUrl" in payload || "mediaItems" in payload || "mediaUrls" in payload || "photoUrls" in payload;
-    const internal = cloneAuthorizedJsonRequest(request, payload);
-    const response = isDirect ? await handleSend(internal, env) : await handleResolve(internal, env, true);
-    const result = await response.json() as Record<string, unknown>;
-    results.push({ index, status: response.status, ...result });
+    delete payload.channel;
+
+    const isDirect = "mediaUrl" in payload || "photoUrl" in payload || "videoUrl" in payload ||
+      "fileUrl" in payload || "mediaItems" in payload || "mediaUrls" in payload || "photoUrls" in payload;
+
+    let identity: Awaited<ReturnType<typeof resolveMediaIdentity>> | null = null;
+    try {
+      const identityInput = normalizeMediaCheckIdentityInput(payload);
+      if (identityInput) identity = await resolveMediaIdentity(identityInput);
+    } catch {
+      // Identity can still be resolved later by /send after a social resolver runs.
+      // We only skip the batch preflight for this item.
+    }
+
+    prepared.push({ index, input: item, payload, channels, force, identity, isDirect, preSkipped: [] });
+  }));
+  prepared.sort((left, right) => left.index - right.index);
+
+  // One D1 query for every non-forced item whose identity is already known.
+  // This replaces the old "one duplicate lookup per item" batch behavior.
+  const preflightItems = prepared.filter((item) => !item.force && item.identity);
+  const preflightIdentities = [...new Map(
+    preflightItems.map((item) => [item.identity!.key, item.identity!]),
+  ).values()];
+  const preflightChannels = [...new Set(preflightItems.flatMap((item) => item.channels))];
+  const existing = preflightIdentities.length
+    ? await checkStoredMediaDeliveries(db, preflightIdentities, preflightChannels)
+    : new Map();
+
+  // Prevent duplicate media/channel combinations inside the same request from
+  // being scheduled twice. force=true intentionally bypasses this protection.
+  const scheduledByMediaKey = new Map<string, Set<string>>();
+  for (const item of prepared) {
+    if (item.force || !item.identity) continue;
+    const existingChannels = new Set((existing.get(item.identity.key)?.deliveries ?? []).map((delivery: { channelId: string }) => delivery.channelId));
+    const scheduled = scheduledByMediaKey.get(item.identity.key) ?? new Set<string>();
+    const preSkipped: BatchPreparedItem["preSkipped"] = [];
+    for (const channelId of item.channels) {
+      if (existingChannels.has(channelId)) preSkipped.push({ channelId, reason: "already_sent" });
+      else if (scheduled.has(channelId)) preSkipped.push({ channelId, reason: "duplicate_in_batch" });
+    }
+    item.preSkipped = preSkipped;
+    const skippedChannelIds = new Set(item.preSkipped.map((entry) => entry.channelId));
+    const channelsToSchedule = item.channels.filter((channelId) => !skippedChannelIds.has(channelId));
+    channelsToSchedule.forEach((channelId) => scheduled.add(channelId));
+    scheduledByMediaKey.set(item.identity.key, scheduled);
+    item.payload.channels = channelsToSchedule;
   }
 
+  const concurrency = normalizeBatchConcurrency(body.concurrency);
+  const processed = await mapWithConcurrency(prepared, concurrency, async (item) => {
+    const channelsToSend = Array.isArray(item.payload.channels)
+      ? item.payload.channels.filter((value): value is string => typeof value === "string")
+      : item.channels;
+
+    if (!item.force && item.identity && channelsToSend.length === 0) {
+      return {
+        index: item.index,
+        ok: false,
+        partial: false,
+        conflict: true,
+        status: 409,
+        error: "Media was already sent to every requested Telegram channel or duplicated inside this batch.",
+        media: item.identity,
+        channels: {
+          requested: item.channels,
+          attempted: [],
+          inserted: [],
+          notSent: item.preSkipped,
+        },
+      } as Record<string, unknown>;
+    }
+
+    const internal = cloneAuthorizedJsonRequest(request, item.payload);
+    const response = item.isDirect ? await handleSend(internal, env) : await handleResolve(internal, env, true);
+    const result = await response.json() as Record<string, unknown>;
+    const merged = mergeBatchPreflightResult(result, item.channels, item.preSkipped);
+    return { index: item.index, status: response.status, ...merged };
+  });
+
+  const resultByIndex = new Map<number, Record<string, unknown>>();
+  for (const result of processed) resultByIndex.set(Number(result.index), result);
+  for (const [index, result] of invalidResults) resultByIndex.set(index, result);
+  const results = rawItems.map((_, index) => resultByIndex.get(index) ?? {
+    index,
+    ok: false,
+    status: 500,
+    error: "Batch item did not produce a result.",
+  });
+
   const succeeded = results.filter((item) => item.ok === true).length;
-  const conflicts = results.filter((item) => item.status === 409).length;
+  const conflicts = results.filter((item) => item.status === 409 || item.conflict === true).length;
   const failed = results.length - succeeded;
+  const insertedChannels = results.reduce((total, item) => {
+    const channels = item.channels as { inserted?: unknown } | undefined;
+    return total + (Array.isArray(channels?.inserted) ? channels.inserted.length : 0);
+  }, 0);
+  const skippedAlreadySent = results.reduce((total, item) => {
+    const channels = item.channels as { notSent?: unknown } | undefined;
+    if (!Array.isArray(channels?.notSent)) return total;
+    return total + channels.notSent.filter((failure) =>
+      failure && typeof failure === "object" && (failure as { reason?: unknown }).reason === "already_sent"
+    ).length;
+  }, 0);
+  const skippedDuplicateInBatch = results.reduce((total, item) => {
+    const channels = item.channels as { notSent?: unknown } | undefined;
+    if (!Array.isArray(channels?.notSent)) return total;
+    return total + channels.notSent.filter((failure) =>
+      failure && typeof failure === "object" && (failure as { reason?: unknown }).reason === "duplicate_in_batch"
+    ).length;
+  }, 0);
   const status = succeeded === results.length ? 200 : succeeded > 0 ? 207 : conflicts === results.length ? 409 : 502;
+
   return json({
     ok: succeeded > 0,
     partial: succeeded > 0 && failed > 0,
-    summary: { requested: results.length, succeeded, failed, conflicts },
+    summary: {
+      requested: results.length,
+      succeeded,
+      failed,
+      conflicts,
+      insertedChannels,
+      skippedAlreadySent,
+      skippedDuplicateInBatch,
+      preflightQueries: preflightIdentities.length ? 1 : 0,
+      concurrency,
+    },
     results,
   }, status);
+}
+
+function normalizeBatchConcurrency(value: unknown): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : DEFAULT_BATCH_CONCURRENCY;
+  if (!Number.isFinite(numeric)) return DEFAULT_BATCH_CONCURRENCY;
+  return Math.min(MAX_BATCH_CONCURRENCY, Math.max(1, Math.floor(numeric)));
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await mapper(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function mergeBatchPreflightResult(
+  result: Record<string, unknown>,
+  requestedChannels: string[],
+  preSkipped: Array<{ channelId: string; reason: "already_sent" | "duplicate_in_batch" }>,
+): Record<string, unknown> {
+  if (!preSkipped.length) return result;
+
+  const channels = result.channels && typeof result.channels === "object" && !Array.isArray(result.channels)
+    ? result.channels as Record<string, unknown>
+    : {};
+  const attempted = Array.isArray(channels.attempted) ? channels.attempted : [];
+  const inserted = Array.isArray(channels.inserted) ? channels.inserted : [];
+  const notSent = Array.isArray(channels.notSent) ? channels.notSent : [];
+  const mergedNotSent = [
+    ...preSkipped,
+    ...notSent,
+  ];
+
+  return {
+    ...result,
+    partial: inserted.length > 0 && mergedNotSent.length > 0,
+    channels: {
+      ...channels,
+      requested: requestedChannels,
+      attempted,
+      inserted,
+      notSent: mergedNotSent,
+    },
+  };
 }
 
 function handleHealth(): Response {
   return json({
     ok: true,
     service: "generic-telegram-media-relay",
-    version: "2.6.0",
+    version: "2.7.0",
     status: "online",
-    runtime: "typescript-hls-remux-photo-album-d1-dedupe-batch-check",
+    runtime: "typescript-hls-remux-photo-album-d1-dedupe-batch-send",
     timestamp: new Date().toISOString(),
   });
 }
