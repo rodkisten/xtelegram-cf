@@ -1,5 +1,6 @@
 import {
-  createMediaIdentity,
+  checkStoredMediaDeliveries,
+  resolveMediaIdentity,
   findStoredMedia,
   getAlreadyDeliveredChannels,
   getStoredMedia,
@@ -69,6 +70,10 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/health") {
       return handleHealth();
+    }
+
+    if (request.method === "POST" && url.pathname === "/media/check") {
+      return handleMediaCheck(request, env);
     }
 
     if (request.method === "GET" && (url.pathname === "/media" || url.pathname.startsWith("/media/"))) {
@@ -173,6 +178,187 @@ async function mergeResolveResponse(response: Response, resolution: unknown): Pr
 }
 
 
+
+interface MediaCheckBody {
+  items?: unknown;
+  channel?: unknown;
+  channels?: unknown;
+}
+
+type MediaCheckInputObject = {
+  mediaKey?: unknown;
+  provider?: unknown;
+  mediaId?: unknown;
+  url?: unknown;
+  sourceUrl?: unknown;
+  pageUrl?: unknown;
+  mediaUrl?: unknown;
+};
+
+type NormalizedMediaCheckInput = {
+  index: number;
+  input: unknown;
+  identity: Awaited<ReturnType<typeof resolveMediaIdentity>>;
+};
+
+const MAX_MEDIA_CHECK_ITEMS = 100;
+const MAX_MEDIA_CHECK_CHANNELS = 100;
+
+async function handleMediaCheck(request: Request, env: Env): Promise<Response> {
+  if (!isAuthorized(request, env)) {
+    return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+  }
+
+  let body: MediaCheckBody;
+  try {
+    body = await request.json() as MediaCheckBody;
+  } catch {
+    return json({ ok: false, error: "Invalid JSON body" }, 400);
+  }
+
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    return json({ ok: false, error: "items must be a non-empty array" }, 400);
+  }
+  if (body.items.length > MAX_MEDIA_CHECK_ITEMS) {
+    return json({ ok: false, error: `items can contain at most ${MAX_MEDIA_CHECK_ITEMS} entries` }, 400);
+  }
+
+  const channelValidation = normalizeTelegramChannels(body.channel, body.channels);
+  if (!channelValidation.ok) {
+    return json({ ok: false, error: channelValidation.error }, 400);
+  }
+  const requestedChannels = [...new Set(channelValidation.value)];
+  if (requestedChannels.length > MAX_MEDIA_CHECK_CHANNELS) {
+    return json({ ok: false, error: `channels can contain at most ${MAX_MEDIA_CHECK_CHANNELS} entries` }, 400);
+  }
+
+  let db: D1Database;
+  try {
+    db = requireRelayDb(env);
+  } catch (error) {
+    return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
+  }
+
+  const valid: NormalizedMediaCheckInput[] = [];
+  const invalid = new Map<number, string>();
+
+  await Promise.all(body.items.map(async (input, index) => {
+    try {
+      const identityInput = normalizeMediaCheckIdentityInput(input);
+      if (!identityInput) {
+        invalid.set(index, "Provide a mediaKey, provider + mediaId, or an HTTP(S) URL");
+        return;
+      }
+      const identity = await resolveMediaIdentity(identityInput);
+      valid.push({ index, input, identity });
+    } catch (error) {
+      invalid.set(index, getErrorMessage(error));
+    }
+  }));
+  valid.sort((left, right) => left.index - right.index);
+
+  const validByIndex = new Map(valid.map((item) => [item.index, item]));
+  const uniqueIdentities = [...new Map(valid.map((item) => [item.identity.key, item.identity])).values()];
+  const records = await checkStoredMediaDeliveries(db, uniqueIdentities, requestedChannels);
+
+  const results = body.items.map((input, index) => {
+    const validationError = invalid.get(index);
+    if (validationError) {
+      return {
+        index,
+        input,
+        valid: false,
+        exists: false,
+        error: validationError,
+        channels: [],
+        ...(requestedChannels.length ? { requestedChannels: buildRequestedChannelStatus(requestedChannels, []) } : {}),
+      };
+    }
+
+    const normalized = validByIndex.get(index)!;
+    const record = records.get(normalized.identity.key);
+    const deliveries = record?.deliveries ?? [];
+
+    return {
+      index,
+      input,
+      valid: true,
+      mediaKey: normalized.identity.key,
+      provider: normalized.identity.provider,
+      mediaId: normalized.identity.providerMediaId,
+      canonicalUrl: normalized.identity.canonicalUrl,
+      exists: Boolean(record),
+      media: record?.media ?? null,
+      channels: deliveries,
+      ...(requestedChannels.length
+        ? { requestedChannels: buildRequestedChannelStatus(requestedChannels, deliveries) }
+        : {}),
+    };
+  });
+
+  const uniqueFound = uniqueIdentities.filter((identity) => records.has(identity.key)).length;
+  const validCount = valid.length;
+  const foundInputs = results.filter((item) => item.valid && item.exists).length;
+
+  return json({
+    ok: true,
+    results,
+    meta: {
+      requested: body.items.length,
+      valid: validCount,
+      invalid: body.items.length - validCount,
+      unique: uniqueIdentities.length,
+      found: uniqueFound,
+      missing: uniqueIdentities.length - uniqueFound,
+      foundInputs,
+      queryCount: uniqueIdentities.length ? 1 : 0,
+      channelFilterCount: requestedChannels.length,
+    },
+  });
+}
+
+function normalizeMediaCheckIdentityInput(input: unknown): {
+  mediaKey?: string | null;
+  provider?: string | null;
+  mediaId?: string | null;
+  sourceUrl?: string | null;
+  pageUrl?: string | null;
+  mediaUrl?: string | null;
+} | null {
+  if (typeof input === "string") {
+    const value = input.trim();
+    if (!value) return null;
+    const url = normalizePublicHttpUrl(value);
+    return url ? { sourceUrl: url.href } : value.includes(":") ? { mediaKey: value } : null;
+  }
+
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const item = input as MediaCheckInputObject;
+  const mediaKey = typeof item.mediaKey === "string" ? item.mediaKey.trim() : "";
+  const provider = typeof item.provider === "string" ? item.provider.trim() : "";
+  const mediaId = typeof item.mediaId === "string" ? item.mediaId.trim() : "";
+  const rawUrl = [item.url, item.sourceUrl, item.pageUrl, item.mediaUrl].find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const normalizedUrl = rawUrl ? normalizePublicHttpUrl(rawUrl) : null;
+
+  if (mediaKey) return { mediaKey, provider: provider || null, mediaId: mediaId || null, sourceUrl: normalizedUrl?.href ?? null };
+  if (provider && mediaId) return { provider, mediaId, sourceUrl: normalizedUrl?.href ?? null };
+  if (normalizedUrl) return { provider: provider || null, mediaId: mediaId || null, sourceUrl: normalizedUrl.href };
+  return null;
+}
+
+function buildRequestedChannelStatus(
+  requestedChannels: string[],
+  deliveries: Array<{ channelId: string; sendCount: number; firstSentAt: string; lastSentAt: string }>,
+): Record<string, { sent: boolean; sendCount: number; firstSentAt: string | null; lastSentAt: string | null }> {
+  const byChannel = new Map(deliveries.map((delivery) => [delivery.channelId, delivery]));
+  return Object.fromEntries(requestedChannels.map((channelId) => {
+    const delivery = byChannel.get(channelId);
+    return [channelId, delivery
+      ? { sent: true, sendCount: delivery.sendCount, firstSentAt: delivery.firstSentAt, lastSentAt: delivery.lastSentAt }
+      : { sent: false, sendCount: 0, firstSentAt: null, lastSentAt: null }];
+  }));
+}
+
 async function handleMediaQuery(request: Request, env: Env): Promise<Response> {
   if (!isAuthorized(request, env)) return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
   let db: D1Database;
@@ -264,9 +450,9 @@ function handleHealth(): Response {
   return json({
     ok: true,
     service: "generic-telegram-media-relay",
-    version: "2.5.0",
+    version: "2.6.0",
     status: "online",
-    runtime: "typescript-hls-remux-photo-album-d1-dedupe",
+    runtime: "typescript-hls-remux-photo-album-d1-dedupe-batch-check",
     timestamp: new Date().toISOString(),
   });
 }
@@ -369,7 +555,7 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
 
-  const identity = await createMediaIdentity({
+  const identity = await resolveMediaIdentity({
     provider: input.provider,
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
@@ -571,7 +757,7 @@ async function handleJsonAlbumSend(
   try { db = requireRelayDb(env); } catch (error) {
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
-  const identity = await createMediaIdentity({
+  const identity = await resolveMediaIdentity({
     provider: input.provider,
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
@@ -1530,7 +1716,7 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
   }
   const multipartIdentityFallback = payload.sourceUrl || payload.pageUrl || payload.mediaUrl || payload.photoUrl || payload.videoUrl ||
     `multipart:${uploadedFiles.map(({ file }) => `${file.name}:${file.size}:${file.type}`).join("|")}`;
-  const identity = await createMediaIdentity({
+  const identity = await resolveMediaIdentity({
     provider: payload.provider || "multipart",
     mediaId: payload.mediaId || null,
     mediaKey: payload.mediaKey || null,

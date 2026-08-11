@@ -65,7 +65,7 @@ export function requireRelayDb(env: Env): D1Database {
   return env.RELAY_DB;
 }
 
-export async function createMediaIdentity(input: MediaIdentityInput): Promise<MediaIdentity> {
+export async function resolveMediaIdentity(input: MediaIdentityInput): Promise<MediaIdentity> {
   const explicitKey = normalizeKeyPart(input.mediaKey);
   const provider = normalizeProvider(input.provider, input.sourceUrl || input.pageUrl || input.mediaUrl || "");
   const canonicalUrl = canonicalizeIdentityUrl(
@@ -93,6 +93,76 @@ export async function createMediaIdentity(input: MediaIdentityInput): Promise<Me
     providerMediaId,
     canonicalUrl,
   };
+}
+
+
+/** @deprecated Prefer resolveMediaIdentity so every API path shares the same identity resolver. */
+export async function createMediaIdentity(input: MediaIdentityInput): Promise<MediaIdentity> {
+  return resolveMediaIdentity(input);
+}
+
+export interface MediaCheckRecord {
+  media: ReturnType<typeof formatMediaRow>;
+  deliveries: ReturnType<typeof formatDeliveryRow>[];
+}
+
+export async function checkStoredMediaDeliveries(
+  db: D1Database,
+  identities: MediaIdentity[],
+  channels: string[] = [],
+): Promise<Map<string, MediaCheckRecord>> {
+  const mediaKeys = [...new Set(identities.map((identity) => identity.key).filter(Boolean))];
+  if (!mediaKeys.length) return new Map();
+
+  const requestedChannels = [...new Set(channels.map((channel) => channel.trim()).filter(Boolean))];
+  const channelJoin = requestedChannels.length
+    ? ` AND d.channel_id IN (${requestedChannels.map(() => "?").join(",")})`
+    : "";
+  const keyPlaceholders = mediaKeys.map(() => "?").join(",");
+
+  // One indexed query for the complete lookup. media.media_key is the PK and
+  // media_deliveries has PRIMARY KEY(media_key, channel_id), so SQLite/D1 can
+  // satisfy both the key lookup and the optional channel filter without scans.
+  const result = await db
+    .prepare(
+      `SELECT
+        m.media_key, m.provider, m.provider_media_id, m.canonical_url,
+        m.source_url, m.page_url, m.media_type, m.media_count,
+        m.metadata_json, m.first_seen_at, m.updated_at,
+        d.channel_id, d.telegram_chat_id, d.telegram_chat_title,
+        d.first_message_ids_json, d.last_message_ids_json,
+        d.send_count, d.first_sent_at, d.last_sent_at
+       FROM media AS m
+       LEFT JOIN media_deliveries AS d
+         ON d.media_key = m.media_key${channelJoin}
+       WHERE m.media_key IN (${keyPlaceholders})`,
+    )
+    .bind(...requestedChannels, ...mediaKeys)
+    .all<StoredMediaRow & Partial<StoredDeliveryRow>>();
+
+  const records = new Map<string, MediaCheckRecord>();
+  for (const row of result.results || []) {
+    let record = records.get(row.media_key);
+    if (!record) {
+      record = { media: formatMediaRow(row), deliveries: [] };
+      records.set(row.media_key, record);
+    }
+
+    if (row.channel_id) {
+      record.deliveries.push(formatDeliveryRow({
+        channel_id: row.channel_id,
+        telegram_chat_id: row.telegram_chat_id ?? null,
+        telegram_chat_title: row.telegram_chat_title ?? null,
+        first_message_ids_json: row.first_message_ids_json ?? "[]",
+        last_message_ids_json: row.last_message_ids_json ?? "[]",
+        send_count: row.send_count ?? 1,
+        first_sent_at: row.first_sent_at ?? "",
+        last_sent_at: row.last_sent_at ?? "",
+      }));
+    }
+  }
+
+  return records;
 }
 
 export async function getAlreadyDeliveredChannels(
