@@ -1,8 +1,8 @@
-# xtelegram-cf · Telegram Media Relay v2.5
+# xtelegram-cf · Telegram Media Relay v2.6
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
-## O que a v2.5 adiciona
+## O que a v2.6 adiciona
 
 - D1/SQLite como registro persistente das mídias enviadas.
 - Identidade estável no formato `provider:media_id` sempre que possível.
@@ -16,6 +16,7 @@ Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos,
 - Resposta uniforme com IDs inseridos e canais não enviados.
 - `POST /batch` para vários links/posts em uma chamada.
 - `GET /media` e `GET /media/:key` para consulta do histórico.
+- `POST /media/check` para consultar até 100 mídias/URLs em lote com **uma única query D1**, opcionalmente filtrada por até 100 canais.
 - Fotos, vídeos, HLS, arquivos multipart e carrosséis continuam suportados.
 
 ---
@@ -567,6 +568,140 @@ await fetch("https://SEU-WORKER/send", {
 ```
 
 Para multipart, prefira sempre informar `mediaKey` ou `provider + mediaId` ou uma `sourceUrl` estável. Se nenhum identificador existir, o Worker usa um fallback derivado dos metadados dos arquivos.
+
+---
+
+# Consulta otimizada em lote: `POST /media/check`
+
+Use este endpoint quando o cliente já possui uma lista de mídias e quer descobrir **antes de enviar** quais já existem no histórico e para quais canais foram entregues.
+
+O endpoint:
+
+1. valida até 100 entradas;
+2. resolve todas com a mesma função `resolveMediaIdentity()` usada por `/send` e `/batch`;
+3. remove `media_key` repetidas em memória;
+4. executa **uma única query indexada no D1**;
+5. reconstrói os resultados na mesma ordem da entrada.
+
+A consulta usa `media.media_key` (PRIMARY KEY) e `media_deliveries(media_key, channel_id)` (PRIMARY KEY composta). Portanto não é necessário adicionar índices redundantes para este caminho.
+
+## Lista simples de URLs
+
+```bash
+curl -X POST "https://SEU-WORKER/media/check" \
+  -H "Authorization: Bearer SEU_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items": [
+      "https://www.instagram.com/p/ABC123/",
+      "https://x.com/user/status/1234567890",
+      "https://www.tiktok.com/@user/video/7512345678901234567"
+    ]
+  }'
+```
+
+## Chaves ou IDs explícitos
+
+```json
+{
+  "items": [
+    { "mediaKey": "instagram:abc123" },
+    { "provider": "twitter", "mediaId": "1234567890" },
+    { "provider": "tiktok", "mediaId": "7512345678901234567" }
+  ]
+}
+```
+
+Uma string que não é URL deve ser uma `mediaKey` completa, por exemplo `twitter:1234567890`. Um `mediaId` isolado é ambíguo e deve ser enviado junto do `provider`.
+
+## Verificar somente canais selecionados
+
+```json
+{
+  "items": [
+    "https://www.instagram.com/p/ABC123/",
+    "https://x.com/user/status/1234567890"
+  ],
+  "channels": [
+    "-1001111111111",
+    "-1002222222222"
+  ]
+}
+```
+
+Quando `channels` é informado, o filtro é aplicado no próprio `LEFT JOIN`, reduzindo os rows retornados pelo D1.
+
+Resposta resumida:
+
+```json
+{
+  "ok": true,
+  "results": [
+    {
+      "index": 0,
+      "input": "https://www.instagram.com/p/ABC123/",
+      "valid": true,
+      "mediaKey": "instagram:abc123",
+      "provider": "instagram",
+      "mediaId": "abc123",
+      "exists": true,
+      "channels": [
+        {
+          "channelId": "-1001111111111",
+          "sendCount": 2,
+          "firstSentAt": "2026-08-10T12:00:00.000Z",
+          "lastSentAt": "2026-08-11T15:00:00.000Z"
+        }
+      ],
+      "requestedChannels": {
+        "-1001111111111": {
+          "sent": true,
+          "sendCount": 2,
+          "firstSentAt": "2026-08-10T12:00:00.000Z",
+          "lastSentAt": "2026-08-11T15:00:00.000Z"
+        },
+        "-1002222222222": {
+          "sent": false,
+          "sendCount": 0,
+          "firstSentAt": null,
+          "lastSentAt": null
+        }
+      }
+    }
+  ],
+  "meta": {
+    "requested": 2,
+    "valid": 2,
+    "invalid": 0,
+    "unique": 2,
+    "found": 1,
+    "missing": 1,
+    "foundInputs": 1,
+    "queryCount": 1,
+    "channelFilterCount": 2
+  }
+}
+```
+
+### Entradas duplicadas
+
+Se 100 entradas representarem apenas 40 mídias lógicas diferentes, o Worker consulta somente as 40 chaves únicas. A resposta continua contendo as 100 posições originais.
+
+### Entradas inválidas
+
+Entradas inválidas não impedem a consulta das válidas. Elas aparecem individualmente com:
+
+```json
+{
+  "valid": false,
+  "exists": false,
+  "error": "Provide a mediaKey, provider + mediaId, or an HTTP(S) URL"
+}
+```
+
+### Importante: check não substitui deduplicação do envio
+
+`/media/check` é um pre-check de UX e planejamento. `/send` e `/batch` continuam verificando o banco novamente antes de enviar. Isso evita duplicação por race condition caso outra requisição envie a mídia entre o check e o send.
 
 ---
 
