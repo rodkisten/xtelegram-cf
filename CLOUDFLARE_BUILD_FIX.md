@@ -1,6 +1,6 @@
 # Cloudflare build notes
 
-The v2.8.0 archive includes a `package-lock.json` synchronized with
+The v2.9.1 archive includes a `package-lock.json` synchronized with
 `package.json`. Cloudflare can therefore use its normal deterministic install:
 
 ```bash

@@ -1,8 +1,15 @@
-# xtelegram-cf · Telegram Media Relay v2.9
+# xtelegram-cf · Telegram Media Relay v2.9.1
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
-## O que a v2.9 adiciona
+## O que a v2.9.1 adiciona
+
+- **Álbuns mistos resilientes:** o Worker começa pelo `sendMediaGroup` com URLs. Se o Telegram rejeitar definitivamente um CDN protegido (`400`, `413` ou `415`), baixa cada foto/vídeo com os headers do próprio item e reenvia o mesmo lote ordenado como `attach://` multipart.
+- Cada item de `mediaItems` aceita `mediaHeaders` (ou `headers`) próprios; `mediaHeaders` no nível do payload é o fallback para todos os itens. Isso preserva `Referer` e `User-Agent` exigidos por CDNs sociais.
+- O fallback tem orçamento em `MULTIPART_MAX_TOTAL_BYTES`, prepara os itens sequencialmente para limitar memória do Worker e não repete falhas ambíguas de rede/5xx que poderiam duplicar mensagens.
+- A resposta de cada lote inclui `transport`, `fallbackAttempted` e `fallbackError` para diagnóstico.
+
+## Base da v2.9
 
 - **Claims atômicos por mídia + canal** antes do side effect externo no Telegram. Requests concorrentes deixam de passar juntos pela janela `check → send → persist`; o segundo recebe `delivery_in_progress` enquanto o primeiro possui o claim.
 - `delivery_claims` usa TTL configurável por `DELIVERY_CLAIM_TTL_SECONDS` (30 min por padrão) para cobrir resolução/HLS lentos. Claims de canais com falha conhecida são liberados; se o Telegram respondeu sucesso mas a persistência D1 falhar, o claim do canal bem-sucedido é mantido até expirar para evitar um reenvio externo imediato com estado de persistência incerto.
@@ -380,7 +387,11 @@ O HLS é preparado apenas depois da verificação de duplicidade. Se o mesmo pos
     },
     {
       "mediaUrl": "https://example.com/3.mp4",
-      "mediaType": "video"
+      "mediaType": "video",
+      "mediaHeaders": {
+        "Referer": "https://www.instagram.com/",
+        "User-Agent": "Mozilla/5.0"
+      }
     }
   ],
   "provider": "instagram",
@@ -414,6 +425,8 @@ E somente fotos:
 ```
 
 O Worker divide automaticamente álbuns grandes em lotes compatíveis com Telegram. Um canal só entra em `inserted` quando todos os lotes daquele canal foram aceitos.
+
+`mediaHeaders` pode ser enviado em cada item (preferencial) ou no nível raiz do payload como fallback. O Worker só usa esses headers quando precisa baixar o item para o fallback multipart; o caminho normal continua URL-first.
 
 ---
 
@@ -998,7 +1011,7 @@ Opcional.
 
 ### `MULTIPART_MAX_TOTAL_BYTES`
 
-Opcional.
+Opcional. Limita o total combinado de bytes em um encaminhamento multipart e no fallback `attach://` de cada lote de álbum. O default é conservador para evitar pressão de memória no Worker.
 
 ---
 
@@ -1038,7 +1051,7 @@ src/routes/send/single.ts
   Envio de mídia única/HLS.
 
 src/routes/send/album.ts
-  Carrossel/sendMediaGroup e chunking 2-10.
+  Carrossel/sendMediaGroup, chunking 2-10 e fallback URL → attach://.
 
 src/routes/send/multipart.ts
 src/routes/send/multipart-utils.ts
@@ -1084,6 +1097,7 @@ src/hls/*
 - Se um álbum/multipart ficar parcialmente enviado a um canal, o claim desse canal permanece até TTL em vez de ser liberado imediatamente e permitir um retry duplicar os chunks que já chegaram.
 - Multipart sem `mediaKey`, `mediaId` ou URL estável não usa mais `nome+tamanho+MIME` como identidade, pois isso causava falsos conflitos; nesses casos a identidade é request-scoped.
 - Secrets foram removidos de `wrangler.jsonc`; use Wrangler secrets ou `.dev.vars` local.
+- Carrosséis com foto+vídeo em CDN protegido preservam ordem e headers por item; quando a busca remota do Telegram falha de modo definitivo, usam o fallback multipart sem transformar o álbum em mensagens separadas.
 
 ---
 

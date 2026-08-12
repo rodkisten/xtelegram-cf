@@ -1,0 +1,49 @@
+xtelegram-cf 2.9.1
+Base: xtelegram-cf-main (7).zip, versão 2.9.0
+
+Esta versão porta as correções de carrossel para a arquitetura modular mais
+recente do relay; não substitui a base por uma versão antiga.
+
+Alterações
+
+1. Carrosséis mistos foto + vídeo
+   - Mantém o envio URL-first pelo sendMediaGroup.
+   - Quando o Telegram rejeita definitivamente a busca remota do CDN (HTTP
+     400, 413 ou 415), o Worker baixa cada item e reenvia o mesmo lote ordenado
+     em attach:// multipart.
+   - Não repete falhas de rede, timeout ou 5xx, pois seriam ambíguas e poderiam
+     criar mensagens duplicadas.
+
+2. Headers por item
+   - Cada mediaItems[n] aceita mediaHeaders ou headers.
+   - mediaHeaders no nível raiz continua sendo fallback para todos os itens.
+   - Referer, User-Agent e demais headers permitidos são preservados na busca
+     Worker-side de cada arquivo do álbum.
+   - /resolve-and-send agora repassa os headers retornados pelo resolvedor para
+     cada item do álbum.
+
+3. Segurança e memória
+   - A preparação forçada do fallback respeita MAX_MEDIA_BYTES e
+     MULTIPART_MAX_TOTAL_BYTES.
+   - Itens são preparados sequencialmente, mantendo ordem e limitando a pressão
+     de memória do Worker.
+   - O wrangler.jsonc distribuído não contém token do relay, token do bot ou
+     chat ID. Configure-os como secrets do Wrangler antes de publicar.
+
+4. Diagnóstico
+   - Cada lote de telegram.deliveries informa transport, fallbackAttempted e
+     fallbackError.
+
+Versão
+
+package.json, package-lock.json e /health foram atualizados para 2.9.1.
+
+Publicação segura
+
+npx wrangler secret put RELAY_TOKEN
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_CHAT_ID
+npm run typecheck
+npm run deploy
+
+Não há migration D1 nova para esta atualização.
