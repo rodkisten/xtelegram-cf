@@ -2,6 +2,8 @@ export interface Env {
   RELAY_DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID?: string;
+  /** @deprecated Use TELEGRAM_CHAT_ID. Kept for backwards compatibility. */
+  TELEGRAM_CHANNEL_ID?: string;
   RELAY_TOKEN: string;
   MAX_MEDIA_BYTES?: string;
   HLS_CONCURRENCY?: string;
