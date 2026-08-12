@@ -40,6 +40,8 @@ export interface RelayAlbumItem {
   mediaType: AlbumMediaType;
   caption: string;
   parseMode: ParseMode | null;
+  /** Headers required by this individual CDN URL during Worker fallback. */
+  mediaHeaders: Record<string, string>;
   metadata: Record<string, string> | null;
 }
 
