@@ -118,6 +118,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
     let rawCaption: unknown = null;
     let rawItemParseMode: unknown = null;
     let itemMetadata: unknown = null;
+    let itemMediaHeaders: unknown = record.mediaHeaders;
 
     if (rawItem && typeof rawItem === "object" && !Array.isArray(rawItem)) {
       const item = rawItem as Record<string, unknown>;
@@ -126,6 +127,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       rawCaption = item.caption;
       rawItemParseMode = item.parseMode ?? item.parse_mode;
       itemMetadata = item.metadata;
+      itemMediaHeaders = item.mediaHeaders ?? item.headers ?? record.mediaHeaders;
     }
 
     const mediaUrl = normalizePublicHttpUrl(rawUrl);
@@ -165,6 +167,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       mediaType,
       caption: itemCaption,
       parseMode: itemParseMode,
+      mediaHeaders: normalizeMediaHeaders(itemMediaHeaders),
       metadata: normalizeMetadata(itemMetadata),
     });
   }
