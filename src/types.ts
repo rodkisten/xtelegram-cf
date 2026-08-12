@@ -2,15 +2,12 @@ export interface Env {
   RELAY_DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
   TELEGRAM_CHAT_ID?: string;
-  /** @deprecated Use TELEGRAM_CHAT_ID. Kept for backwards compatibility. */
-  TELEGRAM_CHANNEL_ID?: string;
   RELAY_TOKEN: string;
   MAX_MEDIA_BYTES?: string;
   HLS_CONCURRENCY?: string;
   HLS_MAX_MEDIA_BYTES?: string;
   MULTIPART_MAX_TOTAL_BYTES?: string;
   TWIRRL_VERSION_TOKEN?: string;
-  DELIVERY_CLAIM_TTL_SECONDS?: string;
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";
@@ -40,6 +37,7 @@ export interface RelayAlbumItem {
   mediaType: AlbumMediaType;
   caption: string;
   parseMode: ParseMode | null;
+  mediaHeaders: Record<string, string>;
   metadata: Record<string, string> | null;
 }
 
