@@ -32,6 +32,8 @@ export interface PrepareMediaOptions {
   concurrency?: number;
   hlsMaxMediaBytes?: number;
   signal?: AbortSignal;
+  /** Force a Worker-owned file so it can be attached to sendMediaGroup. */
+  forceUpload?: boolean;
 }
 
 export async function prepareMedia(
@@ -63,13 +65,13 @@ export async function prepareMedia(
     };
 
     if (
-      direct.contentLength == null ||
-      direct.contentLength <= TELEGRAM_REMOTE_URL_LIMIT
+      !options.forceUpload &&
+      (direct.contentLength == null || direct.contentLength <= TELEGRAM_REMOTE_URL_LIMIT)
     ) {
       return direct;
     }
 
-    if (direct.contentLength > maxMediaBytes) {
+    if (direct.contentLength != null && direct.contentLength > maxMediaBytes) {
       throw new Error(
         `Direct media is ${direct.contentLength} bytes, above the configured upload limit of ${maxMediaBytes} bytes`,
       );
