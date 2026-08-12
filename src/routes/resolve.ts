@@ -111,6 +111,7 @@ export async function handleResolve(
         mediaItems: resolution.media.map((item) => ({
           mediaUrl: item.url,
           mediaType: toRelayMediaType(item.type),
+          mediaHeaders: item.mediaHeaders,
         })),
       }),
       env,
