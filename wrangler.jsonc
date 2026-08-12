@@ -11,11 +11,10 @@
       "database_id": "8b1e7d2a-aa1c-4d0d-83ea-b1c60c7b513b"
     }
   ],
+
   "vars": {
     "MAX_MEDIA_BYTES": "32000000",
     "HLS_CONCURRENCY": "4",
-    "RELAY_TOKEN": "12345678",
-    "TELEGRAM_BOT_TOKEN": "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg",
-    "TELEGRAM_CHANNEL_ID": "-621561106"
+    "DELIVERY_CLAIM_TTL_SECONDS": "1800"
   }
 }
