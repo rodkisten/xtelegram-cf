@@ -22,6 +22,14 @@ export interface TelegramAlbumUrlItem {
   parseMode?: ParseMode | null;
 }
 
+export interface TelegramAlbumUploadItem {
+  mediaType: AlbumMediaType;
+  file: Blob;
+  filename: string;
+  caption?: string;
+  parseMode?: ParseMode | null;
+}
+
 export async function sendTelegramUrl(
   options: TelegramSendBase & {
     mediaUrl: string;
@@ -134,6 +142,58 @@ export async function sendTelegramMediaGroupUrl(options: {
       media,
     }),
   });
+}
+
+/**
+ * Sends a mixed photo/video album as Telegram attach:// parts. This is the
+ * Worker-side fallback for CDNs that require Referer/User-Agent headers which
+ * Telegram's remote URL fetch cannot provide.
+ */
+export async function sendTelegramMediaGroupUpload(options: {
+  botToken: string;
+  chatId: string;
+  items: TelegramAlbumUploadItem[];
+  caption: string;
+  parseMode: ParseMode | null;
+}): Promise<TelegramApiResult<TelegramMessage[]>> {
+  if (options.items.length < 2 || options.items.length > 10) {
+    return {
+      ok: false,
+      description: `sendMediaGroup requires 2-10 items; received ${options.items.length}.`,
+      requestMethod: "sendMediaGroup",
+    };
+  }
+
+  const form = new FormData();
+  const media = options.items.map((item, index) => {
+    const field = `media${index}`;
+    form.set(field, item.file, item.filename);
+
+    const entry: Record<string, unknown> = {
+      type: item.mediaType,
+      media: `attach://${field}`,
+    };
+
+    if (item.mediaType === "video") entry.supports_streaming = true;
+
+    const caption = item.caption || (index === 0 ? options.caption : "");
+    const parseMode = item.caption
+      ? item.parseMode ?? options.parseMode
+      : index === 0
+        ? options.parseMode
+        : null;
+
+    if (caption) {
+      entry.caption = caption;
+      if (parseMode) entry.parse_mode = parseMode;
+    }
+
+    return entry;
+  });
+
+  form.set("chat_id", options.chatId);
+  form.set("media", JSON.stringify(media));
+  return requestTelegram<TelegramMessage[]>(options.botToken, "sendMediaGroup", { body: form });
 }
 
 export function validateEnvironment(env: Env): string | null {
