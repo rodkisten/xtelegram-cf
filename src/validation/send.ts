@@ -1,0 +1,205 @@
+import { normalizeOptionalSourceUrl, normalizePublicHttpUrl } from "../lib/http";
+import type { AlbumMediaType, RelayAlbumInput, RelayInput } from "../types";
+import {
+  normalizeCaption,
+  normalizeMediaHeaders,
+  normalizeMediaType,
+  normalizeMetadata,
+  normalizeNullableText,
+  normalizeOptionalText,
+  normalizeParseMode,
+  normalizeTelegramChannels,
+  resolvePayloadCaption,
+} from "./common";
+
+export type SendValidationResult =
+  | { ok: true; value: RelayInput }
+  | { ok: false; error: string };
+
+export function validateRequestBody(body: unknown): SendValidationResult {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, error: "Request body must be an object" };
+  }
+
+  const record = body as Record<string, unknown>;
+  const rawMediaUrl =
+    record.mediaUrl ??
+    record.photoUrl ??
+    record.videoUrl ??
+    record.fileUrl ??
+    record.url;
+  const mediaUrl = normalizePublicHttpUrl(rawMediaUrl);
+
+  if (!mediaUrl) {
+    return { ok: false, error: "Invalid mediaUrl, photoUrl, or videoUrl" };
+  }
+
+  const pageUrl = normalizeOptionalSourceUrl(record.pageUrl);
+  const sourceUrl = normalizeOptionalSourceUrl(
+    record.sourceUrl ?? record.tweetUrl ?? record.pageUrl,
+  );
+  const parseMode = normalizeParseMode(record.parseMode);
+
+  if (record.parseMode && !parseMode) {
+    return { ok: false, error: "Invalid parseMode. Allowed values: HTML, MarkdownV2" };
+  }
+
+  const mediaType = normalizeMediaType(record.mediaType);
+  if (record.mediaType && !mediaType) {
+    return { ok: false, error: "Invalid mediaType. Use photo, video, audio, or document" };
+  }
+
+  const channelValidation = normalizeTelegramChannels(record.channel, record.channels);
+  if (!channelValidation.ok) return { ok: false, error: channelValidation.error };
+
+  return {
+    ok: true,
+    value: {
+      mediaUrl,
+      sourceUrl,
+      pageUrl,
+      provider: normalizeNullableText(record.provider, 120),
+      title: normalizeOptionalText(record.title, 1000),
+      text: normalizeOptionalText(record.text, 20_000),
+      caption: resolvePayloadCaption(record),
+      parseMode: normalizeCaption(record.caption) ? parseMode : null,
+      mediaType,
+      mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
+      channels: channelValidation.value,
+      metadata: normalizeMetadata(record.metadata),
+      mediaId: normalizeNullableText(record.mediaId, 240),
+      mediaKey: normalizeNullableText(record.mediaKey, 300),
+      force: record.force === true,
+    },
+  };
+}
+
+export type AlbumValidationResult =
+  | { kind: "none" }
+  | { kind: "valid"; value: RelayAlbumInput }
+  | { kind: "invalid"; error: string };
+
+export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { kind: "none" };
+
+  const record = body as Record<string, unknown>;
+  const rawItems = Array.isArray(record.mediaItems)
+    ? record.mediaItems
+    : Array.isArray(record.mediaUrls)
+      ? record.mediaUrls
+      : Array.isArray(record.photoUrls)
+        ? record.photoUrls.map((mediaUrl) => ({ mediaUrl, mediaType: "photo" }))
+        : null;
+
+  if (!rawItems) return { kind: "none" };
+  if (rawItems.length < 2) {
+    return {
+      kind: "invalid",
+      error: "mediaItems/mediaUrls must contain at least 2 items for an album request.",
+    };
+  }
+  if (rawItems.length > 100) {
+    return {
+      kind: "invalid",
+      error: "A maximum of 100 media items can be relayed in one album request.",
+    };
+  }
+
+  const parseMode = normalizeParseMode(record.parseMode);
+  if (record.parseMode && !parseMode) {
+    return { kind: "invalid", error: "Invalid parseMode. Allowed values: HTML, MarkdownV2" };
+  }
+
+  const items: RelayAlbumInput["items"] = [];
+  for (let index = 0; index < rawItems.length; index += 1) {
+    const rawItem = rawItems[index];
+    let rawUrl: unknown = rawItem;
+    let rawType: unknown = null;
+    let rawCaption: unknown = null;
+    let rawItemParseMode: unknown = null;
+    let itemMetadata: unknown = null;
+
+    if (rawItem && typeof rawItem === "object" && !Array.isArray(rawItem)) {
+      const item = rawItem as Record<string, unknown>;
+      rawUrl = item.mediaUrl ?? item.photoUrl ?? item.videoUrl ?? item.url;
+      rawType = item.mediaType ?? (item.photoUrl ? "photo" : item.videoUrl ? "video" : null);
+      rawCaption = item.caption;
+      rawItemParseMode = item.parseMode ?? item.parse_mode;
+      itemMetadata = item.metadata;
+    }
+
+    const mediaUrl = normalizePublicHttpUrl(rawUrl);
+    if (!mediaUrl) {
+      return { kind: "invalid", error: `Invalid public media URL at mediaItems[${index}].` };
+    }
+
+    if (/\.m3u8(?:$|[?#])/i.test(mediaUrl.href) || /\.mpd(?:$|[?#])/i.test(mediaUrl.href)) {
+      return {
+        kind: "invalid",
+        error: `Album item ${index + 1} is HLS/DASH. Albums require direct photo/video URLs; use the single-media endpoint for prepared streaming media.`,
+      };
+    }
+
+    const mediaType = normalizeAlbumMediaType(rawType, mediaUrl.href);
+    if (!mediaType) {
+      return {
+        kind: "invalid",
+        error: `Invalid album mediaType at item ${index + 1}. Use photo or video.`,
+      };
+    }
+
+    const itemCaption = normalizeCaption(rawCaption);
+    const itemParseMode = itemCaption
+      ? normalizeParseMode(rawItemParseMode ?? record.parseMode)
+      : null;
+
+    if (rawItemParseMode && !itemParseMode) {
+      return {
+        kind: "invalid",
+        error: `Invalid parseMode at mediaItems[${index}]. Allowed values: HTML, MarkdownV2`,
+      };
+    }
+
+    items.push({
+      mediaUrl,
+      mediaType,
+      caption: itemCaption,
+      parseMode: itemParseMode,
+      metadata: normalizeMetadata(itemMetadata),
+    });
+  }
+
+  const channelValidation = normalizeTelegramChannels(record.channel, record.channels);
+  if (!channelValidation.ok) return { kind: "invalid", error: channelValidation.error };
+
+  const pageUrl = normalizeOptionalSourceUrl(record.pageUrl);
+  const explicitCaption = normalizeCaption(record.caption);
+
+  return {
+    kind: "valid",
+    value: {
+      items,
+      sourceUrl: normalizeOptionalSourceUrl(record.sourceUrl ?? record.tweetUrl ?? record.pageUrl),
+      pageUrl,
+      provider: normalizeNullableText(record.provider, 120),
+      title: normalizeOptionalText(record.title, 1000),
+      text: normalizeOptionalText(record.text, 20_000),
+      caption: resolvePayloadCaption(record),
+      parseMode: explicitCaption ? parseMode : null,
+      channels: channelValidation.value,
+      metadata: normalizeMetadata(record.metadata),
+      mediaId: normalizeNullableText(record.mediaId, 240),
+      mediaKey: normalizeNullableText(record.mediaKey, 300),
+      force: record.force === true,
+    },
+  };
+}
+
+function normalizeAlbumMediaType(value: unknown, mediaUrl: string): AlbumMediaType | null {
+  if (value) {
+    const normalized = String(value).toLowerCase();
+    return normalized === "photo" || normalized === "video" ? normalized : null;
+  }
+
+  return /\.(mp4|m4v|mov|webm)(?:$|[?#])/i.test(mediaUrl) ? "video" : "photo";
+}
