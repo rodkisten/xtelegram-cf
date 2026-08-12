@@ -70,7 +70,7 @@ export class HlsAes128Decoder {
     const iv = key.iv || deriveHlsAes128Iv(mediaSequenceNumber);
     const cryptoKey = await crypto.subtle.importKey(
       "raw",
-      keyBytes,
+      toWebCryptoArrayBuffer(keyBytes),
       { name: "AES-CBC" },
       false,
       ["decrypt"],
@@ -80,10 +80,10 @@ export class HlsAes128Decoder {
       const decrypted = await crypto.subtle.decrypt(
         {
           name: "AES-CBC",
-          iv,
+          iv: toWebCryptoArrayBuffer(iv),
         },
         cryptoKey,
-        encryptedBytes,
+        toWebCryptoArrayBuffer(encryptedBytes),
       );
 
       return new Uint8Array(decrypted);
@@ -98,6 +98,23 @@ export class HlsAes128Decoder {
       );
     }
   }
+}
+
+/**
+ * WebCrypto's DOM typings intentionally reject views backed by a
+ * SharedArrayBuffer. HLS bytes normally come from an ArrayBuffer, so preserve
+ * that zero-copy fast path; copy only sliced/shared views into an ArrayBuffer.
+ */
+function toWebCryptoArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const { buffer, byteOffset, byteLength } = bytes;
+  if (buffer instanceof ArrayBuffer) {
+    if (byteOffset === 0 && byteLength === buffer.byteLength) return buffer;
+    return buffer.slice(byteOffset, byteOffset + byteLength);
+  }
+
+  const copy = new Uint8Array(byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 export function deriveHlsAes128Iv(mediaSequenceNumber: number): Uint8Array {
