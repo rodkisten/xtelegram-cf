@@ -275,7 +275,7 @@ export async function acquireDeliveryClaims(
   db: D1Database,
   identity: MediaIdentity,
   channels: string[],
-  options: { requestId?: string; ttlMs?: number; force?: boolean } = {},
+  options: { requestId?: string; ttlMs?: number } = {},
 ): Promise<DeliveryClaimResult> {
   const requested = [...new Set(channels.map((channel) => channel.trim()).filter(Boolean))];
   const requestId = options.requestId || crypto.randomUUID();
@@ -286,42 +286,28 @@ export async function acquireDeliveryClaims(
   const expiresAt = new Date(nowMs + Math.max(30_000, options.ttlMs || 30 * 60_000)).toISOString(); // generous TTL covers slow HLS/social resolution without expiring mid-flight
   const lookupKeys = identityLookupKeys(identity);
 
-  const claimInsert = options.force
-    ? db.prepare(
-        `INSERT OR IGNORE INTO delivery_claims (media_key, channel_id, request_id, claimed_at, expires_at)
-         SELECT ?1, CAST(c.value AS TEXT), ?2, ?3, ?4
-         FROM json_each(?5) AS c`,
-      ).bind(identity.key, requestId, now, expiresAt, JSON.stringify(requested))
-    : db.prepare(
-        `INSERT OR IGNORE INTO delivery_claims (media_key, channel_id, request_id, claimed_at, expires_at)
-         SELECT ?1, CAST(c.value AS TEXT), ?2, ?3, ?4
-         FROM json_each(?5) AS c
-         WHERE NOT EXISTS (
-           SELECT 1 FROM media_deliveries d
-           WHERE d.media_key IN (SELECT CAST(value AS TEXT) FROM json_each(?6))
-             AND d.channel_id = CAST(c.value AS TEXT)
-         )`,
-      ).bind(identity.key, requestId, now, expiresAt, JSON.stringify(requested), JSON.stringify(lookupKeys));
-
-  const deliveredLookup = options.force
-    ? db.prepare(
-        `SELECT channel_id FROM media_deliveries WHERE 0`,
-      )
-    : db.prepare(
-        `SELECT DISTINCT channel_id FROM media_deliveries
-         WHERE media_key IN (SELECT CAST(value AS TEXT) FROM json_each(?1))
-           AND channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))`,
-      ).bind(JSON.stringify(lookupKeys), JSON.stringify(requested));
-
   const results = await db.batch([
     db.prepare("DELETE FROM delivery_claims WHERE expires_at <= ?1").bind(now),
-    claimInsert,
+    db.prepare(
+      `INSERT OR IGNORE INTO delivery_claims (media_key, channel_id, request_id, claimed_at, expires_at)
+       SELECT ?1, CAST(c.value AS TEXT), ?2, ?3, ?4
+       FROM json_each(?5) AS c
+       WHERE NOT EXISTS (
+         SELECT 1 FROM media_deliveries d
+         WHERE d.media_key IN (SELECT CAST(value AS TEXT) FROM json_each(?6))
+           AND d.channel_id = CAST(c.value AS TEXT)
+       )`,
+    ).bind(identity.key, requestId, now, expiresAt, JSON.stringify(requested), JSON.stringify(lookupKeys)),
     db.prepare(
       `SELECT channel_id, request_id FROM delivery_claims
        WHERE media_key = ?1
          AND channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))`,
     ).bind(identity.key, JSON.stringify(requested)),
-    deliveredLookup,
+    db.prepare(
+      `SELECT DISTINCT channel_id FROM media_deliveries
+       WHERE media_key IN (SELECT CAST(value AS TEXT) FROM json_each(?1))
+         AND channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))`,
+    ).bind(JSON.stringify(lookupKeys), JSON.stringify(requested)),
   ]);
 
   const claimRows = (results[2]?.results || []) as Array<{ channel_id: string; request_id: string }>;
