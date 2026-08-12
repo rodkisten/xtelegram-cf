@@ -12,28 +12,8 @@
     }
   ],
 
-  "observability": {
-    "enabled": false,
-    "head_sampling_rate": 1,
-    "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "persist": true,
-      "invocation_logs": true
-    },
-    "traces": {
-      "enabled": false,
-      "persist": true,
-      "head_sampling_rate": 1
-    }
-  },
-
   "vars": {
     "MAX_MEDIA_BYTES": "32000000",
-    "HLS_CONCURRENCY": "4",
-    "DELIVERY_CLAIM_TTL_SECONDS": "1800",
-    "RELAY_TOKEN": "12345678",
-    "TELEGRAM_BOT_TOKEN": "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg",
-    "TELEGRAM_CHANNEL_ID": "-621561106"
+    "HLS_CONCURRENCY": "4"
   }
 }
