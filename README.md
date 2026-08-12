@@ -1,8 +1,8 @@
-# xtelegram-cf · Telegram Media Relay v2.7
+# xtelegram-cf · Telegram Media Relay v2.8
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
-## O que a v2.7 adiciona
+## O que a v2.8 adiciona
 
 - D1/SQLite como registro persistente das mídias enviadas.
 - Identidade estável no formato `provider:media_id` sempre que possível.
@@ -18,6 +18,11 @@ Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos,
 - `GET /media` e `GET /media/:key` para consulta do histórico.
 - `POST /media/check` para consultar até 100 mídias/URLs em lote com **uma única query D1**, opcionalmente filtrada por até 100 canais.
 - Fotos, vídeos, HLS, arquivos multipart e carrosséis continuam suportados.
+- **Claims atômicos antes do Telegram** por `media_key + channel_id`, evitando envio duplicado quando duas requisições concorrentes chegam ao mesmo tempo.
+- `already_sending` diferencia mídia já entregue de mídia atualmente protegida por um claim concorrente.
+- `/media/check` e lookups por canais usam `json_each(?)` com arrays JSON, mantendo o número de parâmetros D1 constante mesmo com 100 mídias + canais.
+- IDs opacos de provider deixam de ser lowercased/sanitizados de forma destrutiva. O relay mantém aliases compatíveis com chaves legadas da v2.7 quando isso pode ser provado com segurança.
+- Métricas do `/batch` incluem `queryBindingMode`, `atomicClaims`, `claimProtectedItems`, `telegramAttempts` e `mediaResolutions`.
 
 ---
 
@@ -55,6 +60,15 @@ Campos principais:
 - `first_sent_at` / `last_sent_at`.
 
 A tabela usa `PRIMARY KEY (media_key, channel_id)`. Um reenvio forçado não duplica a linha: atualiza a última entrega e incrementa `send_count`.
+
+### `delivery_claims`
+
+Reserva temporária por `media_key + channel_id` adquirida **antes** do side effect externo no Telegram. A chave primária composta garante que apenas uma requisição concorrente seja dona daquele envio. Claims expiram automaticamente e são removidos após sucesso/erro.
+
+- `request_id`: dono do claim.
+- `claimed_at` / `expires_at`.
+- TTL default: 900 s, configurável por `DELIVERY_CLAIM_TTL_SECONDS` entre 60 e 3600 s.
+- Um conflito com claim ativo aparece como `notSent[].reason = "already_sending"`.
 
 ---
 
@@ -111,10 +125,11 @@ Listar migrations:
 npm run db:migrations:list
 ```
 
-A migration inicial está em:
+As migrations são:
 
 ```text
 migrations/0001_media_delivery_history.sql
+migrations/0002_delivery_claims.sql
 ```
 
 ## 3. Configurar secrets
@@ -130,6 +145,12 @@ Destino default opcional:
 
 ```bash
 npx wrangler secret put TELEGRAM_CHAT_ID
+```
+
+TTL opcional dos claims, em segundos:
+
+```text
+DELIVERY_CLAIM_TTL_SECONDS=900
 ```
 
 Para desenvolvimento local, copie:
