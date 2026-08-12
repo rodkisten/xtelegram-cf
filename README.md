@@ -1,11 +1,18 @@
-# xtelegram-cf · Telegram Media Relay v2.9
+# xtelegram-cf · Telegram Media Relay v2.8.1
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
-## O que a v2.9 adiciona
+## O que a v2.8.1 entrega
+
+- **Álbuns mistos resilientes:** o Worker tenta o caminho URL-first e, quando o Telegram rejeita o CDN com um erro definitivo, baixa cada item com os `mediaHeaders` do item e reenvia o mesmo `sendMediaGroup` como `attach://` multipart. Fotos e vídeos continuam no mesmo álbum ordenado.
+- `mediaHeaders` agora são preservados por item do álbum (não apenas em mídia única), incluindo `Referer` e `User-Agent` necessários por CDNs sociais.
+- O fallback multipart tem orçamento total limitado por `MULTIPART_MAX_TOTAL_BYTES`, é sequencial para limitar memória do Worker e não repete falhas de rede ambíguas que poderiam duplicar mensagens.
+- `POST /resolve` volta a exigir `Authorization: Bearer <RELAY_TOKEN>` antes de resolver/enviar mídia.
+
+## Base da v2.8
 
 - **Claims atômicos por mídia + canal** antes do side effect externo no Telegram. Requests concorrentes deixam de passar juntos pela janela `check → send → persist`; o segundo recebe `delivery_in_progress` enquanto o primeiro possui o claim.
-- `delivery_claims` usa TTL configurável por `DELIVERY_CLAIM_TTL_SECONDS` (30 min por padrão) para cobrir resolução/HLS lentos. Claims de canais com falha conhecida são liberados; se o Telegram respondeu sucesso mas a persistência D1 falhar, o claim do canal bem-sucedido é mantido até expirar para evitar um reenvio externo imediato com estado de persistência incerto.
+- `delivery_claims` usa TTL generoso (30 min por padrão) para cobrir resolução/HLS lentos. Claims de canais com falha conhecida são liberados; se o Telegram respondeu sucesso mas a persistência D1 falhar, o claim do canal bem-sucedido é mantido até expirar para evitar um reenvio externo imediato com estado de persistência incerto.
 - `/media/check` liga arrays como JSON e expande com `json_each()`, mantendo constante a quantidade de parâmetros da prepared statement mesmo com 100 mídias + canais.
 - IDs nativos de provider agora são tratados como **opacos e case-sensitive**. Chaves antigas lossily-normalized continuam aceitas como aliases e são reutilizadas quando já existem, evitando dividir o histórico de uma mesma publicação.
 - Métricas de batch agora incluem claims, round trips/statements D1, resoluções, tentativas Telegram e timings.
@@ -64,7 +71,7 @@ A tabela usa `PRIMARY KEY (media_key, channel_id)`. Um reenvio forçado não dup
 
 ### `delivery_claims`
 
-Reserva por `media_key + channel_id` adquirida **antes** de chamar a Bot API. O claim impede dois requests concorrentes de enviarem a mesma mídia para o mesmo canal, inclusive quando `force=true`. Claims expirados são limpos automaticamente. Depois de falha conhecida, o claim é liberado; depois de sucesso Telegram, ele só é liberado quando a persistência D1 correspondente foi confirmada. Se essa persistência falhar, o claim permanece até o TTL como proteção conservadora. `force=true` ignora apenas o histórico já persistido; ele **não** ignora um claim ativo de outra request.
+Reserva por `media_key + channel_id` adquirida **antes** de chamar a Bot API. O claim impede dois requests não-forçados concorrentes de enviarem a mesma mídia para o mesmo canal. Claims expirados são limpos automaticamente. Depois de falha conhecida, o claim é liberado; depois de sucesso Telegram, ele só é liberado quando a persistência D1 correspondente foi confirmada. Se essa persistência falhar, o claim permanece até o TTL como proteção conservadora. `force=true` continua sendo um bypass explícito.
 
 A migração `0002_delivery_claims.sql` cria a tabela e o índice por `expires_at`.
 
@@ -380,7 +387,11 @@ O HLS é preparado apenas depois da verificação de duplicidade. Se o mesmo pos
     },
     {
       "mediaUrl": "https://example.com/3.mp4",
-      "mediaType": "video"
+      "mediaType": "video",
+      "mediaHeaders": {
+        "Referer": "https://www.instagram.com/",
+        "User-Agent": "Mozilla/5.0"
+      }
     }
   ],
   "provider": "instagram",
@@ -462,7 +473,7 @@ O `/batch` aceita até **50 itens** e pode enviar todos para um canal, vários c
 
 Antes de iniciar o trabalho caro, o Worker resolve as identidades conhecidas e faz **uma única consulta D1** para descobrir quais combinações mídia+canal já existem. Canais já entregues são removidos do envio antes de download, resolução social, HLS/remux ou chamada ao Telegram.
 
-O `/send` continua fazendo o guard final. Na v2.9 esse guard adquire um **claim atômico** por mídia+canal antes de chamar o Telegram. O preflight do batch permanece uma otimização para evitar trabalho caro; o claim é a proteção de concorrência.
+O `/send` continua fazendo o guard final. Na v2.8 esse guard adquire um **claim atômico** por mídia+canal antes de chamar o Telegram. O preflight do batch permanece uma otimização para evitar trabalho caro; o claim é a proteção de concorrência.
 
 ### Lista simples de links
 
@@ -539,7 +550,7 @@ Suporta no mesmo lote:
 - destinos específicos por item;
 - `caption`, `parseMode`, `metadata`, `mediaKey`, `provider` e `mediaId` por item.
 
-### Métricas v2.9
+### Métricas v2.8
 
 A resposta de `/batch` inclui, em `summary`, além dos contadores de resultado:
 
@@ -580,11 +591,11 @@ Ou apenas para um item:
 }
 ```
 
-`force=true` ignora a deduplicação histórica para aquele item e permite reenvio, incrementando `send_count` após sucesso. A proteção contra envio concorrente e duplicata dentro do mesmo batch continua ativa.
+`force=true` ignora a deduplicação para aquele item e permite reenvio, incrementando `send_count` após sucesso.
 
 ### Deduplicação do próprio batch
 
-Se a mesma mídia aparecer duas vezes no mesmo request para o mesmo canal, somente a primeira combinação é agendada, inclusive com `force=true`. `force` significa “reenviar histórico”, não “duplicar o mesmo item dentro da mesma request”. As repetições recebem:
+Se a mesma mídia aparecer duas vezes no mesmo request para o mesmo canal e `force` não estiver ativo, somente a primeira combinação é agendada. As repetições recebem:
 
 ```json
 {
@@ -852,7 +863,7 @@ Entradas inválidas não impedem a consulta das válidas. Elas aparecem individu
 
 ### Importante: check não substitui deduplicação do envio
 
-`/media/check` é um pre-check de UX e planejamento. `/send` e `/batch` não confiam nele como lock. Antes do side effect externo, qualquer envio adquire `delivery_claims(media_key, channel_id)`. Em `force=true`, o histórico é ignorado, mas o lock concorrente continua obrigatório. Se outro request já possui o claim, o canal volta como `delivery_in_progress`; se já existe histórico, volta como `already_sent`.
+`/media/check` é um pre-check de UX e planejamento. `/send` e `/batch` não confiam nele como lock. Antes do side effect externo, o fluxo não-forçado adquire `delivery_claims(media_key, channel_id)`. Se outro request já possui o claim, o canal volta como `delivery_in_progress`; se já existe histórico, volta como `already_sent`.
 
 ---
 
@@ -998,64 +1009,23 @@ Opcional.
 
 ### `MULTIPART_MAX_TOTAL_BYTES`
 
-Opcional.
+Opcional. Limita o tamanho combinado do fallback de álbum `attach://`; por
+default ele é conservador e evita que um álbum grande pressione a memória do
+Worker. Itens que o Telegram aceita por URL não consomem esse orçamento.
 
 ---
 
-# Arquitetura do código
-
-`src/index.ts` é deliberadamente mínimo e só exporta o Worker. O fluxo HTTP foi separado por responsabilidade para evitar que novas features recriem um monólito:
+# Arquivos importantes
 
 ```text
 src/index.ts
-  Entry point de 1 linha.
-
-src/app/worker.ts
-  Error boundary global do Worker.
-
-src/app/router.ts
-  Routing, OPTIONS e autorização centralizada.
-
-src/http/*
-  Auth, CORS/JSON responses e requests internos.
-
-src/validation/*
-  Normalização/validação compartilhada de payloads, canais, mídia e identidade.
-
-src/services/channels.ts
-  Destinos Telegram e compatibilidade TELEGRAM_CHAT_ID/TELEGRAM_CHANNEL_ID.
-
-src/services/delivery-plan.ts
-  Identidade, claims atômicos, lifecycle de claims e proteção contra retries duplicados.
-
-src/services/telegram-delivery.ts
-  Entrega de mídia preparada e formatação de resultados Telegram.
-
-src/routes/send/index.ts
-  Dispatcher JSON / album / multipart.
-
-src/routes/send/single.ts
-  Envio de mídia única/HLS.
-
-src/routes/send/album.ts
-  Carrossel/sendMediaGroup e chunking 2-10.
-
-src/routes/send/multipart.ts
-src/routes/send/multipart-utils.ts
-  Uploads multipart e utilitários de arquivo.
-
-src/routes/batch.ts
-  Preflight D1, dedupe do próprio batch e concorrência limitada.
-
-src/routes/resolve.ts
-  Resolução social e resolve-and-send.
-
-src/routes/media/check.ts
-src/routes/media/query.ts
-  Lookup em lote e histórico.
+  Rotas, validação, batch, deduplicação e respostas.
 
 src/db.ts
-  Identidade, claims, consultas D1 e persistência.
+  Identidade, consultas D1 e persistência.
+
+migrations/0001_media_delivery_history.sql
+  Schema SQLite/D1.
 
 src/social.ts
   Resolução social.
@@ -1069,21 +1039,6 @@ src/telegram.ts
 src/hls/*
   Parser, downloader, decoder, resolver e remuxer HLS.
 ```
-
-## Correções de robustez da v2.9
-
-- `/resolve` e `/resolve-and-send` agora passam pela mesma autorização central das demais rotas protegidas; não há mais auth comentada dentro de handlers.
-- `force=true` continua reenviando histórico, mas agora também adquire claim atômico e não atravessa uma entrega concorrente.
-- `DELIVERY_CLAIM_TTL_SECONDS` voltou a ser efetivamente aplicado aos claims.
-- `TELEGRAM_CHANNEL_ID` é aceito como alias legado de `TELEGRAM_CHAT_ID`, corrigindo projetos que usavam o nome antigo no Wrangler.
-- Resoluções sociais heterogêneas com múltiplos itens ganham identidade estável por item, evitando colisão de todos os filhos no mesmo `media_key`.
-- `/resolve-and-send` não aborta mais toda a resolução no primeiro item que falha: retorna `207` quando há sucesso parcial.
-- Itens do `/batch` são isolados por error boundary; uma exceção inesperada em um item não derruba os resultados do lote inteiro.
-- `force=true` não permite duplicar a mesma combinação mídia+canal duas vezes dentro de um único batch.
-- Álbuns e multipart param de enviar novos chunks/arquivos para um canal após a primeira falha, reduzindo side effects parciais.
-- Se um álbum/multipart ficar parcialmente enviado a um canal, o claim desse canal permanece até TTL em vez de ser liberado imediatamente e permitir um retry duplicar os chunks que já chegaram.
-- Multipart sem `mediaKey`, `mediaId` ou URL estável não usa mais `nome+tamanho+MIME` como identidade, pois isso causava falsos conflitos; nesses casos a identidade é request-scoped.
-- Secrets foram removidos de `wrangler.jsonc`; use Wrangler secrets ou `.dev.vars` local.
 
 ---
 
