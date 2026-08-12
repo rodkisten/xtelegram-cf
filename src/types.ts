@@ -8,6 +8,7 @@ export interface Env {
   HLS_MAX_MEDIA_BYTES?: string;
   MULTIPART_MAX_TOTAL_BYTES?: string;
   TWIRRL_VERSION_TOKEN?: string;
+  DELIVERY_CLAIM_TTL_SECONDS?: string;
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";

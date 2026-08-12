@@ -14,6 +14,8 @@ export interface MediaIdentity {
   provider: string;
   providerMediaId: string;
   canonicalUrl: string;
+  /** Legacy lossy keys accepted for backwards-compatible lookup only. */
+  aliases: string[];
 }
 
 export interface PersistMediaInput {
@@ -66,33 +68,42 @@ export function requireRelayDb(env: Env): D1Database {
 }
 
 export async function resolveMediaIdentity(input: MediaIdentityInput): Promise<MediaIdentity> {
-  const explicitKey = normalizeKeyPart(input.mediaKey);
   const provider = normalizeProvider(input.provider, input.sourceUrl || input.pageUrl || input.mediaUrl || "");
   const canonicalUrl = canonicalizeIdentityUrl(
     input.sourceUrl || input.pageUrl || input.mediaUrl || "",
   );
 
+  // Explicit mediaKey is an API-level identity override. Preserve it verbatim
+  // apart from surrounding whitespace so callers can intentionally reuse an
+  // existing key. The provider prefix itself is normalized for metadata only.
+  const explicitKey = normalizeExplicitMediaKey(input.mediaKey);
   if (explicitKey) {
     const separator = explicitKey.indexOf(":");
     const explicitProvider = separator > 0 ? explicitKey.slice(0, separator) : provider;
     const explicitId = separator > 0 ? explicitKey.slice(separator + 1) : explicitKey;
     return {
       key: explicitKey,
-      provider: normalizeKeyPart(explicitProvider) || provider,
-      providerMediaId: normalizeKeyPart(explicitId) || explicitKey,
+      provider: normalizeProviderKey(explicitProvider) || provider,
+      providerMediaId: normalizeOpaqueMediaId(explicitId) || explicitKey,
       canonicalUrl,
+      aliases: [],
     };
   }
 
-  const explicitMediaId = normalizeKeyPart(input.mediaId);
-  const providerMediaId = explicitMediaId || extractProviderMediaId(provider, canonicalUrl) || await shortSha256(canonicalUrl);
+  const explicitMediaId = normalizeOpaqueMediaId(input.mediaId);
+  const extractedMediaId = extractProviderMediaId(provider, canonicalUrl);
+  const providerMediaId = explicitMediaId || extractedMediaId || await shortSha256(canonicalUrl);
+  const key = `${provider}:${encodeMediaIdKey(providerMediaId)}`;
 
-  return {
-    key: `${provider}:${providerMediaId}`,
-    provider,
-    providerMediaId,
-    canonicalUrl,
-  };
+  // v2.7 and earlier lower-cased/sanitized provider IDs. Keep that old key as
+  // a read alias so existing D1 history remains effective after the lossless
+  // identity fix. New rows use the lossless key unless an old row already
+  // exists, in which case resolveStorageMediaKey() keeps writing to it.
+  const legacyPart = normalizeLegacyKeyPart(providerMediaId);
+  const legacyKey = legacyPart ? `${provider}:${legacyPart}` : "";
+  const aliases = legacyKey && legacyKey !== key ? [legacyKey] : [];
+
+  return { key, provider, providerMediaId, canonicalUrl, aliases };
 }
 
 
@@ -111,21 +122,21 @@ export async function checkStoredMediaDeliveries(
   identities: MediaIdentity[],
   channels: string[] = [],
 ): Promise<Map<string, MediaCheckRecord>> {
-  const mediaKeys = [...new Set(identities.map((identity) => identity.key).filter(Boolean))];
-  if (!mediaKeys.length) return new Map();
-
   const requestedChannels = [...new Set(channels.map((channel) => channel.trim()).filter(Boolean))];
-  const channelJoin = requestedChannels.length
-    ? ` AND d.channel_id IN (${requestedChannels.map(() => "?").join(",")})`
-    : "";
-  const keyPlaceholders = mediaKeys.map(() => "?").join(",");
+  const queryKeys = [...new Set(identities.flatMap((identity) => [identity.key, ...(identity.aliases || [])]).filter(Boolean))];
+  if (!queryKeys.length) return new Map();
 
-  // One indexed query for the complete lookup. media.media_key is the PK and
-  // media_deliveries has PRIMARY KEY(media_key, channel_id), so SQLite/D1 can
-  // satisfy both the key lookup and the optional channel filter without scans.
+  // Bind the arrays as JSON instead of one placeholder per media/channel. D1
+  // has a low bound-parameter ceiling, while json_each() keeps this lookup at
+  // two parameters even for 100 media identities plus channel filters.
   const result = await db
     .prepare(
-      `SELECT
+      `WITH requested_keys(value) AS (
+         SELECT CAST(value AS TEXT) FROM json_each(?)
+       ), requested_channels(value) AS (
+         SELECT CAST(value AS TEXT) FROM json_each(?)
+       )
+       SELECT
         m.media_key, m.provider, m.provider_media_id, m.canonical_url,
         m.source_url, m.page_url, m.media_type, m.media_count,
         m.metadata_json, m.first_seen_at, m.updated_at,
@@ -134,20 +145,23 @@ export async function checkStoredMediaDeliveries(
         d.send_count, d.first_sent_at, d.last_sent_at
        FROM media AS m
        LEFT JOIN media_deliveries AS d
-         ON d.media_key = m.media_key${channelJoin}
-       WHERE m.media_key IN (${keyPlaceholders})`,
+         ON d.media_key = m.media_key
+        AND (
+          NOT EXISTS (SELECT 1 FROM requested_channels)
+          OR d.channel_id IN (SELECT value FROM requested_channels)
+        )
+       WHERE m.media_key IN (SELECT value FROM requested_keys)`,
     )
-    .bind(...requestedChannels, ...mediaKeys)
+    .bind(JSON.stringify(queryKeys), JSON.stringify(requestedChannels))
     .all<StoredMediaRow & Partial<StoredDeliveryRow>>();
 
-  const records = new Map<string, MediaCheckRecord>();
+  const rawRecords = new Map<string, MediaCheckRecord>();
   for (const row of result.results || []) {
-    let record = records.get(row.media_key);
+    let record = rawRecords.get(row.media_key);
     if (!record) {
       record = { media: formatMediaRow(row), deliveries: [] };
-      records.set(row.media_key, record);
+      rawRecords.set(row.media_key, record);
     }
-
     if (row.channel_id) {
       record.deliveries.push(formatDeliveryRow({
         channel_id: row.channel_id,
@@ -162,23 +176,159 @@ export async function checkStoredMediaDeliveries(
     }
   }
 
+  // Expose records under the canonical key requested by callers even when the
+  // physical row still uses a v2.7 legacy alias.
+  const records = new Map<string, MediaCheckRecord>();
+  for (const identity of identities) {
+    const exact = rawRecords.get(identity.key);
+    const alias = (identity.aliases || [])
+      .map((key) => rawRecords.get(key))
+      .find((record) => {
+        if (!record) return false;
+        const storedId = extractProviderMediaId(identity.provider, String(record.media?.canonicalUrl || ""));
+        // Legacy rows were lossy. Only reuse an alias when its canonical URL can
+        // prove it refers to the same opaque provider ID; otherwise prefer a new
+        // lossless key rather than creating a false duplicate collision.
+        return !storedId || storedId === identity.providerMediaId;
+      });
+    const record = exact || alias;
+    if (record) records.set(identity.key, record);
+  }
   return records;
 }
 
 export async function getAlreadyDeliveredChannels(
   db: D1Database,
-  mediaKey: string,
+  identityOrKey: MediaIdentity | string,
   channels: string[],
 ): Promise<Set<string>> {
   if (!channels.length) return new Set();
-  const placeholders = channels.map(() => "?").join(",");
+  const keys = typeof identityOrKey === "string"
+    ? [identityOrKey]
+    : [identityOrKey.key, ...(identityOrKey.aliases || [])];
   const result = await db
     .prepare(
-      `SELECT channel_id FROM media_deliveries WHERE media_key = ? AND channel_id IN (${placeholders})`,
+      `WITH requested_keys(value) AS (SELECT CAST(value AS TEXT) FROM json_each(?)),
+            requested_channels(value) AS (SELECT CAST(value AS TEXT) FROM json_each(?))
+       SELECT DISTINCT channel_id
+       FROM media_deliveries
+       WHERE media_key IN (SELECT value FROM requested_keys)
+         AND channel_id IN (SELECT value FROM requested_channels)`,
     )
-    .bind(mediaKey, ...channels)
+    .bind(JSON.stringify([...new Set(keys)]), JSON.stringify([...new Set(channels)]))
     .all<{ channel_id: string }>();
   return new Set((result.results || []).map((row) => row.channel_id));
+}
+
+export interface DeliveryClaimPlan {
+  mediaKey: string;
+  requestId: string;
+  claimed: string[];
+  alreadySent: string[];
+  inFlight: string[];
+}
+
+export async function resolveStorageMediaKey(db: D1Database, identity: MediaIdentity): Promise<string> {
+  const candidates = [identity.key, ...(identity.aliases || [])];
+  if (candidates.length <= 1) return identity.key;
+  const result = await db.prepare(
+    `WITH candidates(value) AS (SELECT CAST(value AS TEXT) FROM json_each(?))
+     SELECT media_key, canonical_url FROM media WHERE media_key IN (SELECT value FROM candidates)`,
+  ).bind(JSON.stringify(candidates)).all<{ media_key: string; canonical_url: string }>();
+  const rows = result.results || [];
+  if (rows.some((row) => row.media_key === identity.key)) return identity.key;
+  for (const alias of identity.aliases || []) {
+    const row = rows.find((candidate) => candidate.media_key === alias);
+    if (!row) continue;
+    const storedId = extractProviderMediaId(identity.provider, row.canonical_url || "");
+    if (!storedId || storedId === identity.providerMediaId) return alias;
+  }
+  return identity.key;
+}
+
+export async function acquireDeliveryClaims(
+  db: D1Database,
+  identity: MediaIdentity,
+  channels: string[],
+  options: { force?: boolean; requestId?: string; ttlSeconds?: number } = {},
+): Promise<DeliveryClaimPlan> {
+  const requested = [...new Set(channels.map((channel) => channel.trim()).filter(Boolean))];
+  const requestId = options.requestId || crypto.randomUUID();
+  const mediaKey = await resolveStorageMediaKey(db, identity);
+  if (!requested.length) return { mediaKey, requestId, claimed: [], alreadySent: [], inFlight: [] };
+
+  const now = Date.now();
+  const ttlSeconds = Math.min(3600, Math.max(60, Number(options.ttlSeconds || 900)));
+  const claimedAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + ttlSeconds * 1000).toISOString();
+  const statements: D1PreparedStatement[] = [
+    db.prepare("DELETE FROM delivery_claims WHERE expires_at <= ?").bind(claimedAt),
+  ];
+
+  for (const channelId of requested) {
+    if (options.force) {
+      statements.push(db.prepare(
+        `INSERT OR IGNORE INTO delivery_claims (media_key, channel_id, request_id, claimed_at, expires_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind(mediaKey, channelId, requestId, claimedAt, expiresAt));
+    } else {
+      statements.push(db.prepare(
+        `INSERT OR IGNORE INTO delivery_claims (media_key, channel_id, request_id, claimed_at, expires_at)
+         SELECT ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM media_deliveries WHERE media_key = ? AND channel_id = ?
+         )`,
+      ).bind(mediaKey, channelId, requestId, claimedAt, expiresAt, mediaKey, channelId));
+    }
+  }
+  try {
+    await db.batch(statements);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/delivery_claims|no such table/i.test(message)) {
+      throw new Error(
+        "Atomic delivery claims are not initialized. Apply D1 migration 0002_delivery_claims.sql before using relay v2.8.",
+      );
+    }
+    throw error;
+  }
+
+  const claimedRows = await db.prepare(
+    `WITH requested_channels(value) AS (SELECT CAST(value AS TEXT) FROM json_each(?))
+     SELECT channel_id FROM delivery_claims
+     WHERE media_key = ? AND request_id = ?
+       AND channel_id IN (SELECT value FROM requested_channels)`,
+  ).bind(JSON.stringify(requested), mediaKey, requestId).all<{ channel_id: string }>();
+  const claimed = new Set((claimedRows.results || []).map((row) => row.channel_id));
+  const alreadySent = options.force ? new Set<string>() : await getAlreadyDeliveredChannels(db, mediaKey, requested);
+  const inFlight = requested.filter((channelId) => !claimed.has(channelId) && !alreadySent.has(channelId));
+
+  return {
+    mediaKey,
+    requestId,
+    claimed: requested.filter((channelId) => claimed.has(channelId)),
+    alreadySent: requested.filter((channelId) => alreadySent.has(channelId)),
+    inFlight,
+  };
+}
+
+export async function releaseDeliveryClaims(
+  db: D1Database,
+  plan: Pick<DeliveryClaimPlan, "mediaKey" | "requestId">,
+  channels?: string[],
+): Promise<void> {
+  const requested = [...new Set((channels || []).map((channel) => channel.trim()).filter(Boolean))];
+  if (requested.length) {
+    await db.prepare(
+      `WITH requested_channels(value) AS (SELECT CAST(value AS TEXT) FROM json_each(?))
+       DELETE FROM delivery_claims
+       WHERE media_key = ? AND request_id = ?
+         AND channel_id IN (SELECT value FROM requested_channels)`,
+    ).bind(JSON.stringify(requested), plan.mediaKey, plan.requestId).run();
+    return;
+  }
+  await db.prepare("DELETE FROM delivery_claims WHERE media_key = ? AND request_id = ?")
+    .bind(plan.mediaKey, plan.requestId).run();
 }
 
 export async function persistSuccessfulDeliveries(
@@ -269,8 +419,8 @@ export async function findStoredMedia(db: D1Database, options: {
 }) {
   const conditions: string[] = [];
   const values: unknown[] = [];
-  if (options.provider) { conditions.push("provider = ?"); values.push(normalizeKeyPart(options.provider)); }
-  if (options.mediaId) { conditions.push("provider_media_id = ?"); values.push(normalizeKeyPart(options.mediaId)); }
+  if (options.provider) { conditions.push("provider = ?"); values.push(normalizeProviderKey(options.provider)); }
+  if (options.mediaId) { conditions.push("provider_media_id = ?"); values.push(normalizeOpaqueMediaId(options.mediaId)); }
   if (options.sourceUrl) { conditions.push("canonical_url = ?"); values.push(canonicalizeIdentityUrl(options.sourceUrl)); }
   const limit = Math.min(100, Math.max(1, options.limit || 25));
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -319,14 +469,14 @@ function parseJson(value: string | null): unknown {
 }
 
 function normalizeProvider(value: string | null | undefined, url: string): string {
-  const explicit = normalizeKeyPart(value);
+  const explicit = normalizeProviderKey(value);
   if (explicit) return explicit;
   try {
     const hostname = new URL(url).hostname.toLowerCase();
     if (hostname === "x.com" || hostname.endsWith("twitter.com")) return "twitter";
     if (hostname.endsWith("instagram.com")) return "instagram";
     if (hostname.endsWith("tiktok.com")) return "tiktok";
-    return normalizeKeyPart(hostname.replace(/^www\./, "")) || "generic";
+    return normalizeProviderKey(hostname.replace(/^www\./, "")) || "generic";
   } catch {
     return "generic";
   }
@@ -365,7 +515,37 @@ function canonicalizeIdentityUrl(value: string): string {
   }
 }
 
-function normalizeKeyPart(value: unknown): string {
+function normalizeProviderKey(value: unknown): string {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9._@-]+/g, "-").slice(0, 80);
+}
+
+function normalizeOpaqueMediaId(value: unknown): string {
+  return String(value ?? "").trim().slice(0, 512);
+}
+
+function normalizeExplicitMediaKey(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw.slice(0, 768);
+}
+
+function encodeMediaIdKey(value: string): string {
+  const raw = normalizeOpaqueMediaId(value);
+  if (!raw) return "unknown";
+  // URI encoding is deterministic and lossless for opaque/case-sensitive IDs.
+  // Keep very long values bounded with a hash-like suffix generated from bytes.
+  const encoded = encodeURIComponent(raw);
+  if (encoded.length <= 512) return encoded;
+  const prefix = encoded.slice(0, 400);
+  let hash = 2166136261;
+  for (let index = 0; index < raw.length; index += 1) {
+    hash ^= raw.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `${prefix}~${hash.toString(16).padStart(8, "0")}`;
+}
+
+function normalizeLegacyKeyPart(value: unknown): string {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9._:@-]+/g, "-").slice(0, 240);
 }
 

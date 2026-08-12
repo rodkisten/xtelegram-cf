@@ -1,5 +1,7 @@
 import {
+  acquireDeliveryClaims,
   checkStoredMediaDeliveries,
+  releaseDeliveryClaims,
   resolveMediaIdentity,
   findStoredMedia,
   getAlreadyDeliveredChannels,
@@ -60,6 +62,27 @@ const ALLOWED_MEDIA_TYPES = new Set<MediaType>([
   "photo",
 ]);
 
+function resolveDeliveryClaimTtlSeconds(env: Env): number {
+  const raw = Number(env.DELIVERY_CLAIM_TTL_SECONDS || 900);
+  if (!Number.isFinite(raw)) return 900;
+  return Math.min(3600, Math.max(60, Math.floor(raw)));
+}
+
+function withStorageMediaKey<T extends { key: string }>(identity: T, mediaKey: string): T {
+  return mediaKey === identity.key ? identity : { ...identity, key: mediaKey };
+}
+
+function claimSkipFailures(plan: { alreadySent: string[]; inFlight: string[] }) {
+  return [
+    ...plan.alreadySent.map((channelId) => ({ channelId, reason: "already_sent" as const })),
+    ...plan.inFlight.map((channelId) => ({
+      channelId,
+      reason: "already_sending" as const,
+      error: "Another relay request currently owns the media/channel delivery claim.",
+    })),
+  ];
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -113,7 +136,7 @@ interface ResolveRequestBody {
 }
 
 async function handleResolve(request: Request, env: Env, send: boolean): Promise<Response> {
-  //if (!isAuthorized(request, env)) return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+  if (!isAuthorized(request, env)) return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
   let body: ResolveRequestBody;
   try { body = (await request.json()) as ResolveRequestBody; } catch { return json({ ok: false, error: "Invalid JSON body" }, 400); }
   const sourceUrl = typeof body.url === "string" ? body.url.trim() : typeof body.sourceUrl === "string" ? body.sourceUrl.trim() : "";
@@ -592,6 +615,12 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
     ).length;
   }, 0);
   const status = succeeded === results.length ? 200 : succeeded > 0 ? 207 : conflicts === results.length ? 409 : 502;
+  const telegramAttempts = results.reduce((total, item) => {
+    const channels = item.channels as { attempted?: unknown } | undefined;
+    return total + (Array.isArray(channels?.attempted) ? channels.attempted.length : 0);
+  }, 0);
+  const mediaResolutions = prepared.filter((item) => !item.isDirect).length;
+  const claimProtectedItems = prepared.filter((item) => item.identity && !item.force).length;
 
   return json({
     ok: succeeded > 0,
@@ -605,6 +634,11 @@ async function handleBatch(request: Request, env: Env): Promise<Response> {
       skippedAlreadySent,
       skippedDuplicateInBatch,
       preflightQueries: preflightIdentities.length ? 1 : 0,
+      queryBindingMode: "json_each",
+      atomicClaims: true,
+      claimProtectedItems,
+      telegramAttempts,
+      mediaResolutions,
       concurrency,
     },
     results,
@@ -653,9 +687,13 @@ function mergeBatchPreflightResult(
     ...notSent,
   ];
 
+  const blockingNotSent = mergedNotSent.filter((failure) => {
+    const reason = failure && typeof failure === "object" ? String((failure as { reason?: unknown }).reason || "") : "";
+    return reason !== "already_sent" && reason !== "duplicate_in_batch";
+  });
   return {
     ...result,
-    partial: inserted.length > 0 && mergedNotSent.length > 0,
+    partial: inserted.length > 0 && blockingNotSent.length > 0,
     channels: {
       ...channels,
       requested: requestedChannels,
@@ -670,9 +708,9 @@ function handleHealth(): Response {
   return json({
     ok: true,
     service: "generic-telegram-media-relay",
-    version: "2.7.0",
+    version: "2.8.0",
     status: "online",
-    runtime: "typescript-hls-remux-photo-album-d1-dedupe-batch-send",
+    runtime: "typescript-hls-remux-photo-album-d1-atomic-claims-batch-send",
     timestamp: new Date().toISOString(),
   });
 }
@@ -775,7 +813,7 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
 
-  const identity = await resolveMediaIdentity({
+  let identity = await resolveMediaIdentity({
     provider: input.provider,
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
@@ -783,24 +821,25 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
     pageUrl: input.pageUrl,
     mediaUrl: input.mediaUrl.href,
   });
-  const alreadyDelivered = input.force
-    ? new Set<string>()
-    : await getAlreadyDeliveredChannels(db, identity.key, chatIds);
-  const channelsToSend = input.force
-    ? chatIds
-    : chatIds.filter((chatId) => !alreadyDelivered.has(chatId));
-  const skippedAlreadySent = chatIds
-    .filter((chatId) => alreadyDelivered.has(chatId))
-    .map((channelId) => ({ channelId, reason: "already_sent" as const }));
+  const claimPlan = await acquireDeliveryClaims(db, identity, chatIds, {
+    force: input.force,
+    ttlSeconds: resolveDeliveryClaimTtlSeconds(env),
+  });
+  identity = withStorageMediaKey(identity, claimPlan.mediaKey);
+  const channelsToSend = claimPlan.claimed;
+  const preSkipped = claimSkipFailures(claimPlan);
+  const skippedAlreadySent = preSkipped.filter((item) => item.reason === "already_sent");
 
   if (!channelsToSend.length) {
     return json({
       ok: false,
       conflict: true,
-      error: "Media was already sent to every requested Telegram channel.",
+      error: claimPlan.inFlight.length
+        ? "Every requested media/channel delivery is already sent or currently being sent by another request."
+        : "Media was already sent to every requested Telegram channel.",
       media: identity,
-      channels: { requested: chatIds, inserted: [], notSent: skippedAlreadySent },
-      hint: "Pass force=true to resend and increment send_count.",
+      channels: { requested: chatIds, attempted: [], inserted: [], notSent: preSkipped },
+      hint: "Pass force=true to resend an already delivered channel. Active claims are never duplicated concurrently.",
     }, 409);
   }
 
@@ -817,6 +856,7 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
       signal: request.signal,
     });
   } catch (error) {
+    await releaseDeliveryClaims(db, claimPlan).catch(() => undefined);
     console.error("[media-relay] Failed to prepare media", {
       inputUrl: input.mediaUrl.href,
       sourceUrl: input.sourceUrl,
@@ -897,18 +937,21 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
       messageIds: [deliveryResult.result.result?.message_id ?? null],
     })),
   });
+  await releaseDeliveryClaims(db, claimPlan).catch((error) =>
+    console.error("[media-relay] Failed to release delivery claims", { media: identity.key, error: getErrorMessage(error) }),
+  );
   const failedChannels = failedDeliveries.map((deliveryResult) => ({
     channelId: deliveryResult.requestedChatId,
     reason: "telegram_error" as const,
     error: deliveryResult.result.description || "Telegram rejected the media request",
     httpStatus: deliveryResult.result.httpStatus ?? null,
   }));
-  const notSent = [...skippedAlreadySent, ...failedChannels];
+  const notSent = [...preSkipped, ...failedChannels];
   const firstMessage = successfulDeliveries[0]?.result.result;
   const payload = {
     ok: successfulDeliveries.length > 0,
-    partial: notSent.length > 0,
-    conflict: successfulDeliveries.length === 0 && skippedAlreadySent.length > 0,
+    partial: failedChannels.length > 0 || claimPlan.inFlight.length > 0,
+    conflict: successfulDeliveries.length === 0 && preSkipped.length > 0,
     message: successfulDeliveries.length > 0
       ? `Media sent to ${successfulDeliveries.length} Telegram channel(s)`
       : "Media was not sent to Telegram",
@@ -941,11 +984,12 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
   };
 
   if (!successfulDeliveries.length) {
-    console.error("[media-relay] Telegram rejected every attempted delivery", { media: identity, notSent });
-    return json(payload, 502);
+    console.error("[media-relay] No attempted Telegram delivery succeeded", { media: identity, notSent });
+    const onlyClaimOrHistorySkips = failedChannels.length === 0 && preSkipped.length > 0;
+    return json(payload, onlyClaimOrHistorySkips ? 409 : 502);
   }
 
-  return json(payload, notSent.length ? 207 : 200);
+  return json(payload, failedChannels.length || claimPlan.inFlight.length ? 207 : 200);
 }
 
 interface TelegramAlbumBatchDelivery {
@@ -977,7 +1021,7 @@ async function handleJsonAlbumSend(
   try { db = requireRelayDb(env); } catch (error) {
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
-  const identity = await resolveMediaIdentity({
+  let identity = await resolveMediaIdentity({
     provider: input.provider,
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
@@ -985,17 +1029,24 @@ async function handleJsonAlbumSend(
     pageUrl: input.pageUrl,
     mediaUrl: input.items[0]?.mediaUrl.href || null,
   });
-  const alreadyDelivered = input.force ? new Set<string>() : await getAlreadyDeliveredChannels(db, identity.key, chatIds);
-  const channelsToSend = input.force ? chatIds : chatIds.filter((chatId) => !alreadyDelivered.has(chatId));
-  const skippedAlreadySent = chatIds.filter((chatId) => alreadyDelivered.has(chatId)).map((channelId) => ({ channelId, reason: "already_sent" as const }));
+  const claimPlan = await acquireDeliveryClaims(db, identity, chatIds, {
+    force: input.force,
+    ttlSeconds: resolveDeliveryClaimTtlSeconds(env),
+  });
+  identity = withStorageMediaKey(identity, claimPlan.mediaKey);
+  const channelsToSend = claimPlan.claimed;
+  const preSkipped = claimSkipFailures(claimPlan);
+  const skippedAlreadySent = preSkipped.filter((item) => item.reason === "already_sent");
   if (!channelsToSend.length) {
     return json({
       ok: false,
       conflict: true,
-      error: "Media was already sent to every requested Telegram channel.",
+      error: claimPlan.inFlight.length
+        ? "Album delivery is already in flight for every remaining requested channel."
+        : "Media was already sent to every requested Telegram channel.",
       media: identity,
-      channels: { requested: chatIds, inserted: [], notSent: skippedAlreadySent },
-      hint: "Pass force=true to resend the album.",
+      channels: { requested: chatIds, attempted: [], inserted: [], notSent: preSkipped },
+      hint: "Pass force=true to resend an already delivered album. Active claims are not duplicated.",
     }, 409);
   }
 
@@ -1016,18 +1067,26 @@ async function handleJsonAlbumSend(
 
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
       const batch = batches[batchIndex]!;
-      const result = await sendTelegramMediaGroupUrl({
-        botToken: env.TELEGRAM_BOT_TOKEN,
-        chatId,
-        items: batch.map((item) => ({
-          mediaUrl: item.mediaUrl.href,
-          mediaType: item.mediaType,
-          caption: item.caption,
-          parseMode: item.parseMode,
-        })),
-        caption: batchIndex === 0 ? input.caption : "",
-        parseMode: batchIndex === 0 ? input.parseMode : null,
-      });
+      let result: TelegramApiResult<TelegramMessage[]>;
+      try {
+        result = await sendTelegramMediaGroupUrl({
+          botToken: env.TELEGRAM_BOT_TOKEN,
+          chatId,
+          items: batch.map((item) => ({
+            mediaUrl: item.mediaUrl.href,
+            mediaType: item.mediaType,
+            caption: item.caption,
+            parseMode: item.parseMode,
+          })),
+          caption: batchIndex === 0 ? input.caption : "",
+          parseMode: batchIndex === 0 ? input.parseMode : null,
+        });
+      } catch (error) {
+        result = {
+          ok: false,
+          description: `Unexpected exception while sending media group: ${getErrorMessage(error)}`,
+        };
+      }
 
       deliveries.push({
         requestedChatId: chatId,
@@ -1082,10 +1141,13 @@ async function handleJsonAlbumSend(
       };
     }),
   });
-  const notSent = [...skippedAlreadySent, ...failedChannels];
+  await releaseDeliveryClaims(db, claimPlan).catch((error) =>
+    console.error("[media-relay] Failed to release album delivery claims", { media: identity.key, error: getErrorMessage(error) }),
+  );
+  const notSent = [...preSkipped, ...failedChannels];
   const payload = {
     ok: completedChannels.length > 0,
-    partial: notSent.length > 0,
+    partial: failedChannels.length > 0 || claimPlan.inFlight.length > 0,
     media: identity,
     message: completedChannels.length > 0
       ? `Album delivered completely to ${completedChannels.length} Telegram channel(s)`
@@ -1101,8 +1163,8 @@ async function handleJsonAlbumSend(
     telegram: { method: "sendMediaGroup", deliveries: formatted },
     metadata: input.metadata,
   };
-  if (!completedChannels.length) return json(payload, 502);
-  return json(payload, notSent.length ? 207 : 200);
+  if (!completedChannels.length) return json(payload, failedChannels.length === 0 && preSkipped.length ? 409 : 502);
+  return json(payload, failedChannels.length || claimPlan.inFlight.length ? 207 : 200);
 }
 
 interface TelegramDelivery {
@@ -1123,33 +1185,41 @@ async function sendPreparedMediaToChats(options: {
   // Send sequentially so a large multipart payload is not duplicated in memory
   // for several concurrent Bot API requests inside the same Worker isolate.
   for (const chatId of options.chatIds) {
-    const result =
-      options.prepared.type === "file"
-        ? await sendTelegramUrl({
-            botToken: options.botToken,
-            chatId,
-            mediaUrl: options.prepared.url,
-            mediaType: options.mediaType,
-            caption: options.caption,
-            parseMode: options.parseMode,
-          })
-        : await sendTelegramUpload({
-            botToken: options.botToken,
-            chatId,
-            file: new Blob([options.prepared.bytes], {
-              type: options.prepared.contentType,
-            }),
-            filename: options.prepared.filename,
-            contentType: options.prepared.contentType,
-            mediaType: options.mediaType,
-            caption: options.caption,
-            parseMode: options.parseMode,
-          });
+    let result: TelegramApiResult<TelegramMessage>;
+    try {
+      result =
+        options.prepared.type === "file"
+          ? await sendTelegramUrl({
+              botToken: options.botToken,
+              chatId,
+              mediaUrl: options.prepared.url,
+              mediaType: options.mediaType,
+              caption: options.caption,
+              parseMode: options.parseMode,
+            })
+          : await sendTelegramUpload({
+              botToken: options.botToken,
+              chatId,
+              file: new Blob([options.prepared.bytes], {
+                type: options.prepared.contentType,
+              }),
+              filename: options.prepared.filename,
+              contentType: options.prepared.contentType,
+              mediaType: options.mediaType,
+              caption: options.caption,
+              parseMode: options.parseMode,
+            });
+    } catch (error) {
+      // Convert transport/runtime exceptions into a normal channel-level failure
+      // so the claim lifecycle always reaches persistence/release and one bad
+      // destination never strands the remaining channels behind a stale claim.
+      result = {
+        ok: false,
+        description: `Unexpected exception while sending media: ${getErrorMessage(error)}`,
+      };
+    }
 
-    deliveries.push({
-      requestedChatId: chatId,
-      result,
-    });
+    deliveries.push({ requestedChatId: chatId, result });
   }
 
   return deliveries;
@@ -1936,7 +2006,7 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
   }
   const multipartIdentityFallback = payload.sourceUrl || payload.pageUrl || payload.mediaUrl || payload.photoUrl || payload.videoUrl ||
     `multipart:${uploadedFiles.map(({ file }) => `${file.name}:${file.size}:${file.type}`).join("|")}`;
-  const identity = await resolveMediaIdentity({
+  let identity = await resolveMediaIdentity({
     provider: payload.provider || "multipart",
     mediaId: payload.mediaId || null,
     mediaKey: payload.mediaKey || null,
@@ -1944,17 +2014,24 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
     pageUrl: payload.pageUrl || null,
     mediaUrl: multipartIdentityFallback,
   });
-  const alreadyDelivered = payload.force === true ? new Set<string>() : await getAlreadyDeliveredChannels(db, identity.key, chatIds);
-  const channelsToSend = payload.force === true ? chatIds : chatIds.filter((chatId) => !alreadyDelivered.has(chatId));
-  const skippedAlreadySent = chatIds.filter((chatId) => alreadyDelivered.has(chatId)).map((channelId) => ({ channelId, reason: "already_sent" as const }));
+  const claimPlan = await acquireDeliveryClaims(db, identity, chatIds, {
+    force: payload.force === true,
+    ttlSeconds: resolveDeliveryClaimTtlSeconds(env),
+  });
+  identity = withStorageMediaKey(identity, claimPlan.mediaKey);
+  const channelsToSend = claimPlan.claimed;
+  const preSkipped = claimSkipFailures(claimPlan);
+  const skippedAlreadySent = preSkipped.filter((item) => item.reason === "already_sent");
   if (!channelsToSend.length) {
     return json({
       ok: false,
       conflict: true,
-      error: "Media was already sent to every requested Telegram channel.",
+      error: claimPlan.inFlight.length
+        ? "Multipart delivery is already in flight for every remaining requested channel."
+        : "Media was already sent to every requested Telegram channel.",
       media: identity,
-      channels: { requested: chatIds, inserted: [], notSent: skippedAlreadySent },
-      hint: "Pass force=true in the multipart payload to resend.",
+      channels: { requested: chatIds, attempted: [], inserted: [], notSent: preSkipped },
+      hint: "Pass force=true in the multipart payload to resend an already delivered channel.",
     }, 409);
   }
 
@@ -2039,7 +2116,10 @@ async function handleMultipartSend(request: Request, env: Env): Promise<Response
       };
     }),
   });
-  const notSent = [...skippedAlreadySent, ...failedChannels];
+  await releaseDeliveryClaims(db, claimPlan).catch((error) =>
+    console.error("[media-relay] Failed to release multipart delivery claims", { media: identity.key, error: getErrorMessage(error) }),
+  );
+  const notSent = [...preSkipped, ...failedChannels];
 
   const formattedDeliveries = deliveries.map((entry) => ({
     fileIndex: entry.fileIndex,
