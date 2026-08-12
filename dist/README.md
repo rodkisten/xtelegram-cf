@@ -1,0 +1,1 @@
+This folder contains the built output assets for the worker "xtelegram-cf" generated at 2026-08-12T20:06:42.240Z.
