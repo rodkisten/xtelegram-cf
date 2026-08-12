@@ -4,6 +4,11 @@ Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos,
 
 ## O que a v2.8 adiciona
 
+- **Claims atômicos por mídia + canal** antes do side effect externo no Telegram. Requests concorrentes deixam de passar juntos pela janela `check → send → persist`; o segundo recebe `delivery_in_progress` enquanto o primeiro possui o claim.
+- `delivery_claims` usa TTL generoso (30 min por padrão) para cobrir resolução/HLS lentos. Claims de canais com falha conhecida são liberados; se o Telegram respondeu sucesso mas a persistência D1 falhar, o claim do canal bem-sucedido é mantido até expirar para evitar um reenvio externo imediato com estado de persistência incerto.
+- `/media/check` liga arrays como JSON e expande com `json_each()`, mantendo constante a quantidade de parâmetros da prepared statement mesmo com 100 mídias + canais.
+- IDs nativos de provider agora são tratados como **opacos e case-sensitive**. Chaves antigas lossily-normalized continuam aceitas como aliases e são reutilizadas quando já existem, evitando dividir o histórico de uma mesma publicação.
+- Métricas de batch agora incluem claims, round trips/statements D1, resoluções, tentativas Telegram e timings.
 - D1/SQLite como registro persistente das mídias enviadas.
 - Identidade estável no formato `provider:media_id` sempre que possível.
 - Fallback por SHA-256 curto da URL canônica quando o provedor não expõe um ID utilizável.
@@ -17,12 +22,8 @@ Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos,
 - `POST /batch` para enviar vários links/posts em uma chamada com preflight D1 único, concorrência limitada, deduplicação por mídia+canal e resultados parciais item a item.
 - `GET /media` e `GET /media/:key` para consulta do histórico.
 - `POST /media/check` para consultar até 100 mídias/URLs em lote com **uma única query D1**, opcionalmente filtrada por até 100 canais.
+- `delivery_in_progress` identifica um canal que já está reservado por outro request concorrente; não é `telegram_error` e não deve ser forçado automaticamente.
 - Fotos, vídeos, HLS, arquivos multipart e carrosséis continuam suportados.
-- **Claims atômicos antes do Telegram** por `media_key + channel_id`, evitando envio duplicado quando duas requisições concorrentes chegam ao mesmo tempo.
-- `already_sending` diferencia mídia já entregue de mídia atualmente protegida por um claim concorrente.
-- `/media/check` e lookups por canais usam `json_each(?)` com arrays JSON, mantendo o número de parâmetros D1 constante mesmo com 100 mídias + canais.
-- IDs opacos de provider deixam de ser lowercased/sanitizados de forma destrutiva. O relay mantém aliases compatíveis com chaves legadas da v2.7 quando isso pode ser provado com segurança.
-- Métricas do `/batch` incluem `queryBindingMode`, `atomicClaims`, `claimProtectedItems`, `telegramAttempts` e `mediaResolutions`.
 
 ---
 
@@ -63,12 +64,9 @@ A tabela usa `PRIMARY KEY (media_key, channel_id)`. Um reenvio forçado não dup
 
 ### `delivery_claims`
 
-Reserva temporária por `media_key + channel_id` adquirida **antes** do side effect externo no Telegram. A chave primária composta garante que apenas uma requisição concorrente seja dona daquele envio. Claims expiram automaticamente e são removidos após sucesso/erro.
+Reserva por `media_key + channel_id` adquirida **antes** de chamar a Bot API. O claim impede dois requests não-forçados concorrentes de enviarem a mesma mídia para o mesmo canal. Claims expirados são limpos automaticamente. Depois de falha conhecida, o claim é liberado; depois de sucesso Telegram, ele só é liberado quando a persistência D1 correspondente foi confirmada. Se essa persistência falhar, o claim permanece até o TTL como proteção conservadora. `force=true` continua sendo um bypass explícito.
 
-- `request_id`: dono do claim.
-- `claimed_at` / `expires_at`.
-- TTL default: 900 s, configurável por `DELIVERY_CLAIM_TTL_SECONDS` entre 60 e 3600 s.
-- Um conflito com claim ativo aparece como `notSent[].reason = "already_sending"`.
+A migração `0002_delivery_claims.sql` cria a tabela e o índice por `expires_at`.
 
 ---
 
@@ -125,7 +123,7 @@ Listar migrations:
 npm run db:migrations:list
 ```
 
-As migrations são:
+As migrations estão em:
 
 ```text
 migrations/0001_media_delivery_history.sql
@@ -145,12 +143,6 @@ Destino default opcional:
 
 ```bash
 npx wrangler secret put TELEGRAM_CHAT_ID
-```
-
-TTL opcional dos claims, em segundos:
-
-```text
-DELIVERY_CLAIM_TTL_SECONDS=900
 ```
 
 Para desenvolvimento local, copie:
@@ -196,7 +188,7 @@ https://x.com/user/status/1234567890
 → twitter:1234567890
 
 https://www.instagram.com/p/ABCxyz/
-→ instagram:abcxyz
+→ instagram:ABCxyz
 
 https://www.tiktok.com/@user/video/7512345678901234567
 → tiktok:7512345678901234567
@@ -470,7 +462,7 @@ O `/batch` aceita até **50 itens** e pode enviar todos para um canal, vários c
 
 Antes de iniciar o trabalho caro, o Worker resolve as identidades conhecidas e faz **uma única consulta D1** para descobrir quais combinações mídia+canal já existem. Canais já entregues são removidos do envio antes de download, resolução social, HLS/remux ou chamada ao Telegram.
 
-O `/send` continua validando duplicidade novamente durante a entrega. O preflight do batch é uma otimização, não a única garantia de integridade.
+O `/send` continua fazendo o guard final. Na v2.8 esse guard adquire um **claim atômico** por mídia+canal antes de chamar o Telegram. O preflight do batch permanece uma otimização para evitar trabalho caro; o claim é a proteção de concorrência.
 
 ### Lista simples de links
 
@@ -546,6 +538,20 @@ Suporta no mesmo lote:
 - carrossel/álbum com foto+vídeo;
 - destinos específicos por item;
 - `caption`, `parseMode`, `metadata`, `mediaKey`, `provider` e `mediaId` por item.
+
+### Métricas v2.8
+
+A resposta de `/batch` inclui, em `summary`, além dos contadores de resultado:
+
+- `preflightQueries`
+- `identityAliasQueries`
+- `claimQueries`
+- `dbRoundTrips` / `dbStatements`
+- `mediaResolutions`
+- `telegramAttempts`
+- `preflightDurationMs` / `processingDurationMs` / `durationMs`
+
+Essas métricas são de diagnóstico/custo e não alteram a ordem dos resultados.
 
 ### `force=true`
 
@@ -724,8 +730,9 @@ O endpoint:
 1. valida até 100 entradas;
 2. resolve todas com a mesma função `resolveMediaIdentity()` usada por `/send` e `/batch`;
 3. remove `media_key` repetidas em memória;
-4. executa **uma única query indexada no D1**;
-5. reconstrói os resultados na mesma ordem da entrada.
+4. serializa chaves e canais em arrays JSON e expande com `json_each()`;
+5. executa **uma única query indexada no D1**, sem crescer o número de parâmetros bound;
+6. reconstrói os resultados na mesma ordem da entrada.
 
 A consulta usa `media.media_key` (PRIMARY KEY) e `media_deliveries(media_key, channel_id)` (PRIMARY KEY composta). Portanto não é necessário adicionar índices redundantes para este caminho.
 
@@ -785,9 +792,9 @@ Resposta resumida:
       "index": 0,
       "input": "https://www.instagram.com/p/ABC123/",
       "valid": true,
-      "mediaKey": "instagram:abc123",
+      "mediaKey": "instagram:ABC123",
       "provider": "instagram",
-      "mediaId": "abc123",
+      "mediaId": "ABC123",
       "exists": true,
       "channels": [
         {
@@ -845,7 +852,7 @@ Entradas inválidas não impedem a consulta das válidas. Elas aparecem individu
 
 ### Importante: check não substitui deduplicação do envio
 
-`/media/check` é um pre-check de UX e planejamento. `/send` e `/batch` continuam verificando o banco novamente antes de enviar. Isso evita duplicação por race condition caso outra requisição envie a mídia entre o check e o send.
+`/media/check` é um pre-check de UX e planejamento. `/send` e `/batch` não confiam nele como lock. Antes do side effect externo, o fluxo não-forçado adquire `delivery_claims(media_key, channel_id)`. Se outro request já possui o claim, o canal volta como `delivery_in_progress`; se já existe histórico, volta como `already_sent`.
 
 ---
 
