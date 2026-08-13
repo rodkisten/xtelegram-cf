@@ -11,6 +11,7 @@ export interface Env {
   MULTIPART_MAX_TOTAL_BYTES?: string;
   TWIRRL_VERSION_TOKEN?: string;
   DELIVERY_CLAIM_TTL_SECONDS?: string;
+  SOCIAL_METADATA_TIMEOUT_MS?: string;
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";
@@ -40,8 +41,6 @@ export interface RelayAlbumItem {
   mediaType: AlbumMediaType;
   caption: string;
   parseMode: ParseMode | null;
-  /** Headers required by this individual CDN URL during Worker fallback. */
-  mediaHeaders: Record<string, string>;
   metadata: Record<string, string> | null;
 }
 
