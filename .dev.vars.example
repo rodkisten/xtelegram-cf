@@ -2,6 +2,6 @@
 TELEGRAM_BOT_TOKEN=replace-me
 RELAY_TOKEN=replace-me
 TELEGRAM_CHAT_ID=-1001234567890
-# Optional. Limits the combined in-memory size of one multipart forwarding
-# request and a protected-CDN album fallback batch.
-MULTIPART_MAX_TOTAL_BYTES=32000000
+
+# Optional: server-side Instagram/X metadata fetch timeout (1000-12000 ms).
+SOCIAL_METADATA_TIMEOUT_MS=5000
