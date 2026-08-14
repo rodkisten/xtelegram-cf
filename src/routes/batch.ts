@@ -13,6 +13,7 @@ import { cloneAuthorizedJsonRequest } from "../http/internal-request";
 import { json } from "../http/response";
 import { mapWithConcurrency } from "../lib/concurrency";
 import { getErrorMessage } from "../lib/errors";
+import { debugError, relayDebug, relayTraceId } from "../lib/debug";
 import {
   resolveDefaultTelegramChatId,
   resolveTelegramChatIds,
@@ -54,11 +55,13 @@ interface BatchPreparedItem {
 }
 
 export async function handleBatch(request: Request, env: Env): Promise<Response> {
+  const traceId = relayTraceId(request);
   const batchStartedAt = Date.now();
   let body: BatchBody;
   try {
     body = (await request.json()) as BatchBody;
   } catch {
+    relayDebug(env, traceId, "batch.invalid-json", {});
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
@@ -68,12 +71,14 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
       ? body.links
       : null;
   if (!rawItems?.length) {
+    relayDebug(env, traceId, "batch.empty", {});
     return json(
       { ok: false, error: "Batch requires a non-empty links[] or items[] array." },
       400,
     );
   }
   if (rawItems.length > MAX_BATCH_ITEMS) {
+    relayDebug(env, traceId, "batch.too-large", { itemCount: rawItems.length, maxItems: MAX_BATCH_ITEMS });
     return json(
       { ok: false, error: `A batch can contain at most ${MAX_BATCH_ITEMS} links/items.` },
       400,
@@ -81,13 +86,17 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   }
 
   const channelValidation = normalizeTelegramChannels(body.channel, body.channels);
-  if (!channelValidation.ok) return json({ ok: false, error: channelValidation.error }, 400);
+  if (!channelValidation.ok) {
+    relayDebug(env, traceId, "batch.invalid-channels", { error: channelValidation.error });
+    return json({ ok: false, error: channelValidation.error }, 400);
+  }
 
   const sharedChannels = resolveTelegramChatIds(
     channelValidation.value,
     resolveDefaultTelegramChatId(env),
   );
   if (!sharedChannels.length) {
+    relayDebug(env, traceId, "batch.no-channels", { itemCount: rawItems.length });
     return json({ ok: false, error: "No Telegram channel was provided." }, 400);
   }
 
@@ -95,8 +104,16 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   try {
     db = requireRelayDb(env);
   } catch (error) {
+    relayDebug(env, traceId, "batch.database-unavailable", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
+
+  relayDebug(env, traceId, "batch.started", {
+    itemCount: rawItems.length,
+    sharedChannelCount: sharedChannels.length,
+    requestedConcurrency: body.concurrency ?? null,
+    force: body.force === true,
+  });
 
   const invalidResults = new Map<number, Record<string, unknown>>();
   const prepared: BatchPreparedItem[] = [];
@@ -196,6 +213,14 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   );
   prepared.sort((left, right) => left.index - right.index);
 
+  relayDebug(env, traceId, "batch.items-prepared", {
+    preparedCount: prepared.length,
+    invalidCount: invalidResults.size,
+    directCount: prepared.filter((item) => item.isDirect).length,
+    socialCount: prepared.filter((item) => !item.isDirect).length,
+    identityCount: prepared.filter((item) => item.identity).length,
+  });
+
   const preflightItems = prepared.filter((item) => !item.force && item.identity);
   const preflightIdentities = [
     ...new Map(preflightItems.map((item) => [item.identity!.key, item.identity!])).values(),
@@ -208,12 +233,20 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
       ? await checkStoredMediaDeliveries(db, preflightIdentities, preflightChannels)
       : new Map();
   } catch (error) {
+    relayDebug(env, traceId, "batch.preflight-failed", { error: debugError(error) });
     return json(
       { ok: false, error: getErrorMessage(error), stage: "batch-preflight" },
       500,
     );
   }
   const preflightDurationMs = Date.now() - preflightStartedAt;
+
+  relayDebug(env, traceId, "batch.preflight-completed", {
+    identityCount: preflightIdentities.length,
+    channelCount: preflightChannels.length,
+    foundIdentityCount: existing.size,
+    durationMs: preflightDurationMs,
+  });
 
   for (const item of preflightItems) {
     const storedKey = existing.get(item.identity!.key)?.media.key;
@@ -264,6 +297,11 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   }
 
   const concurrency = normalizeBatchConcurrency(body.concurrency);
+  relayDebug(env, traceId, "batch.scheduled", {
+    concurrency,
+    scheduledCount: prepared.filter((item) => Array.isArray(item.payload.channels) && item.payload.channels.length > 0).length,
+    preSkippedCount: prepared.reduce((count, item) => count + item.preSkipped.length, 0),
+  });
   const processingStartedAt = Date.now();
   const processed = await mapWithConcurrency(prepared, concurrency, async (item) => {
     const channelsToSend = Array.isArray(item.payload.channels)
@@ -271,6 +309,11 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
       : item.channels;
 
     if (item.identity && channelsToSend.length === 0) {
+      relayDebug(env, traceId, "batch.item-conflict", {
+        itemIndex: item.index,
+        direct: item.isDirect,
+        preSkippedCount: item.preSkipped.length,
+      });
       return {
         index: item.index,
         ok: false,
@@ -290,17 +333,34 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     }
 
     try {
+      relayDebug(env, traceId, "batch.item-dispatch", {
+        itemIndex: item.index,
+        direct: item.isDirect,
+        channelCount: channelsToSend.length,
+        force: item.force,
+      });
       const internal = cloneAuthorizedJsonRequest(request, item.payload);
       const response = item.isDirect
         ? await handleSend(internal, env)
         : await handleResolve(internal, env, true);
       const result = (await response.json()) as Record<string, unknown>;
       const merged = mergeBatchPreflightResult(result, item.channels, item.preSkipped);
+      relayDebug(env, traceId, "batch.item-completed", {
+        itemIndex: item.index,
+        status: response.status,
+        ok: merged.ok === true,
+        stage: typeof merged.stage === "string" ? merged.stage : null,
+        error: typeof merged.error === "string" ? merged.error : null,
+      });
       return { index: item.index, status: response.status, ...merged };
     } catch (error) {
       console.error("[media-relay] Batch item crashed", {
         index: item.index,
         error: getErrorMessage(error),
+      });
+      relayDebug(env, traceId, "batch.item-crashed", {
+        itemIndex: item.index,
+        error: debugError(error),
       });
       return {
         index: item.index,
@@ -352,6 +412,20 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   }).length;
   const processingDurationMs = Date.now() - processingStartedAt;
   const status = resolveBatchStatus(results, succeeded, conflicts);
+
+  relayDebug(env, traceId, "batch.completed", {
+    status,
+    requested: results.length,
+    succeeded,
+    failed,
+    conflicts,
+    insertedChannels,
+    skippedAlreadySent,
+    skippedDuplicateInBatch,
+    telegramAttempts,
+    processingDurationMs,
+    durationMs: Date.now() - batchStartedAt,
+  });
 
   return json(
     {
