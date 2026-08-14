@@ -14,7 +14,6 @@ import {
   retainSuccessfulClaimsUntilPersistence,
 } from "../../services/delivery-plan";
 import { getTelegramMethodName } from "../../services/telegram-delivery";
-import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import { sendTelegramUpload } from "../../telegram";
 import type { Env, MediaType, TelegramApiResult, TelegramMessage } from "../../types";
 import {
@@ -225,16 +224,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   }
 
   try {
-    const baseMetadata = normalizeMetadata(payload.metadata);
-    const socialContent = await resolveSocialDeliveryContent({
-      provider: payload.provider || null,
-      sourceUrl: payload.sourceUrl || null,
-      pageUrl: payload.pageUrl || null,
-      caption: resolvePayloadCaption(payload as Record<string, unknown>),
-      parseMode,
-      metadata: baseMetadata,
-    }, env);
-    const caption = socialContent.caption;
+    const caption = resolvePayloadCaption(payload as Record<string, unknown>);
     const deliveries: MultipartDelivery[] = [];
 
     // Channel-first lets us stop a destination after its first failure instead
@@ -252,7 +242,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
             contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
             mediaType: uploaded.mediaType,
             caption: fileIndex === 0 ? caption : "",
-            parseMode: fileIndex === 0 ? socialContent.parseMode : null,
+            parseMode: fileIndex === 0 ? parseMode : null,
           });
         } catch (error) {
           result = {
@@ -316,7 +306,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
         pageUrl: payload.pageUrl || null,
         mediaType: uploadedFiles.length > 1 ? "album" : uploadedFiles[0]!.mediaType,
         mediaCount: uploadedFiles.length,
-        metadata: socialContent.metadata,
+        metadata: normalizeMetadata(payload.metadata),
         deliveries: completedChannels.map((chatId) => {
           const messages = deliveries
             .filter((entry) => entry.requestedChatId === chatId && entry.result.ok)
@@ -439,8 +429,6 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
           },
           telegram: { deliveries: formattedDeliveries },
           payload,
-          metadata: socialContent.metadata,
-          socialMetadata: socialContent.social,
           metrics: multipartMetrics,
         },
         completedChannels.length > 0 ? 207 : 502,
@@ -472,8 +460,6 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       },
       telegram: { deliveries: formattedDeliveries },
       payload,
-      metadata: socialContent.metadata,
-      socialMetadata: socialContent.social,
       metrics: multipartMetrics,
     });
   } finally {
