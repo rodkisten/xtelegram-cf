@@ -63,9 +63,25 @@ export async function prepareMedia(
       selectedResolution: null,
       playlistDepth: 0,
     };
+    const isPreferredTwitterVideo = shouldPreferWorkerUploadForTelegram(input, direct.url);
+    if (isPreferredTwitterVideo && direct.contentLength == null) {
+      const rangedLength = await probeContentLengthByRange(
+        direct.url,
+        input.mediaHeaders,
+        options.signal,
+      );
+      if (rangedLength != null) direct.contentLength = rangedLength;
+    }
+    const preferWorkerUpload =
+      !options.forceUpload &&
+      direct.contentLength != null &&
+      direct.contentLength > 0 &&
+      direct.contentLength <= maxMediaBytes &&
+      isPreferredTwitterVideo;
 
     if (
       !options.forceUpload &&
+      !preferWorkerUpload &&
       (direct.contentLength == null ||
         direct.contentLength <= TELEGRAM_REMOTE_URL_LIMIT)
     ) {
@@ -209,6 +225,29 @@ export function inferTelegramMediaType(
   return "document";
 }
 
+/**
+ * Telegram's server-side URL fetch occasionally chooses an incompatible
+ * rendition for X's signed video CDN. When the Worker can prove the file fits
+ * its upload ceiling, forward the exact bytes with the required X Referer
+ * instead. Photos and every other provider remain URL-first.
+ */
+export function shouldPreferWorkerUploadForTelegram(
+  input: Pick<RelayInput, "mediaType">,
+  mediaUrl: string,
+): boolean {
+  if (input.mediaType !== "video") return false;
+
+  try {
+    const url = new URL(mediaUrl);
+    const hostname = url.hostname.toLowerCase();
+    return hostname === "video.twimg.com" ||
+      (hostname.endsWith(".twimg.com") &&
+        /\/(?:amplify_video|ext_tw_video|tweet_video|video)\//i.test(url.pathname));
+  } catch {
+    return false;
+  }
+}
+
 function clampHlsMaxMediaBytes(value?: number): number {
   if (!Number.isFinite(value)) {
     return DEFAULT_HLS_MAX_MEDIA_BYTES;
@@ -264,6 +303,34 @@ async function downloadDirectFile(
   }
 
   return bytes;
+}
+
+/**
+ * A few X CDN edges reject HEAD but honor a one-byte range request. Use this
+ * only for the Worker-owned Twitter video path so an unknown HEAD length does
+ * not silently fall back to Telegram's remote re-fetch.
+ */
+async function probeContentLengthByRange(
+  url: string,
+  headers: HeadersInit,
+  signal?: AbortSignal,
+): Promise<number | null> {
+  const rangeHeaders = new Headers(headers);
+  rangeHeaders.set("Range", "bytes=0-0");
+
+  try {
+    const response = await fetchPublic(url, {
+      method: "GET",
+      headers: rangeHeaders,
+      signal,
+    });
+    const contentRange = String(response.headers.get("content-range") || "");
+    const total = Number(contentRange.match(/\/(\d+)\s*$/)?.[1] || 0);
+    try { await response.body?.cancel(); } catch {}
+    return Number.isFinite(total) && total > 0 ? total : null;
+  } catch {
+    return null;
+  }
 }
 
 function inferContentTypeFromUrl(value: string): string {
