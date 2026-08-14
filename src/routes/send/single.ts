@@ -19,7 +19,6 @@ import {
   resolveDefaultTelegramChatId,
   resolveTelegramChatIds,
 } from "../../services/channels";
-import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import {
   buildProcessingResult,
   formatTelegramDelivery,
@@ -141,22 +140,13 @@ export async function handleSingleSend(
       metadata: input.metadata,
     });
 
-    const socialContent = await resolveSocialDeliveryContent({
-      provider: input.provider,
-      sourceUrl: input.sourceUrl,
-      pageUrl: input.pageUrl,
-      caption: input.caption,
-      parseMode: input.parseMode,
-      metadata: input.metadata,
-    }, env);
-
     const deliveries = await sendPreparedMediaToChats({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatIds: plan.channelsToSend,
       prepared,
       mediaType,
-      caption: socialContent.caption,
-      parseMode: socialContent.parseMode,
+      caption: input.caption,
+      parseMode: input.parseMode,
     });
     const failedDeliveries = deliveries.filter((entry) => !entry.result.ok);
     const successfulDeliveries = deliveries.filter((entry) => entry.result.ok);
@@ -174,7 +164,7 @@ export async function handleSingleSend(
         pageUrl: input.pageUrl,
         mediaType,
         mediaCount: 1,
-        metadata: socialContent.metadata,
+        metadata: input.metadata,
         deliveries: successfulDeliveries.map((entry) => ({
           requestedChatId: entry.requestedChatId,
           telegramChatId: entry.result.result?.chat?.id ?? null,
@@ -253,8 +243,7 @@ export async function handleSingleSend(
         chatTitle: firstMessage?.chat?.title ?? null,
         deliveries: deliveries.map(formatTelegramDelivery),
       },
-      metadata: socialContent.metadata,
-      socialMetadata: socialContent.social,
+      metadata: input.metadata,
       metrics: {
         identityAliasQueries: plan.identityAliasQueries,
         claimQueries: plan.claim.queryCount,
