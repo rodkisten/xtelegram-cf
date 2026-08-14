@@ -2,6 +2,12 @@ import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import {
+  prepareMedia,
+  resolveConcurrency,
+  resolveHlsMaxMediaBytes,
+  resolveMaxMediaBytes,
+} from "../../media";
+import {
   buildDeliveryConflict,
   createDeliveryPlan,
   markChannelsPersisted,
@@ -13,13 +19,28 @@ import {
   resolveTelegramChatIds,
 } from "../../services/channels";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
-import { sendTelegramMediaGroupUrl } from "../../telegram";
+import { toBlobArrayBuffer } from "../../services/telegram-delivery";
+import {
+  sendTelegramMediaGroupUpload,
+  sendTelegramMediaGroupUrl,
+  sendTelegramUpload,
+  sendTelegramUrl,
+} from "../../telegram";
 import type {
   Env,
+  PreparedUpload,
   RelayAlbumInput,
+  RelayInput,
   TelegramApiResult,
   TelegramMessage,
 } from "../../types";
+import { resolveMultipartMaxTotalBytes } from "./multipart-utils";
+
+type AlbumTransport =
+  | "url"
+  | "multipart-upload"
+  | "ordered-single-url"
+  | "ordered-single-upload";
 
 interface TelegramAlbumBatchDelivery {
   requestedChatId: string;
@@ -27,6 +48,496 @@ interface TelegramAlbumBatchDelivery {
   itemOffset: number;
   itemCount: number;
   result: TelegramApiResult<TelegramMessage[]>;
+  transport: AlbumTransport;
+  fallbackAttempted: boolean;
+  orderedFallbackAttempted: boolean;
+  fallbackError: string | null;
+  /** A partial ordered fallback already has external side effects. */
+  hadExternalSideEffect: boolean;
+  attemptCount: number;
+}
+
+interface TelegramAlbumBatchAttempt {
+  result: TelegramApiResult<TelegramMessage[]>;
+  transport: AlbumTransport;
+  fallbackAttempted: boolean;
+  orderedFallbackAttempted: boolean;
+  fallbackError: string | null;
+  hadExternalSideEffect: boolean;
+  attemptCount: number;
+}
+
+interface PreparedAlbumUpload {
+  mediaType: RelayAlbumInput["items"][number]["mediaType"];
+  file: Blob;
+  filename: string;
+  contentType: string;
+}
+
+function albumItemToRelayInput(
+  input: RelayAlbumInput,
+  item: RelayAlbumInput["items"][number],
+): RelayInput {
+  return {
+    mediaUrl: item.mediaUrl,
+    sourceUrl: input.sourceUrl,
+    pageUrl: input.pageUrl,
+    provider: input.provider,
+    title: input.title,
+    text: input.text,
+    caption: item.caption || input.caption,
+    parseMode: item.parseMode ?? input.parseMode,
+    mediaType: item.mediaType,
+    mediaHeaders: item.mediaHeaders,
+    channels: [],
+    metadata: item.metadata ?? input.metadata,
+    mediaId: input.mediaId,
+    mediaKey: input.mediaKey,
+    force: input.force,
+  };
+}
+
+function albumUploadFilename(
+  prepared: PreparedUpload,
+  item: RelayAlbumInput["items"][number],
+  index: number,
+): string {
+  const raw = String(prepared.filename || "").trim();
+  if (/\.[a-z0-9]{2,8}$/i.test(raw)) return raw;
+  const extension = item.mediaType === "photo" ? "jpg" : "mp4";
+  return `${raw || `album-${index + 1}`}.${extension}`;
+}
+
+function shouldRetryAlbumAsUpload(result: TelegramApiResult<TelegramMessage[]>): boolean {
+  if (result.ok) return false;
+  // Network failures and 5xx replies are ambiguous: another Telegram call
+  // could duplicate a message. These are definitive Bot API rejections.
+  return [400, 413, 415].includes(Number(result.httpStatus || 0));
+}
+
+function isMixedPhotoVideoBatch(batch: RelayAlbumInput["items"]): boolean {
+  let hasPhoto = false;
+  let hasVideo = false;
+  for (const item of batch) {
+    if (item.mediaType === "photo") hasPhoto = true;
+    if (item.mediaType === "video") hasVideo = true;
+  }
+  return hasPhoto && hasVideo;
+}
+
+function allowsOrderedMixedFallback(input: RelayAlbumInput): boolean {
+  const value = String(input.metadata?.allowOrderedSingleFallback || "").trim().toLowerCase();
+  return value !== "false" && value !== "0" && value !== "off";
+}
+
+function itemCaption(
+  input: RelayAlbumInput,
+  item: RelayAlbumInput["items"][number],
+  index: number,
+  batchIndex: number,
+): string {
+  return item.caption || (index === 0 && batchIndex === 0 ? input.caption : "");
+}
+
+function itemParseMode(
+  input: RelayAlbumInput,
+  item: RelayAlbumInput["items"][number],
+  index: number,
+  batchIndex: number,
+): RelayAlbumInput["parseMode"] {
+  if (item.caption) return item.parseMode ?? (batchIndex === 0 ? input.parseMode : null);
+  return index === 0 && batchIndex === 0 ? input.parseMode : null;
+}
+
+function appendFallbackContext<T>(
+  result: TelegramApiResult<T>,
+  context: string,
+): TelegramApiResult<T> {
+  if (result.ok) return result;
+  return {
+    ...result,
+    description: [context, result.description || "Telegram rejected the ordered fallback."].join(" "),
+  };
+}
+
+async function prepareAlbumUploads(
+  input: RelayAlbumInput,
+  batch: RelayAlbumInput["items"],
+  env: Env,
+): Promise<PreparedAlbumUpload[]> {
+  const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+  const uploadBudget = resolveMultipartMaxTotalBytes(
+    env.MULTIPART_MAX_TOTAL_BYTES,
+    maxMediaBytes,
+  );
+  const uploads: PreparedAlbumUpload[] = [];
+  let totalBytes = 0;
+
+  // Keep memory bounded while retaining exactly the source order.
+  for (let index = 0; index < batch.length; index += 1) {
+    const item = batch[index]!;
+    const prepared = await prepareMedia(albumItemToRelayInput(input, item), {
+      maxMediaBytes,
+      concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
+      hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+      forceUpload: true,
+    });
+    if (prepared.type !== "upload") {
+      throw new Error(`Album item ${index + 1} did not produce an uploadable file.`);
+    }
+
+    totalBytes += prepared.bytes.byteLength;
+    if (totalBytes > uploadBudget) {
+      throw new Error(
+        `Album upload fallback is ${totalBytes} bytes, above the safe ${uploadBudget} byte Worker forwarding budget.`,
+      );
+    }
+
+    uploads.push({
+      mediaType: item.mediaType,
+      file: new Blob([toBlobArrayBuffer(prepared.bytes)], { type: prepared.contentType }),
+      filename: albumUploadFilename(prepared, item, index),
+      contentType: prepared.contentType,
+    });
+  }
+
+  return uploads;
+}
+
+interface OrderedSinglesAttempt {
+  result: TelegramApiResult<TelegramMessage[]>;
+  hadExternalSideEffect: boolean;
+  attemptCount: number;
+  /** A URL retry is only safe before any item has been accepted. */
+  safeToTryUrls: boolean;
+}
+
+async function sendPreparedAlbumItemsIndividually(
+  input: RelayAlbumInput,
+  batch: RelayAlbumInput["items"],
+  uploads: PreparedAlbumUpload[],
+  env: Env,
+  chatId: string,
+  batchIndex: number,
+): Promise<OrderedSinglesAttempt> {
+  const sent: TelegramMessage[] = [];
+
+  for (let index = 0; index < uploads.length; index += 1) {
+    const upload = uploads[index]!;
+    const item = batch[index]!;
+    const result = await sendTelegramUpload({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      file: upload.file,
+      filename: upload.filename,
+      contentType: upload.contentType,
+      mediaType: upload.mediaType,
+      caption: itemCaption(input, item, index, batchIndex),
+      parseMode: itemParseMode(input, item, index, batchIndex),
+    });
+    if (!result.ok) {
+      return {
+        result: appendFallbackContext(
+          { ...result, result: sent },
+          `Ordered mixed-media upload fallback sent ${sent.length}/${batch.length} item(s) before item ${index + 1} failed.`,
+        ),
+        hadExternalSideEffect: sent.length > 0,
+        attemptCount: index + 1,
+        safeToTryUrls:
+          sent.length === 0 && [400, 413, 415].includes(Number(result.httpStatus || 0)),
+      };
+    }
+    if (result.result) sent.push(result.result);
+  }
+
+  return {
+    result: {
+      ok: true,
+      result: sent,
+      httpStatus: 200,
+      requestMethod: "sendPhoto/sendVideo",
+    },
+    hadExternalSideEffect: sent.length > 0,
+    attemptCount: uploads.length,
+    safeToTryUrls: false,
+  };
+}
+
+async function sendAlbumItemsIndividually(
+  input: RelayAlbumInput,
+  batch: RelayAlbumInput["items"],
+  env: Env,
+  chatId: string,
+  batchIndex: number,
+): Promise<OrderedSinglesAttempt> {
+  const sent: TelegramMessage[] = [];
+  const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+
+  for (let index = 0; index < batch.length; index += 1) {
+    const item = batch[index]!;
+    let prepared: PreparedUpload;
+    try {
+      const candidate = await prepareMedia(albumItemToRelayInput(input, item), {
+        maxMediaBytes,
+        concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
+        hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+        forceUpload: true,
+      });
+      if (candidate.type !== "upload") {
+        throw new Error(`Album item ${index + 1} did not produce an uploadable file.`);
+      }
+      prepared = candidate;
+    } catch (error) {
+      return {
+        result: {
+          ok: false,
+          result: sent,
+          description: `Ordered mixed-media upload fallback sent ${sent.length}/${batch.length} item(s) before Worker preparation of item ${index + 1} failed: ${getErrorMessage(error)}`,
+        },
+        hadExternalSideEffect: sent.length > 0,
+        attemptCount: index,
+        safeToTryUrls: sent.length === 0,
+      };
+    }
+
+    const result = await sendTelegramUpload({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      file: new Blob([toBlobArrayBuffer(prepared.bytes)], { type: prepared.contentType }),
+      filename: albumUploadFilename(prepared, item, index),
+      contentType: prepared.contentType,
+      mediaType: item.mediaType,
+      caption: itemCaption(input, item, index, batchIndex),
+      parseMode: itemParseMode(input, item, index, batchIndex),
+    });
+    if (!result.ok) {
+      return {
+        result: appendFallbackContext(
+          { ...result, result: sent },
+          `Ordered mixed-media upload fallback sent ${sent.length}/${batch.length} item(s) before item ${index + 1} failed.`,
+        ),
+        hadExternalSideEffect: sent.length > 0,
+        attemptCount: index + 1,
+        // An ambiguous network/5xx result might have already reached Telegram.
+        safeToTryUrls:
+          sent.length === 0 && [400, 413, 415].includes(Number(result.httpStatus || 0)),
+      };
+    }
+    if (result.result) sent.push(result.result);
+  }
+
+  return {
+    result: {
+      ok: true,
+      result: sent,
+      httpStatus: 200,
+      requestMethod: "sendPhoto/sendVideo",
+    },
+    hadExternalSideEffect: sent.length > 0,
+    attemptCount: batch.length,
+    safeToTryUrls: false,
+  };
+}
+
+async function sendAlbumUrlsIndividually(
+  input: RelayAlbumInput,
+  batch: RelayAlbumInput["items"],
+  env: Env,
+  chatId: string,
+  batchIndex: number,
+): Promise<OrderedSinglesAttempt> {
+  const sent: TelegramMessage[] = [];
+
+  for (let index = 0; index < batch.length; index += 1) {
+    const item = batch[index]!;
+    const result = await sendTelegramUrl({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      mediaUrl: item.mediaUrl.href,
+      mediaType: item.mediaType,
+      caption: itemCaption(input, item, index, batchIndex),
+      parseMode: itemParseMode(input, item, index, batchIndex),
+    });
+    if (!result.ok) {
+      return {
+        result: appendFallbackContext(
+          { ...result, result: sent },
+          `Emergency ordered mixed-media URL fallback sent ${sent.length}/${batch.length} item(s) before item ${index + 1} failed.`,
+        ),
+        hadExternalSideEffect: sent.length > 0,
+        attemptCount: index + 1,
+        safeToTryUrls: false,
+      };
+    }
+    if (result.result) sent.push(result.result);
+  }
+
+  return {
+    result: {
+      ok: true,
+      result: sent,
+      httpStatus: 200,
+      requestMethod: "sendPhoto/sendVideo",
+    },
+    hadExternalSideEffect: sent.length > 0,
+    attemptCount: batch.length,
+    safeToTryUrls: false,
+  };
+}
+
+async function sendAlbumBatch(
+  input: RelayAlbumInput,
+  batch: RelayAlbumInput["items"],
+  env: Env,
+  chatId: string,
+  batchIndex: number,
+): Promise<TelegramAlbumBatchAttempt> {
+  let direct: TelegramApiResult<TelegramMessage[]>;
+  try {
+    direct = await sendTelegramMediaGroupUrl({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      items: batch.map((item) => ({
+        mediaUrl: item.mediaUrl.href,
+        mediaType: item.mediaType,
+        caption: item.caption,
+        parseMode: item.parseMode,
+      })),
+      caption: batchIndex === 0 ? input.caption : "",
+      parseMode: batchIndex === 0 ? input.parseMode : null,
+    });
+  } catch (error) {
+    return {
+      result: {
+        ok: false,
+        description: `Unexpected exception while sending media group: ${getErrorMessage(error)}`,
+      },
+      transport: "url",
+      fallbackAttempted: false,
+      orderedFallbackAttempted: false,
+      fallbackError: null,
+      hadExternalSideEffect: false,
+      attemptCount: 1,
+    };
+  }
+
+  if (!shouldRetryAlbumAsUpload(direct)) {
+    return {
+      result: direct,
+      transport: "url",
+      fallbackAttempted: false,
+      orderedFallbackAttempted: false,
+      fallbackError: null,
+      hadExternalSideEffect: direct.ok,
+      attemptCount: 1,
+    };
+  }
+
+  const mixedFallback = isMixedPhotoVideoBatch(batch) && allowsOrderedMixedFallback(input);
+
+  try {
+    const uploads = await prepareAlbumUploads(input, batch, env);
+    const uploaded = await sendTelegramMediaGroupUpload({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId,
+      items: uploads,
+      caption: batchIndex === 0 ? input.caption : "",
+      parseMode: batchIndex === 0 ? input.parseMode : null,
+    });
+    if (uploaded.ok) {
+      return {
+        result: uploaded,
+        transport: "multipart-upload",
+        fallbackAttempted: true,
+        orderedFallbackAttempted: false,
+        fallbackError: null,
+        hadExternalSideEffect: true,
+        attemptCount: 2,
+      };
+    }
+
+    // Both group variants were definitively rejected. Telegram accepts these
+    // same items individually on problematic mixed photo/video payloads.
+    if (mixedFallback && shouldRetryAlbumAsUpload(uploaded)) {
+      const ordered = await sendPreparedAlbumItemsIndividually(
+        input,
+        batch,
+        uploads,
+        env,
+        chatId,
+        batchIndex,
+      );
+      return {
+        result: appendFallbackContext(
+          ordered.result,
+          `Telegram rejected the mixed media group by URL and multipart (${direct.description || "URL rejected"}; ${uploaded.description || "multipart rejected"}).`,
+        ),
+        transport: "ordered-single-upload",
+        fallbackAttempted: true,
+        orderedFallbackAttempted: true,
+        fallbackError: ordered.result.ok
+          ? null
+          : ordered.result.description || "Ordered mixed-media upload fallback failed",
+        hadExternalSideEffect: ordered.hadExternalSideEffect,
+        attemptCount: 2 + ordered.attemptCount,
+      };
+    }
+
+    return {
+      result: {
+        ...uploaded,
+        description: [
+          "Telegram rejected both album transports.",
+          `URL: ${direct.description || "unknown error"}`,
+          `multipart: ${uploaded.description || "unknown error"}`,
+        ].join(" "),
+      },
+      transport: "multipart-upload",
+      fallbackAttempted: true,
+      orderedFallbackAttempted: false,
+      fallbackError: uploaded.description || "Telegram rejected multipart upload",
+      hadExternalSideEffect: false,
+      attemptCount: 2,
+    };
+  } catch (error) {
+    const fallbackError = getErrorMessage(error);
+    if (mixedFallback) {
+      const ordered = await sendAlbumItemsIndividually(input, batch, env, chatId, batchIndex);
+      const urlFallback = !ordered.result.ok && ordered.safeToTryUrls
+        ? await sendAlbumUrlsIndividually(input, batch, env, chatId, batchIndex)
+        : null;
+      const finalAttempt = urlFallback || ordered;
+      return {
+        result: appendFallbackContext(
+          finalAttempt.result,
+          `The Worker could not prepare a multipart mixed-media album (${fallbackError}).`,
+        ),
+        transport: urlFallback ? "ordered-single-url" : "ordered-single-upload",
+        fallbackAttempted: true,
+        orderedFallbackAttempted: true,
+        fallbackError: finalAttempt.result.ok
+          ? null
+          : finalAttempt.result.description || "Ordered mixed-media fallback failed",
+        hadExternalSideEffect: finalAttempt.hadExternalSideEffect,
+        attemptCount: 1 + ordered.attemptCount + (urlFallback ? urlFallback.attemptCount : 0),
+      };
+    }
+    return {
+      result: {
+        ...direct,
+        description: [
+          direct.description || "Telegram rejected the URL album.",
+          `Worker multipart fallback failed: ${fallbackError}`,
+        ].join(" "),
+      },
+      transport: "url",
+      fallbackAttempted: true,
+      orderedFallbackAttempted: false,
+      fallbackError,
+      hadExternalSideEffect: false,
+      attemptCount: 1,
+    };
+  }
 }
 
 export async function handleJsonAlbumSend(
@@ -90,7 +601,22 @@ export async function handleJsonAlbumSend(
       metadata: input.metadata,
     }, env);
 
-    const batches = chunkTelegramAlbum(input.items);
+    // The fallback transports must use the same enriched caption and metadata
+    // as the URL-first album path, so social delivery behavior stays intact.
+    const deliveryInput: RelayAlbumInput = {
+      ...input,
+      // Social enrichment owns the single post caption. Clearing client-side
+      // per-item captions ensures the first Telegram album entry receives the
+      // enriched caption (or its URL-only fallback) instead of stale browser
+      // text, while generic albums preserve their individual captions.
+      items: socialContent.social
+        ? input.items.map((item) => ({ ...item, caption: "", parseMode: null }))
+        : input.items,
+      caption: socialContent.caption,
+      parseMode: socialContent.parseMode,
+      metadata: socialContent.metadata,
+    };
+    const batches = chunkTelegramAlbum(deliveryInput.items);
     const deliveries: TelegramAlbumBatchDelivery[] = [];
 
     for (const chatId of plan.channelsToSend) {
@@ -98,39 +624,32 @@ export async function handleJsonAlbumSend(
 
       for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex]!;
-        let result: TelegramApiResult<TelegramMessage[]>;
-        try {
-          result = await sendTelegramMediaGroupUrl({
-            botToken: env.TELEGRAM_BOT_TOKEN,
-            chatId,
-            items: batch.map((item) => ({
-              mediaUrl: item.mediaUrl.href,
-              mediaType: item.mediaType,
-              caption: item.caption,
-              parseMode: item.parseMode,
-            })),
-            caption: batchIndex === 0 ? socialContent.caption : "",
-            parseMode: batchIndex === 0 ? socialContent.parseMode : null,
-          });
-        } catch (error) {
-          result = {
-            ok: false,
-            description: `Unexpected exception while sending media group: ${getErrorMessage(error)}`,
-          };
-        }
+        const attempt = await sendAlbumBatch(
+          deliveryInput,
+          batch,
+          env,
+          chatId,
+          batchIndex,
+        );
 
         deliveries.push({
           requestedChatId: chatId,
           batchIndex,
           itemOffset,
           itemCount: batch.length,
-          result,
+          result: attempt.result,
+          transport: attempt.transport,
+          fallbackAttempted: attempt.fallbackAttempted,
+          orderedFallbackAttempted: attempt.orderedFallbackAttempted,
+          fallbackError: attempt.fallbackError,
+          hadExternalSideEffect: attempt.hadExternalSideEffect,
+          attemptCount: attempt.attemptCount,
         });
         itemOffset += batch.length;
 
         // Once a chunk failed, continuing would create more orphaned album
         // chunks that cannot be represented as one successful channel delivery.
-        if (!result.ok) break;
+        if (!attempt.result.ok) break;
       }
     }
 
@@ -139,6 +658,12 @@ export async function handleJsonAlbumSend(
       batchIndex: delivery.batchIndex,
       itemOffset: delivery.itemOffset,
       itemCount: delivery.itemCount,
+      transport: delivery.transport,
+      fallbackAttempted: delivery.fallbackAttempted,
+      orderedFallbackAttempted: delivery.orderedFallbackAttempted,
+      fallbackError: delivery.fallbackError,
+      hadExternalSideEffect: delivery.hadExternalSideEffect,
+      attemptCount: delivery.attemptCount,
       ok: delivery.result.ok,
       httpStatus: delivery.result.httpStatus ?? null,
       error: delivery.result.ok
@@ -156,10 +681,12 @@ export async function handleJsonAlbumSend(
         channelDeliveries.every((delivery) => delivery.result.ok)
       );
     });
-    const channelsWithAnySuccess = new Set(
-      deliveries.filter((delivery) => delivery.result.ok).map((delivery) => delivery.requestedChatId),
+    const channelsWithExternalSideEffects = new Set(
+      deliveries
+        .filter((delivery) => delivery.hadExternalSideEffect)
+        .map((delivery) => delivery.requestedChatId),
     );
-    retainSuccessfulClaimsUntilPersistence(plan, channelsWithAnySuccess);
+    retainSuccessfulClaimsUntilPersistence(plan, channelsWithExternalSideEffects);
 
     const failedChannels = plan.channelsToSend
       .filter((chatId) => !completedChannels.includes(chatId))
@@ -171,9 +698,13 @@ export async function handleJsonAlbumSend(
         return {
           channelId,
           reason: "telegram_error" as const,
-          partialDelivery: channelDeliveries.some((delivery) => delivery.result.ok),
+          partialDelivery: channelDeliveries.some(
+            (delivery) => delivery.result.ok || delivery.hadExternalSideEffect,
+          ),
           errors: errors.map((delivery) => ({
             batchIndex: delivery.batchIndex,
+            transport: delivery.transport,
+            orderedFallbackAttempted: delivery.orderedFallbackAttempted,
             error: delivery.result.description || "Telegram rejected sendMediaGroup",
             httpStatus: delivery.result.httpStatus ?? null,
           })),
@@ -235,15 +766,20 @@ export async function handleJsonAlbumSend(
       ...plan.skippedInProgress,
       ...failedChannels,
     ];
+    const usedOrderedSingleFallback = deliveries.some(
+      (delivery) => delivery.transport === "ordered-single-url" || delivery.transport === "ordered-single-upload",
+    );
     const payload = {
       ok: completedChannels.length > 0,
       partial: notSent.length > 0,
       media: plan.identity,
       message:
         completedChannels.length > 0
-          ? `Album delivered completely to ${completedChannels.length} Telegram channel(s)`
+          ? `Album delivered completely to ${completedChannels.length} Telegram channel(s)${usedOrderedSingleFallback ? " using the ordered mixed-media fallback" : ""}`
           : "Album was not completely delivered to any Telegram channel",
-      mode: "telegram-media-group",
+      mode: usedOrderedSingleFallback
+        ? "telegram-media-group-ordered-single-fallback"
+        : "telegram-media-group",
       source: { sourceUrl: input.sourceUrl, pageUrl: input.pageUrl },
       channels: {
         requested: chatIds,
@@ -260,14 +796,22 @@ export async function handleJsonAlbumSend(
           mediaUrl: item.mediaUrl.href,
         })),
       },
-      telegram: { method: "sendMediaGroup", deliveries: formatted },
+      telegram: {
+        method: usedOrderedSingleFallback
+          ? "sendMediaGroup -> sendPhoto/sendVideo"
+          : "sendMediaGroup",
+        deliveries: formatted,
+      },
       metadata: socialContent.metadata,
       socialMetadata: socialContent.social,
       metrics: {
         identityAliasQueries: plan.identityAliasQueries,
         claimQueries: plan.claim.queryCount,
         claimedChannels: plan.channelsToSend.length,
-        telegramAttempts: deliveries.length,
+        telegramAttempts: deliveries.reduce(
+          (total, delivery) => total + delivery.attemptCount,
+          0,
+        ),
         dbRoundTrips:
           plan.identityAliasQueries +
           1 +
