@@ -1,7 +1,28 @@
-# xtelegram-cf · Telegram Media Relay v2.10
+# xtelegram-cf · Telegram Media Relay v2.10.3
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
+## Correção da v2.10.3 · contrato de canais e URL canônica do X
+
+- Resoluções sociais que enviam uma ou mais mídias individuais agora retornam o contrato agregado `channels` no topo de `/resolve-and-send`. O resultado de `/batch` preserva os canais realmente cobertos, inseridos, já enviados ou com falha; o cliente não interpreta mais uma entrega válida como “nenhum canal recebeu”.
+- URLs internas `https://x.com/i/status/:id`, comuns no viewer imersivo e em Bookmarks virtualizados, são convertidas para `https://x.com/@autor/status/:id` antes de Twirrl/DTwitter. O Worker busca o autor em syndication pública e aceita o handle capturado pelo cliente somente como último fallback.
+- O enriquecimento de metadata do X não usa `i` como se fosse username. Não há migration D1 nova.
+
+## Correção da v2.10.2 · vídeo X/Twitter preservado
+
+- Vídeo direto de video.twimg.com deixa de depender da busca remota do Telegram quando o arquivo cabe no limite seguro do Worker. O Worker baixa os bytes com Referer de X e faz sendVideo/attach com o arquivo original.
+- Em álbuns que contêm esse vídeo, o Relay tenta o grupo attach primeiro, mantendo a ordem e o álbum nativo. Se a preparação não couber no orçamento, volta ao caminho URL-first sem criar side effect; respostas ambíguas nunca são repetidas.
+- O resolver Twirrl preserva uma variante por slot de mídia e, quando recebe dimensões, prioriza a mesma proporção do conteúdo em vez de uma variante com mais pixels mas aspecto incompatível.
+- A configuração distribuída não contém tokens/chats embutidos. Configure TELEGRAM_BOT_TOKEN, RELAY_TOKEN e, se necessário, TELEGRAM_CHAT_ID como secrets do Wrangler.
+- Não há migration D1 nesta versão.
+
+## Correção da v2.10.1 · carrosséis mistos
+
+- **Foto + vídeo deixam de falhar como post inteiro:** o Relay tenta `sendMediaGroup` por URL, repete o mesmo grupo como `attach://` multipart usando os headers de cada mídia e, somente após uma rejeição definitiva (`400`, `413` ou `415`) das duas opções, envia `sendPhoto`/`sendVideo` na ordem original.
+- O álbum nativo é mantido quando o Telegram aceita o grupo. A recuperação ordenada é exclusiva de lotes mistos e existe para entregar o conteúdo quando a própria Bot API recusa a combinação.
+- Se o orçamento combinado do multipart for ultrapassado, a recuperação prepara e envia uma mídia por vez — preserva `Referer`/`User-Agent`, limita memória do Worker e não perde o carrossel.
+- Falhas de rede e 5xx não fazem tentativa alternativa, evitando retransmissões ambíguas. Falhas parciais preservam o claim D1 até o TTL para não duplicar os itens já aceitos.
+- `telegram.deliveries` agora inclui `transport`, `fallbackAttempted`, `orderedFallbackAttempted`, `attemptCount` e `fallbackError` para diagnóstico.
 
 ## O que a v2.10 adiciona
 
@@ -446,6 +467,10 @@ E somente fotos:
 ```
 
 O Worker divide automaticamente álbuns grandes em lotes compatíveis com Telegram. Um canal só entra em `inserted` quando todos os lotes daquele canal foram aceitos.
+
+`mediaHeaders` pode ser enviado em cada item (preferencial) ou no nível raiz do payload como fallback. O Worker usa esses headers quando precisa baixar o item no fallback multipart; o caminho normal continua URL-first.
+
+Para um carrossel com foto + vídeo, `metadata.allowOrderedSingleFallback` pode ser definido como `false` para desabilitar a recuperação final. O padrão é `true`: ela só ocorre após rejeições definitivas dos dois transportes de álbum e preserva a ordem original.
 
 ---
 
@@ -1070,7 +1095,7 @@ src/routes/send/single.ts
   Envio de mídia única/HLS.
 
 src/routes/send/album.ts
-  Carrossel/sendMediaGroup e chunking 2-10.
+  Carrossel/sendMediaGroup, chunking 2-10 e fallback URL → attach:// → foto/vídeo ordenados para lotes mistos rejeitados.
 
 src/routes/send/multipart.ts
 src/routes/send/multipart-utils.ts
