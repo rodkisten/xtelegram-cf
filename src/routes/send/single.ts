@@ -9,6 +9,13 @@ import {
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import {
+  debugChannelSummary,
+  debugError,
+  debugUrl,
+  relayDebug,
+  relayTraceId,
+} from "../../lib/debug";
+import {
   buildDeliveryConflict,
   createDeliveryPlan,
   markChannelsPersisted,
@@ -33,12 +40,23 @@ export async function handleSingleSend(
   input: RelayInput,
   env: Env,
 ): Promise<Response> {
+  const traceId = relayTraceId(request);
+  relayDebug(env, traceId, "single.started", {
+    provider: input.provider || null,
+    mediaType: input.mediaType || null,
+    mediaUrl: debugUrl(input.mediaUrl.href),
+    sourceUrl: debugUrl(input.sourceUrl),
+    requestedChannelCount: input.channels.length,
+    force: input.force,
+    hasMediaHeaders: Object.keys(input.mediaHeaders || {}).length > 0,
+  });
   const chatIds = resolveTelegramChatIds(
     input.channels,
     resolveDefaultTelegramChatId(env),
   );
 
   if (!chatIds.length) {
+    relayDebug(env, traceId, "single.no-channels", {});
     return json(
       {
         ok: false,
@@ -53,6 +71,7 @@ export async function handleSingleSend(
   try {
     db = requireRelayDb(env);
   } catch (error) {
+    relayDebug(env, traceId, "single.database-unavailable", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
 
@@ -73,10 +92,26 @@ export async function handleSingleSend(
       },
     });
   } catch (error) {
+    relayDebug(env, traceId, "single.delivery-plan-failed", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "delivery-plan" }, 500);
   }
 
+  relayDebug(env, traceId, "single.delivery-plan-ready", {
+    identityKey: plan.identity.key,
+    identityProvider: plan.identity.provider,
+    identityMediaId: plan.identity.providerMediaId,
+    identityCanonicalUrl: debugUrl(plan.identity.canonicalUrl),
+    requestedChannelCount: plan.requestedChannels.length,
+    channelsToSend: plan.channelsToSend.length,
+    alreadySent: plan.skippedAlreadySent.length,
+    inProgress: plan.skippedInProgress.length,
+    claimQueries: plan.claim.queryCount,
+  });
+
   if (!plan.channelsToSend.length) {
+    relayDebug(env, traceId, "single.delivery-conflict", {
+      channels: debugChannelSummary(buildDeliveryConflict(plan).channels),
+    });
     return json(buildDeliveryConflict(plan), 409);
   }
 
@@ -87,6 +122,12 @@ export async function handleSingleSend(
     let prepared: PreparedMedia;
 
     try {
+      relayDebug(env, traceId, "single.prepare-media.started", {
+        mediaUrl: debugUrl(input.mediaUrl.href),
+        maxMediaBytes,
+        hlsMaxMediaBytes,
+        concurrency,
+      });
       prepared = await prepareMedia(input, {
         maxMediaBytes,
         hlsMaxMediaBytes,
@@ -94,12 +135,9 @@ export async function handleSingleSend(
         signal: request.signal,
       });
     } catch (error) {
-      console.error("[media-relay] Failed to prepare media", {
-        inputUrl: input.mediaUrl.href,
-        sourceUrl: input.sourceUrl,
-        channels: chatIds,
-        error: getErrorMessage(error),
-        metadata: input.metadata,
+      relayDebug(env, traceId, "single.prepare-media.failed", {
+        mediaUrl: debugUrl(input.mediaUrl.href),
+        error: debugError(error),
       });
 
       return json(
@@ -125,22 +163,25 @@ export async function handleSingleSend(
         : prepared.mediaType);
     const delivery = prepared.type === "file" ? "telegram-url" : "multipart-upload";
 
-    console.log("[media-relay] Sending media", {
-      inputUrl: input.mediaUrl.href,
-      sourceUrl: input.sourceUrl,
-      channels: chatIds,
+    relayDebug(env, traceId, "single.prepare-media.succeeded", {
+      inputUrl: debugUrl(input.mediaUrl.href),
+      sourceUrl: debugUrl(input.sourceUrl),
       delivery,
       mediaType,
-      resolvedUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
+      resolvedUrl: debugUrl(prepared.type === "file" ? prepared.url : prepared.sourceUrl),
       selectedBitrate: prepared.selectedBitrate,
       selectedResolution: prepared.selectedResolution,
       playlistDepth: prepared.playlistDepth,
       size: prepared.type === "file" ? prepared.contentLength : prepared.bytes.byteLength,
       hls: prepared.type === "file" ? false : prepared.hls,
       remuxed: prepared.type === "file" ? false : prepared.remuxed,
-      metadata: input.metadata,
+      channelsToSend: plan.channelsToSend.length,
     });
 
+    relayDebug(env, traceId, "single.social-metadata.started", {
+      provider: input.provider || null,
+      hasCaption: Boolean(input.caption),
+    });
     const socialContent = await resolveSocialDeliveryContent({
       provider: input.provider,
       sourceUrl: input.sourceUrl,
@@ -150,6 +191,18 @@ export async function handleSingleSend(
       metadata: input.metadata,
     }, env);
 
+    relayDebug(env, traceId, "single.social-metadata.completed", {
+      parseMode: socialContent.parseMode || null,
+      captionLength: socialContent.caption.length,
+      metadataKeys: Object.keys(socialContent.metadata || {}).slice(0, 24),
+      socialMetadataStrategy: socialContent.social?.strategy || null,
+    });
+
+    relayDebug(env, traceId, "single.telegram.started", {
+      delivery,
+      mediaType,
+      channelCount: plan.channelsToSend.length,
+    });
     const deliveries = await sendPreparedMediaToChats({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatIds: plan.channelsToSend,
@@ -161,6 +214,16 @@ export async function handleSingleSend(
     const failedDeliveries = deliveries.filter((entry) => !entry.result.ok);
     const successfulDeliveries = deliveries.filter((entry) => entry.result.ok);
 
+    relayDebug(env, traceId, "single.telegram.completed", {
+      attempted: deliveries.length,
+      succeeded: successfulDeliveries.length,
+      failed: failedDeliveries.length,
+      failures: failedDeliveries.map((entry) => ({
+        httpStatus: entry.result.httpStatus || null,
+        error: entry.result.description || "Telegram rejected media",
+      })),
+    });
+
     retainSuccessfulClaimsUntilPersistence(
       plan,
       successfulDeliveries.map((entry) => entry.requestedChatId),
@@ -168,6 +231,9 @@ export async function handleSingleSend(
 
     let insertedChannelIds: string[] = [];
     try {
+      relayDebug(env, traceId, "single.persist.started", {
+        successfulTelegramDeliveries: successfulDeliveries.length,
+      });
       insertedChannelIds = await persistSuccessfulDeliveries(db, {
         identity: plan.identity,
         sourceUrl: input.sourceUrl,
@@ -184,10 +250,10 @@ export async function handleSingleSend(
       });
       markChannelsPersisted(plan, insertedChannelIds);
     } catch (error) {
-      console.error("[media-relay] Telegram succeeded but D1 persistence failed", {
-        media: plan.identity.key,
-        successfulChannels: successfulDeliveries.map((entry) => entry.requestedChatId),
-        error: getErrorMessage(error),
+      relayDebug(env, traceId, "single.persist.failed", {
+        identityKey: plan.identity.key,
+        successfulTelegramDeliveries: successfulDeliveries.length,
+        error: debugError(error),
       });
       return json(
         {
@@ -207,6 +273,10 @@ export async function handleSingleSend(
         500,
       );
     }
+
+    relayDebug(env, traceId, "single.persist.completed", {
+      insertedChannelCount: insertedChannelIds.length,
+    });
 
     const failedChannels = failedDeliveries.map((entry) => ({
       channelId: entry.requestedChatId,
@@ -275,20 +345,28 @@ export async function handleSingleSend(
     };
 
     if (!successfulDeliveries.length) {
-      console.error("[media-relay] Telegram rejected every attempted delivery", {
-        media: plan.identity,
-        notSent,
+      relayDebug(env, traceId, "single.telegram-all-failed", {
+        identityKey: plan.identity.key,
+        channelSummary: debugChannelSummary(payload.channels),
+        failureReasons: failedChannels.map((entry) => entry.reason),
       });
       return json(payload, 502);
     }
 
+    relayDebug(env, traceId, "single.completed", {
+      status: notSent.length ? 207 : 200,
+      channelSummary: debugChannelSummary(payload.channels),
+    });
     return json(payload, notSent.length ? 207 : 200);
   } finally {
     await releasePendingDeliveryClaims(plan).catch((error) => {
-      console.error("[media-relay] Failed to release delivery claims", {
-        media: plan.identity.key,
-        error: getErrorMessage(error),
+      relayDebug(env, traceId, "single.claim-release.failed", {
+        identityKey: plan.identity.key,
+        error: debugError(error),
       });
+    });
+    relayDebug(env, traceId, "single.claim-release.completed", {
+      identityKey: plan.identity.key,
     });
   }
 }
