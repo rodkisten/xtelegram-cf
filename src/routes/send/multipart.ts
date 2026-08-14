@@ -1,6 +1,12 @@
 import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import {
+  debugChannelSummary,
+  debugError,
+  relayDebug,
+  relayTraceId,
+} from "../../lib/debug";
 import { resolveMaxMediaBytes } from "../../media";
 import {
   resolveDefaultTelegramChatId,
@@ -46,10 +52,15 @@ interface MultipartDelivery {
 }
 
 export async function handleMultipartSend(request: Request, env: Env): Promise<Response> {
+  const traceId = relayTraceId(request);
+  relayDebug(env, traceId, "multipart.started", {
+    contentType: request.headers.get("Content-Type") || null,
+  });
   let form: FormData;
   try {
     form = await request.formData();
   } catch (error) {
+    relayDebug(env, traceId, "multipart.parse-failed", { error: debugError(error) });
     return json(
       {
         ok: false,
@@ -71,11 +82,15 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   }
 
   const payloadResult = parseMultipartPayload(form);
-  if (!payloadResult.ok) return payloadResult.response;
+  if (!payloadResult.ok) {
+    relayDebug(env, traceId, "multipart.payload-invalid", {});
+    return payloadResult.response;
+  }
   const payload = payloadResult.payload;
 
   const channelValidation = normalizeTelegramChannels(payload.channel, payload.channels);
   if (!channelValidation.ok) {
+    relayDebug(env, traceId, "multipart.invalid-channels", { error: channelValidation.error });
     return json(
       {
         ok: false,
@@ -95,6 +110,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     resolveDefaultTelegramChatId(env),
   );
   if (!chatIds.length) {
+    relayDebug(env, traceId, "multipart.no-channels", {});
     return json(
       {
         ok: false,
@@ -110,6 +126,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
 
   const parseMode = normalizeParseMode(payload.parseMode);
   if (payload.parseMode && !parseMode) {
+    relayDebug(env, traceId, "multipart.invalid-parse-mode", { parseMode: String(payload.parseMode) });
     return json(
       {
         ok: false,
@@ -123,6 +140,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
 
   const requestedMediaType = normalizeMediaType(payload.mediaType);
   if (payload.mediaType && !requestedMediaType) {
+    relayDebug(env, traceId, "multipart.invalid-media-type", { mediaType: String(payload.mediaType) });
     return json(
       {
         ok: false,
@@ -136,6 +154,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
 
   const uploadedFiles = collectUploadedFiles(form, requestedMediaType);
   if (!uploadedFiles.length) {
+    relayDebug(env, traceId, "multipart.no-files", { fields: collectFormFieldNames(form) });
     return json(
       {
         ok: false,
@@ -154,6 +173,10 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
   const oversized = uploadedFiles.filter(({ file }) => file.size > maxMediaBytes);
   if (oversized.length) {
+    relayDebug(env, traceId, "multipart.file-too-large", {
+      fileCount: oversized.length,
+      maxMediaBytes,
+    });
     return json(
       {
         ok: false,
@@ -179,6 +202,10 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     maxMediaBytes,
   );
   if (multipartTotalBytes > multipartMaxTotalBytes) {
+    relayDebug(env, traceId, "multipart.total-too-large", {
+      multipartTotalBytes,
+      multipartMaxTotalBytes,
+    });
     return json(
       {
         ok: false,
@@ -204,6 +231,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   try {
     db = requireRelayDb(env);
   } catch (error) {
+    relayDebug(env, traceId, "multipart.database-unavailable", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
 
@@ -217,14 +245,27 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       identityInput: buildMultipartIdentityInput(payload),
     });
   } catch (error) {
+    relayDebug(env, traceId, "multipart.delivery-plan-failed", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "delivery-plan" }, 500);
   }
 
+  relayDebug(env, traceId, "multipart.delivery-plan-ready", {
+    fileCount: uploadedFiles.length,
+    totalBytes: multipartTotalBytes,
+    channelsToSend: plan.channelsToSend.length,
+    alreadySent: plan.skippedAlreadySent.length,
+    inProgress: plan.skippedInProgress.length,
+  });
+
   if (!plan.channelsToSend.length) {
+    relayDebug(env, traceId, "multipart.delivery-conflict", {
+      channels: debugChannelSummary(buildDeliveryConflict(plan).channels),
+    });
     return json(buildDeliveryConflict(plan), 409);
   }
 
   try {
+    relayDebug(env, traceId, "multipart.social-metadata.started", {});
     const baseMetadata = normalizeMetadata(payload.metadata);
     const socialContent = await resolveSocialDeliveryContent({
       provider: payload.provider || null,
@@ -234,8 +275,17 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       parseMode,
       metadata: baseMetadata,
     }, env);
+    relayDebug(env, traceId, "multipart.social-metadata.completed", {
+      captionLength: socialContent.caption.length,
+      socialMetadataStrategy: socialContent.social?.strategy || null,
+    });
     const caption = socialContent.caption;
     const deliveries: MultipartDelivery[] = [];
+
+    relayDebug(env, traceId, "multipart.telegram.started", {
+      fileCount: uploadedFiles.length,
+      channelCount: plan.channelsToSend.length,
+    });
 
     // Channel-first lets us stop a destination after its first failure instead
     // of creating even more partial side effects on the same Telegram chat.
@@ -272,6 +322,14 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
           result,
         });
 
+        relayDebug(env, traceId, "multipart.telegram-file.completed", {
+          fileIndex,
+          mediaType: uploaded.mediaType,
+          ok: result.ok,
+          httpStatus: result.httpStatus || null,
+          error: result.ok ? null : result.description || null,
+        });
+
         if (!result.ok) break;
       }
     }
@@ -289,6 +347,13 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       succeeded.map((entry) => entry.requestedChatId),
     );
     retainSuccessfulClaimsUntilPersistence(plan, channelsWithAnySuccess);
+
+    relayDebug(env, traceId, "multipart.telegram.completed", {
+      attempted: deliveries.length,
+      succeeded: succeeded.length,
+      failed: failed.length,
+      completedChannelCount: completedChannels.length,
+    });
 
     const failedChannels = plan.channelsToSend
       .filter((chatId) => !completedChannels.includes(chatId))
@@ -310,6 +375,9 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
 
     let insertedChannelIds: string[] = [];
     try {
+      relayDebug(env, traceId, "multipart.persist.started", {
+        completedChannelCount: completedChannels.length,
+      });
       insertedChannelIds = await persistSuccessfulDeliveries(db, {
         identity: plan.identity,
         sourceUrl: payload.sourceUrl || payload.pageUrl || null,
@@ -332,10 +400,9 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       });
       markChannelsPersisted(plan, insertedChannelIds);
     } catch (error) {
-      console.error("[media-relay] Multipart Telegram delivery persisted incompletely", {
-        media: plan.identity.key,
-        completedChannels,
-        error: getErrorMessage(error),
+      relayDebug(env, traceId, "multipart.persist.failed", {
+        identityKey: plan.identity.key,
+        error: debugError(error),
       });
       return json(
         {
@@ -355,6 +422,10 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
         500,
       );
     }
+
+    relayDebug(env, traceId, "multipart.persist.completed", {
+      insertedChannelCount: insertedChannelIds.length,
+    });
 
     const notSent = [
       ...plan.skippedAlreadySent,
@@ -405,11 +476,15 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     }));
 
     if (failed.length) {
-      console.error("[media-relay] Multipart forwarding partially or fully failed", {
-        files,
-        channels: chatIds,
-        deliveries: formattedDeliveries,
-        payload,
+      relayDebug(env, traceId, "multipart.completed-with-failures", {
+        status: completedChannels.length > 0 ? 207 : 502,
+        failedCount: failed.length,
+        channels: debugChannelSummary({
+          requested: chatIds,
+          attempted: plan.channelsToSend,
+          inserted: insertedChannelIds,
+          notSent,
+        }),
       });
 
       return json(
@@ -447,6 +522,15 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       );
     }
 
+    relayDebug(env, traceId, "multipart.completed", {
+      status: 200,
+      channels: debugChannelSummary({
+        requested: chatIds,
+        attempted: plan.channelsToSend,
+        inserted: insertedChannelIds,
+        notSent,
+      }),
+    });
     return json({
       ok: true,
       message:
@@ -478,11 +562,12 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     });
   } finally {
     await releasePendingDeliveryClaims(plan).catch((error) => {
-      console.error("[media-relay] Failed to release multipart claims", {
-        media: plan.identity.key,
-        error: getErrorMessage(error),
+      relayDebug(env, traceId, "multipart.claim-release.failed", {
+        identityKey: plan.identity.key,
+        error: debugError(error),
       });
     });
+    relayDebug(env, traceId, "multipart.claim-release.completed", { identityKey: plan.identity.key });
   }
 }
 
