@@ -2,6 +2,13 @@ import { resolveMediaIdentity } from "../db";
 import { cloneAuthorizedJsonRequest } from "../http/internal-request";
 import { json } from "../http/response";
 import { getErrorMessage } from "../lib/errors";
+import {
+  debugChannelSummary,
+  debugError,
+  debugUrl,
+  relayDebug,
+  relayTraceId,
+} from "../lib/debug";
 import { normalizePublicHttpUrl } from "../lib/http";
 import {
   resolveSocialMedia,
@@ -35,10 +42,12 @@ export async function handleResolve(
   env: Env,
   send: boolean,
 ): Promise<Response> {
+  const traceId = relayTraceId(request);
   let body: ResolveRequestBody;
   try {
     body = (await request.json()) as ResolveRequestBody;
   } catch {
+    relayDebug(env, traceId, "resolve.invalid-json", { send });
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
@@ -50,6 +59,10 @@ export async function handleResolve(
         : "";
   const normalized = normalizePublicHttpUrl(sourceUrl);
   if (!normalized) {
+    relayDebug(env, traceId, "resolve.invalid-source-url", {
+      send,
+      sourceUrl: debugUrl(sourceUrl),
+    });
     return json({ ok: false, error: "url/sourceUrl must be a public HTTP(S) URL" }, 400);
   }
 
@@ -58,13 +71,35 @@ export async function handleResolve(
   // through public syndication before a third-party media resolver is called.
   const requestMetadata = normalizeMetadata(body.metadata);
   const twitterHandleHint = firstTwitterHandleHint(requestMetadata);
+  relayDebug(env, traceId, "resolve.input-normalized", {
+    send,
+    sourceUrl: debugUrl(normalized.href),
+    hasCaption: typeof body.caption === "string" && body.caption.trim().length > 0,
+    requestedChannelCount: Array.isArray(body.channels) ? body.channels.length : body.channel ? 1 : 0,
+    metadataKeys: Object.keys(requestMetadata || {}).slice(0, 24),
+    hasTwitterHandleHint: Boolean(twitterHandleHint),
+  });
 
   let resolution: SocialResolution;
   try {
     resolution = await resolveSocialMedia(normalized.href, env, {
       twitterHandleHint,
+      traceId,
     });
   } catch (error) {
+    relayDebug(env, traceId, "resolve.social-failed", {
+      send,
+      sourceUrl: debugUrl(normalized.href),
+      error: debugError(error),
+      attempts: error instanceof SocialResolverError
+        ? error.attempts.map((attempt) => ({
+            provider: attempt.provider,
+            ok: attempt.ok,
+            durationMs: attempt.durationMs,
+            error: attempt.error || null,
+          }))
+        : [],
+    });
     return json(
       {
         ok: false,
@@ -76,15 +111,26 @@ export async function handleResolve(
     );
   }
 
+  relayDebug(env, traceId, "resolve.social-succeeded", {
+    send,
+    provider: resolution.source,
+    resolver: resolution.resolver,
+    sourceUrl: debugUrl(resolution.sourceUrl),
+    mediaCount: resolution.media.length,
+    mediaTypes: resolution.media.map((item) => item.type),
+  });
+
   if (!send) return json({ ok: true, ...resolution });
 
   const channelValidation = normalizeTelegramChannels(body.channel, body.channels);
   if (!channelValidation.ok) {
+    relayDebug(env, traceId, "resolve.invalid-channels", { error: channelValidation.error });
     return json({ ok: false, error: channelValidation.error }, 400);
   }
 
   const parseMode = normalizeParseMode(body.parseMode);
   if (body.parseMode && !parseMode) {
+    relayDebug(env, traceId, "resolve.invalid-parse-mode", { parseMode: String(body.parseMode) });
     return json({ ok: false, error: "Invalid parseMode. Allowed values: HTML, MarkdownV2" }, 400);
   }
 
@@ -116,6 +162,10 @@ export async function handleResolve(
     resolution.media.every((item) => item.type === "photo" || item.type === "video");
 
   if (albumCompatible) {
+    relayDebug(env, traceId, "resolve.dispatch-album", {
+      mediaCount: resolution.media.length,
+      channelCount: channelValidation.value.length,
+    });
     const response = await handleSend(
       cloneAuthorizedJsonRequest(request, {
         ...common,
@@ -127,6 +177,7 @@ export async function handleResolve(
       }),
       env,
     );
+    relayDebug(env, traceId, "resolve.album-result", { status: response.status });
     return mergeResolveResponse(response, resolution);
   }
 
@@ -152,6 +203,12 @@ export async function handleResolve(
       parentMediaKey: parentIdentity?.key || "",
       mediaCount: resolution.media.length,
     });
+    relayDebug(env, traceId, "resolve.dispatch-item", {
+      itemIndex: item.index,
+      mediaType: item.type,
+      mediaUrl: debugUrl(item.url),
+      channelCount: channelValidation.value.length,
+    });
     const response = await handleSend(
       cloneAuthorizedJsonRequest(request, {
         ...common,
@@ -164,6 +221,12 @@ export async function handleResolve(
     );
     const result = await response.json();
     deliveries.push({ media: item, status: response.status, result });
+    relayDebug(env, traceId, "resolve.item-result", {
+      itemIndex: item.index,
+      mediaType: item.type,
+      status: response.status,
+      channels: debugChannelSummary((result as Record<string, unknown>)?.channels),
+    });
   }
 
   // /send owns the D1-aware channel contract. When a social URL expands into
@@ -194,6 +257,14 @@ export async function handleResolve(
         : allConflicts
           ? 409
           : 502;
+
+  relayDebug(env, traceId, "resolve.completed", {
+    status,
+    deliveryCount: deliveries.length,
+    succeeded,
+    partial,
+    channels: debugChannelSummary(channels),
+  });
 
   return json(
     {
