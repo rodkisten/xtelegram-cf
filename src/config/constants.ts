@@ -1,7 +1,7 @@
 export const SERVICE_NAME = "generic-telegram-media-relay";
-export const SERVICE_VERSION = "2.10.0";
+export const SERVICE_VERSION = "2.10.3";
 export const SERVICE_RUNTIME =
-  "typescript-hls-remux-photo-album-d1-atomic-claims-batch-send-social-metadata-modular";
+  "typescript-hls-remux-photo-video-album-ordered-fallback-d1-atomic-claims-batch-send-social-metadata-modular";
 
 export const MAX_MEDIA_CHECK_ITEMS = 100;
 export const MAX_MEDIA_CHECK_CHANNELS = 100;

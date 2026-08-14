@@ -323,9 +323,18 @@ function fallbackMetadata(
 }
 
 function normalizeTwitterPostUrl(url: URL): string {
-  const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/i);
-  if (!match) return url.href;
-  return `https://x.com/${match[1]}/status/${match[2]}`;
+  const parts = url.pathname.split("/").filter(Boolean);
+  const statusIndex = parts.findIndex((part) => /^(?:status|statuses)$/i.test(part));
+  const tweetId = statusIndex >= 0 ? String(parts[statusIndex + 1] || "") : "";
+  if (!/^\d{5,}$/.test(tweetId)) return url.href;
+  const handle = cleanUsername(parts[statusIndex - 1] || "");
+  if (handle && !["i", "web", "intent", "share", "search", "home", "explore"].includes(handle.toLowerCase())) {
+    return `https://x.com/${handle}/status/${tweetId}`;
+  }
+  // No public handle is embedded in /i/status/:id. Retain the deterministic
+  // internal form here; resolveTwitterMetadata immediately upgrades it via
+  // syndication when public author metadata is available.
+  return `https://x.com/i/status/${tweetId}`;
 }
 
 function normalizeInstagramPostUrl(url: URL): string {

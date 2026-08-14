@@ -32,6 +32,11 @@ export interface SocialResolution {
   attempts: ResolverAttempt[];
 }
 
+export interface SocialResolveOptions {
+  /** A client-captured X handle used only if public syndication is unavailable. */
+  twitterHandleHint?: string;
+}
+
 const USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
   "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
@@ -51,19 +56,31 @@ export function detectSocialProvider(value: string): SocialProvider | null {
   return null;
 }
 
-export async function resolveSocialMedia(sourceUrl: string, env: Env): Promise<SocialResolution> {
+export async function resolveSocialMedia(
+  sourceUrl: string,
+  env: Env,
+  options: SocialResolveOptions = {},
+): Promise<SocialResolution> {
   const source = detectSocialProvider(sourceUrl);
   if (!source) throw new Error("Unsupported social URL. Supported: Instagram, Twitter/X, TikTok.");
 
+  // The X client can legitimately emit /i/status/:id from an immersive viewer
+  // or a virtualized Bookmarks card. Turn that internal shell URL into a
+  // public author/status URL before calling Twirrl/DTwitter; those providers
+  // commonly reject the internal form even though the Tweet itself is public.
+  const canonicalSourceUrl = source === "twitter"
+    ? await canonicalizeTwitterUrl(sourceUrl, options.twitterHandleHint)
+    : sourceUrl;
+
   const attempts: ResolverAttempt[] = [];
   const providers = source === "instagram"
-    ? [{ id: "zoraahub", run: () => resolveZoraaHub(sourceUrl) }]
+    ? [{ id: "zoraahub", run: () => resolveZoraaHub(canonicalSourceUrl) }]
     : source === "twitter"
       ? [
-          { id: "twirrl", run: () => resolveTwirrl(sourceUrl, env.TWIRRL_VERSION_TOKEN) },
-          { id: "dtwitter", run: () => resolveDTwitter(sourceUrl) },
+          { id: "twirrl", run: () => resolveTwirrl(canonicalSourceUrl, env.TWIRRL_VERSION_TOKEN) },
+          { id: "dtwitter", run: () => resolveDTwitter(canonicalSourceUrl) },
         ]
-      : [{ id: "dtiktok", run: () => resolveDTikTok(sourceUrl) }];
+      : [{ id: "dtiktok", run: () => resolveDTikTok(canonicalSourceUrl) }];
 
   for (const provider of providers) {
     const startedAt = Date.now();
@@ -71,7 +88,7 @@ export async function resolveSocialMedia(sourceUrl: string, env: Env): Promise<S
       const result = await provider.run();
       if (!result.media.length) throw new Error("Resolver returned no usable media");
       attempts.push({ provider: provider.id, ok: true, durationMs: Date.now() - startedAt });
-      return { source, sourceUrl, resolver: provider.id, attempts, ...result };
+      return { source, sourceUrl: canonicalSourceUrl, resolver: provider.id, attempts, ...result };
     } catch (error) {
       attempts.push({ provider: provider.id, ok: false, durationMs: Date.now() - startedAt, error: errorMessage(error) });
     }
@@ -129,31 +146,38 @@ async function resolveTwirrl(sourceUrl: string, token?: string) {
     body: JSON.stringify(body),
   });
 
-  const seen = new Set<string>();
-  const variants: ResolvedSocialMedia[] = [];
-  for (const item of array(data?.d?.i)) {
+  const media: ResolvedSocialMedia[] = [];
+  for (const [mediaIndex, item] of array(data?.d?.i).entries()) {
     if (!item || typeof item !== "object") continue;
+    const seen = new Set<string>();
+    const variants: ResolvedSocialMedia[] = [];
     for (const value of Object.values(item as Record<string, any>)) {
       const url = normalizeProviderUrl(value?.u);
       if (!url || seen.has(url)) continue;
       seen.add(url);
       const resolution = resolutionFromUrl(url);
       variants.push({
-        index: variants.length,
+        index: mediaIndex,
         url,
         type: "video",
-        quality: resolution.label || "best",
-        width: resolution.width,
-        height: resolution.height,
+        quality: firstString(value?.quality, value?.resolution, resolution.label, "best"),
+        width: numberOrNull(value?.width ?? value?.w ?? value?.original_width) || resolution.width,
+        height: numberOrNull(value?.height ?? value?.h ?? value?.original_height) || resolution.height,
         thumbnail: null,
         mediaHeaders: mediaHeadersForUrl(url),
       });
     }
+    variants.sort((left, right) =>
+      compareTwitterVideoVariants(
+        left,
+        right,
+        twitterAspectHint(item),
+      ));
+    if (variants[0]) media.push(variants[0]);
   }
-  variants.sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)));
-  if (!variants.length) throw new Error(data?.error || data?.message || "Twirrl returned no valid video variants");
+  if (!media.length) throw new Error(data?.error || data?.message || "Twirrl returned no valid video variants");
 
-  return { title: "Twitter video", caption: null, media: [variants[0]!] };
+  return { title: "Twitter video", caption: null, media };
 }
 
 async function resolveDTwitter(sourceUrl: string) {
@@ -236,6 +260,42 @@ function mediaItem(index: number, url: string, type: ResolvedSocialMediaType, it
     thumbnail: firstString(item?.thumbnail, item?.thumb, item?.poster, item?.cover),
     mediaHeaders: mediaHeadersForUrl(url),
   };
+}
+
+function twitterAspectHint(value: any): number | null {
+  const width = numberOrNull(
+    value?.width ??
+    value?.w ??
+    value?.original_width ??
+    value?.originalWidth,
+  );
+  const height = numberOrNull(
+    value?.height ??
+    value?.h ??
+    value?.original_height ??
+    value?.originalHeight,
+  );
+  return width && height ? width / height : null;
+}
+
+function compareTwitterVideoVariants(
+  left: ResolvedSocialMedia,
+  right: ResolvedSocialMedia,
+  expectedAspect: number | null,
+): number {
+  if (expectedAspect && expectedAspect > 0) {
+    const leftAspect = left.width && left.height ? left.width / left.height : 0;
+    const rightAspect = right.width && right.height ? right.width / right.height : 0;
+    const leftDistance = leftAspect
+      ? Math.abs(Math.log(leftAspect / expectedAspect))
+      : Number.POSITIVE_INFINITY;
+    const rightDistance = rightAspect
+      ? Math.abs(Math.log(rightAspect / expectedAspect))
+      : Number.POSITIVE_INFINITY;
+    if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+  }
+  return ((right.width || 0) * (right.height || 0)) -
+    ((left.width || 0) * (left.height || 0));
 }
 
 function inferType(isVideo: unknown, rawType: unknown, url: string): ResolvedSocialMediaType {
@@ -327,6 +387,80 @@ function mediaHeadersForUrl(url: string): Record<string, string> {
   }
 
   return { "User-Agent": USER_AGENT };
+}
+
+async function canonicalizeTwitterUrl(sourceUrl: string, handleHint = ""): Promise<string> {
+  let parsed: URL;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch {
+    return sourceUrl;
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  if (!(host === "x.com" || host === "twitter.com" || host.endsWith(".x.com") || host.endsWith(".twitter.com"))) {
+    return sourceUrl;
+  }
+
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  const statusIndex = parts.findIndex((part) => /^(?:status|statuses)$/i.test(part));
+  const tweetId = statusIndex >= 0 ? String(parts[statusIndex + 1] || "") : "";
+  if (!/^\d{5,}$/.test(tweetId)) return sourceUrl;
+
+  const directHandle = cleanTwitterHandle(parts[statusIndex - 1] || "");
+  if (directHandle) return `https://x.com/${directHandle}/status/${tweetId}`;
+
+  // The internal path does not contain an author. Syndication is a compact
+  // public Tweet lookup and avoids sending a malformed /i/status URL to an
+  // external media resolver.
+  const resolvedHandle = await twitterHandleFromSyndication(tweetId);
+  const hintedHandle = cleanTwitterHandle(handleHint);
+  return resolvedHandle
+    ? `https://x.com/${resolvedHandle}/status/${tweetId}`
+    : hintedHandle
+      ? `https://x.com/${hintedHandle}/status/${tweetId}`
+    : `https://x.com/i/status/${tweetId}`;
+}
+
+function cleanTwitterHandle(value: unknown): string {
+  const handle = String(value || "").trim().replace(/^@+/, "");
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) return "";
+  return ["i", "web", "intent", "share", "search", "home", "explore"].includes(handle.toLowerCase())
+    ? ""
+    : handle;
+}
+
+async function twitterHandleFromSyndication(tweetId: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("Twitter canonicalization timeout"), 4_500);
+  try {
+    const token = Math.random().toString(36).slice(2, 14);
+    const response = await fetch(
+      `https://cdn.syndication.twimg.com/tweet-result?id=${encodeURIComponent(tweetId)}&lang=en&token=${encodeURIComponent(token)}`,
+      {
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          Referer: "https://x.com/",
+          "User-Agent": USER_AGENT,
+        },
+        redirect: "follow",
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok) return "";
+    const data = await response.json() as Record<string, any>;
+    return cleanTwitterHandle(
+      firstString(
+        data?.user?.screen_name,
+        data?.user?.username,
+        data?.screen_name,
+      ),
+    );
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function canonicalizeTikTokUrl(sourceUrl: string): Promise<string> {

@@ -6,6 +6,7 @@ import {
   resolveConcurrency,
   resolveHlsMaxMediaBytes,
   resolveMaxMediaBytes,
+  shouldPreferWorkerUploadForTelegram,
 } from "../../media";
 import {
   buildDeliveryConflict,
@@ -128,6 +129,18 @@ function isMixedPhotoVideoBatch(batch: RelayAlbumInput["items"]): boolean {
 function allowsOrderedMixedFallback(input: RelayAlbumInput): boolean {
   const value = String(input.metadata?.allowOrderedSingleFallback || "").trim().toLowerCase();
   return value !== "false" && value !== "0" && value !== "off";
+}
+
+function batchPrefersWorkerUpload(
+  input: RelayAlbumInput,
+  batch: RelayAlbumInput["items"],
+): boolean {
+  return batch.some((item) =>
+    shouldPreferWorkerUploadForTelegram(
+      albumItemToRelayInput(input, item),
+      item.mediaUrl.href,
+    ),
+  );
 }
 
 function itemCaption(
@@ -392,6 +405,59 @@ async function sendAlbumBatch(
   chatId: string,
   batchIndex: number,
 ): Promise<TelegramAlbumBatchAttempt> {
+  let preferredUploadAttempted = false;
+  let preferredUploadError: string | null = null;
+
+  // X videos are a special case: Telegram's remote fetch has no way to carry
+  // the X Referer and may rematerialize an incompatible rendition. Preserve
+  // the native album by sending the same ordered bytes as attach:// first.
+  if (batchPrefersWorkerUpload(input, batch)) {
+    try {
+      const uploads = await prepareAlbumUploads(input, batch, env);
+      const uploaded = await sendTelegramMediaGroupUpload({
+        botToken: env.TELEGRAM_BOT_TOKEN,
+        chatId,
+        items: uploads,
+        caption: batchIndex === 0 ? input.caption : "",
+        parseMode: batchIndex === 0 ? input.parseMode : null,
+      });
+      preferredUploadAttempted = true;
+
+      if (uploaded.ok) {
+        return {
+          result: uploaded,
+          transport: "multipart-upload",
+          fallbackAttempted: false,
+          orderedFallbackAttempted: false,
+          fallbackError: null,
+          hadExternalSideEffect: true,
+          attemptCount: 1,
+        };
+      }
+
+      // Do not retry an ambiguous upload result with URL delivery; it could
+      // create a duplicate album. Definitive Bot API rejections are safe to
+      // continue through the existing URL → upload fallback tree.
+      if (!shouldRetryAlbumAsUpload(uploaded)) {
+        return {
+          result: uploaded,
+          transport: "multipart-upload",
+          fallbackAttempted: false,
+          orderedFallbackAttempted: false,
+          fallbackError: uploaded.description || "Telegram rejected the preferred X upload",
+          hadExternalSideEffect: false,
+          attemptCount: 1,
+        };
+      }
+      preferredUploadError = uploaded.description || "Telegram rejected the preferred X upload";
+    } catch (error) {
+      // Preparation has no Telegram side effect. Keep URL-first as the safe
+      // escape hatch for a file too large for Worker memory/upload limits.
+      preferredUploadError = getErrorMessage(error);
+    }
+  }
+
+  const priorAttemptCount = preferredUploadAttempted ? 1 : 0;
   let direct: TelegramApiResult<TelegramMessage[]>;
   try {
     direct = await sendTelegramMediaGroupUrl({
@@ -413,11 +479,11 @@ async function sendAlbumBatch(
         description: `Unexpected exception while sending media group: ${getErrorMessage(error)}`,
       },
       transport: "url",
-      fallbackAttempted: false,
+      fallbackAttempted: Boolean(preferredUploadError),
       orderedFallbackAttempted: false,
-      fallbackError: null,
+      fallbackError: preferredUploadError,
       hadExternalSideEffect: false,
-      attemptCount: 1,
+      attemptCount: 1 + priorAttemptCount,
     };
   }
 
@@ -425,11 +491,11 @@ async function sendAlbumBatch(
     return {
       result: direct,
       transport: "url",
-      fallbackAttempted: false,
+      fallbackAttempted: Boolean(preferredUploadError),
       orderedFallbackAttempted: false,
-      fallbackError: null,
+      fallbackError: preferredUploadError,
       hadExternalSideEffect: direct.ok,
-      attemptCount: 1,
+      attemptCount: 1 + priorAttemptCount,
     };
   }
 
@@ -452,7 +518,7 @@ async function sendAlbumBatch(
         orderedFallbackAttempted: false,
         fallbackError: null,
         hadExternalSideEffect: true,
-        attemptCount: 2,
+        attemptCount: 2 + priorAttemptCount,
       };
     }
 
@@ -479,7 +545,7 @@ async function sendAlbumBatch(
           ? null
           : ordered.result.description || "Ordered mixed-media upload fallback failed",
         hadExternalSideEffect: ordered.hadExternalSideEffect,
-        attemptCount: 2 + ordered.attemptCount,
+        attemptCount: 2 + priorAttemptCount + ordered.attemptCount,
       };
     }
 
@@ -497,7 +563,7 @@ async function sendAlbumBatch(
       orderedFallbackAttempted: false,
       fallbackError: uploaded.description || "Telegram rejected multipart upload",
       hadExternalSideEffect: false,
-      attemptCount: 2,
+      attemptCount: 2 + priorAttemptCount,
     };
   } catch (error) {
     const fallbackError = getErrorMessage(error);
@@ -519,7 +585,7 @@ async function sendAlbumBatch(
           ? null
           : finalAttempt.result.description || "Ordered mixed-media fallback failed",
         hadExternalSideEffect: finalAttempt.hadExternalSideEffect,
-        attemptCount: 1 + ordered.attemptCount + (urlFallback ? urlFallback.attemptCount : 0),
+        attemptCount: 1 + priorAttemptCount + ordered.attemptCount + (urlFallback ? urlFallback.attemptCount : 0),
       };
     }
     return {
@@ -535,7 +601,7 @@ async function sendAlbumBatch(
       orderedFallbackAttempted: false,
       fallbackError,
       hadExternalSideEffect: false,
-      attemptCount: 1,
+      attemptCount: 1 + priorAttemptCount,
     };
   }
 }
