@@ -5,3 +5,6 @@ TELEGRAM_CHAT_ID=-1001234567890
 
 # Optional: server-side Instagram/X metadata fetch timeout (1000-12000 ms).
 SOCIAL_METADATA_TIMEOUT_MS=5000
+
+# Optional: privacy-safe, structured step-by-step Worker logs. Keep unset in production.
+RELAY_DEBUG=false
