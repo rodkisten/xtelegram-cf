@@ -10,6 +10,7 @@ import {
 } from "../../config/constants";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import { debugError, relayDebug, relayTraceId } from "../../lib/debug";
 import { normalizeMediaIdentityInput } from "../../validation/media-identity";
 import { normalizeTelegramChannels } from "../../validation/common";
 import type { Env } from "../../types";
@@ -27,18 +28,22 @@ interface NormalizedMediaCheckInput {
 }
 
 export async function handleMediaCheck(request: Request, env: Env): Promise<Response> {
+  const traceId = relayTraceId(request);
   const startedAt = Date.now();
   let body: MediaCheckBody;
   try {
     body = (await request.json()) as MediaCheckBody;
   } catch {
+    relayDebug(env, traceId, "media-check.invalid-json", {});
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
   if (!Array.isArray(body.items) || body.items.length === 0) {
+    relayDebug(env, traceId, "media-check.empty", {});
     return json({ ok: false, error: "items must be a non-empty array" }, 400);
   }
   if (body.items.length > MAX_MEDIA_CHECK_ITEMS) {
+    relayDebug(env, traceId, "media-check.too-large", { itemCount: body.items.length });
     return json(
       { ok: false, error: `items can contain at most ${MAX_MEDIA_CHECK_ITEMS} entries` },
       400,
@@ -46,10 +51,14 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
   }
 
   const channelValidation = normalizeTelegramChannels(body.channel, body.channels, { maxChannels: MAX_MEDIA_CHECK_CHANNELS });
-  if (!channelValidation.ok) return json({ ok: false, error: channelValidation.error }, 400);
+  if (!channelValidation.ok) {
+    relayDebug(env, traceId, "media-check.invalid-channels", { error: channelValidation.error });
+    return json({ ok: false, error: channelValidation.error }, 400);
+  }
 
   const requestedChannels = [...new Set(channelValidation.value)];
   if (requestedChannels.length > MAX_MEDIA_CHECK_CHANNELS) {
+    relayDebug(env, traceId, "media-check.too-many-channels", { channelCount: requestedChannels.length });
     return json(
       {
         ok: false,
@@ -63,6 +72,7 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
   try {
     db = requireRelayDb(env);
   } catch (error) {
+    relayDebug(env, traceId, "media-check.database-unavailable", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
 
@@ -85,6 +95,13 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
   );
   valid.sort((left, right) => left.index - right.index);
 
+  relayDebug(env, traceId, "media-check.items-normalized", {
+    requested: body.items.length,
+    valid: valid.length,
+    invalid: invalid.size,
+    channelCount: requestedChannels.length,
+  });
+
   const validByIndex = new Map(valid.map((item) => [item.index, item]));
   const uniqueIdentities = [
     ...new Map(valid.map((item) => [item.identity.key, item.identity])).values(),
@@ -94,6 +111,7 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
   try {
     records = await checkStoredMediaDeliveries(db, uniqueIdentities, requestedChannels);
   } catch (error) {
+    relayDebug(env, traceId, "media-check.database-query-failed", { error: debugError(error) });
     return json(
       { ok: false, error: getErrorMessage(error), stage: "database-query" },
       500,
@@ -141,6 +159,16 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
   const uniqueFound = uniqueIdentities.filter((identity) => records.has(identity.key)).length;
   const validCount = valid.length;
   const foundInputs = results.filter((item) => item.valid && item.exists).length;
+
+  relayDebug(env, traceId, "media-check.completed", {
+    requested: body.items.length,
+    valid: validCount,
+    invalid: body.items.length - validCount,
+    unique: uniqueIdentities.length,
+    found: uniqueFound,
+    foundInputs,
+    durationMs: Date.now() - startedAt,
+  });
 
   return json({
     ok: true,
