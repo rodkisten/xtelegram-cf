@@ -2,6 +2,11 @@ import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import {
+  debugChannelSummary,
+  debugError,
+  relayDebug,
+} from "../../lib/debug";
+import {
   prepareMedia,
   resolveConcurrency,
   resolveHlsMaxMediaBytes,
@@ -609,13 +614,22 @@ async function sendAlbumBatch(
 export async function handleJsonAlbumSend(
   input: RelayAlbumInput,
   env: Env,
+  traceId = "album",
 ): Promise<Response> {
+  relayDebug(env, traceId, "album.started", {
+    provider: input.provider || null,
+    itemCount: input.items.length,
+    mediaTypes: input.items.map((item) => item.mediaType),
+    requestedChannelCount: input.channels.length,
+    force: input.force,
+  });
   const chatIds = resolveTelegramChatIds(
     input.channels,
     resolveDefaultTelegramChatId(env),
   );
 
   if (!chatIds.length) {
+    relayDebug(env, traceId, "album.no-channels", {});
     return json(
       {
         ok: false,
@@ -630,6 +644,7 @@ export async function handleJsonAlbumSend(
   try {
     db = requireRelayDb(env);
   } catch (error) {
+    relayDebug(env, traceId, "album.database-unavailable", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "database" }, 500);
   }
 
@@ -650,14 +665,26 @@ export async function handleJsonAlbumSend(
       },
     });
   } catch (error) {
+    relayDebug(env, traceId, "album.delivery-plan-failed", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "delivery-plan" }, 500);
   }
 
+  relayDebug(env, traceId, "album.delivery-plan-ready", {
+    identityKey: plan.identity.key,
+    channelsToSend: plan.channelsToSend.length,
+    alreadySent: plan.skippedAlreadySent.length,
+    inProgress: plan.skippedInProgress.length,
+  });
+
   if (!plan.channelsToSend.length) {
+    relayDebug(env, traceId, "album.delivery-conflict", {
+      channels: debugChannelSummary(buildDeliveryConflict(plan, "Album").channels),
+    });
     return json(buildDeliveryConflict(plan, "Album"), 409);
   }
 
   try {
+    relayDebug(env, traceId, "album.social-metadata.started", {});
     const socialContent = await resolveSocialDeliveryContent({
       provider: input.provider,
       sourceUrl: input.sourceUrl,
@@ -666,6 +693,10 @@ export async function handleJsonAlbumSend(
       parseMode: input.parseMode,
       metadata: input.metadata,
     }, env);
+    relayDebug(env, traceId, "album.social-metadata.completed", {
+      captionLength: socialContent.caption.length,
+      socialMetadataStrategy: socialContent.social?.strategy || null,
+    });
 
     // The fallback transports must use the same enriched caption and metadata
     // as the URL-first album path, so social delivery behavior stays intact.
@@ -685,6 +716,12 @@ export async function handleJsonAlbumSend(
     const batches = chunkTelegramAlbum(deliveryInput.items);
     const deliveries: TelegramAlbumBatchDelivery[] = [];
 
+    relayDebug(env, traceId, "album.telegram.started", {
+      channelCount: plan.channelsToSend.length,
+      batchCount: batches.length,
+      mixedPhotoVideo: isMixedPhotoVideoBatch(deliveryInput.items),
+    });
+
     for (const chatId of plan.channelsToSend) {
       let itemOffset = 0;
 
@@ -697,6 +734,17 @@ export async function handleJsonAlbumSend(
           chatId,
           batchIndex,
         );
+
+        relayDebug(env, traceId, "album.telegram-batch.completed", {
+          batchIndex,
+          itemCount: batch.length,
+          transport: attempt.transport,
+          ok: attempt.result.ok,
+          httpStatus: attempt.result.httpStatus || null,
+          fallbackAttempted: attempt.fallbackAttempted,
+          orderedFallbackAttempted: attempt.orderedFallbackAttempted,
+          error: attempt.result.ok ? null : attempt.result.description || null,
+        });
 
         deliveries.push({
           requestedChatId: chatId,
@@ -754,6 +802,12 @@ export async function handleJsonAlbumSend(
     );
     retainSuccessfulClaimsUntilPersistence(plan, channelsWithExternalSideEffects);
 
+    relayDebug(env, traceId, "album.telegram.completed", {
+      attemptedBatches: deliveries.length,
+      completedChannelCount: completedChannels.length,
+      externalSideEffectChannelCount: channelsWithExternalSideEffects.size,
+    });
+
     const failedChannels = plan.channelsToSend
       .filter((chatId) => !completedChannels.includes(chatId))
       .map((channelId) => {
@@ -779,6 +833,9 @@ export async function handleJsonAlbumSend(
 
     let insertedChannelIds: string[] = [];
     try {
+      relayDebug(env, traceId, "album.persist.started", {
+        completedChannelCount: completedChannels.length,
+      });
       insertedChannelIds = await persistSuccessfulDeliveries(db, {
         identity: plan.identity,
         sourceUrl: input.sourceUrl,
@@ -803,10 +860,10 @@ export async function handleJsonAlbumSend(
       });
       markChannelsPersisted(plan, insertedChannelIds);
     } catch (error) {
-      console.error("[media-relay] Album reached Telegram but D1 persistence failed", {
-        media: plan.identity.key,
-        completedChannels,
-        error: getErrorMessage(error),
+      relayDebug(env, traceId, "album.persist.failed", {
+        identityKey: plan.identity.key,
+        completedChannelCount: completedChannels.length,
+        error: debugError(error),
       });
       return json(
         {
@@ -826,6 +883,10 @@ export async function handleJsonAlbumSend(
         500,
       );
     }
+
+    relayDebug(env, traceId, "album.persist.completed", {
+      insertedChannelCount: insertedChannelIds.length,
+    });
 
     const notSent = [
       ...plan.skippedAlreadySent,
@@ -891,15 +952,21 @@ export async function handleJsonAlbumSend(
       },
     };
 
-    if (!completedChannels.length) return json(payload, 502);
-    return json(payload, notSent.length ? 207 : 200);
+    const status = !completedChannels.length ? 502 : notSent.length ? 207 : 200;
+    relayDebug(env, traceId, "album.completed", {
+      status,
+      usedOrderedSingleFallback,
+      channels: debugChannelSummary(payload.channels),
+    });
+    return json(payload, status);
   } finally {
     await releasePendingDeliveryClaims(plan).catch((error) => {
-      console.error("[media-relay] Failed to release album claims", {
-        media: plan.identity.key,
-        error: getErrorMessage(error),
+      relayDebug(env, traceId, "album.claim-release.failed", {
+        identityKey: plan.identity.key,
+        error: debugError(error),
       });
     });
+    relayDebug(env, traceId, "album.claim-release.completed", { identityKey: plan.identity.key });
   }
 }
 

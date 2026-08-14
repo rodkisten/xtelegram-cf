@@ -12,6 +12,8 @@ export interface Env {
   TWIRRL_VERSION_TOKEN?: string;
   DELIVERY_CLAIM_TTL_SECONDS?: string;
   SOCIAL_METADATA_TIMEOUT_MS?: string;
+  /** Enables privacy-safe structured pipeline logs. Disabled unless true. */
+  RELAY_DEBUG?: string;
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";

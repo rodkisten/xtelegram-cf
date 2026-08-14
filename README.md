@@ -1,6 +1,13 @@
-# xtelegram-cf · Telegram Media Relay v2.10.3
+# xtelegram-cf · Telegram Media Relay v2.10.4
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
+
+## Correção da v2.10.4 · rastreio seguro de ponta a ponta
+
+- Cada requisição recebe `X-Relay-Trace-Id`, preservado em `/batch`, `/resolve-and-send` e nos envios internos. O AIO mostra esse identificador no Console quando o Debug do script está ligado, permitindo localizar a requisição exata no Worker.
+- Com `RELAY_DEBUG=true`, o Worker emite logs estruturados para entrada, validação, resolução social, canonicalização do X, preflight D1, claims, preparação de mídia, Telegram, persistência e liberação de claim.
+- Os logs não imprimem bearer tokens, cookies, headers secretos nem query strings de URLs CDN assinadas. URLs são reduzidas a origem + pathname.
+- Nenhuma migration D1 nova é necessária.
 
 ## Correção da v2.10.3 · contrato de canais e URL canônica do X
 
@@ -205,6 +212,16 @@ cp .dev.vars.example .dev.vars
 ```
 
 E preencha os valores reais.
+
+### Debug temporário do Worker
+
+Para investigar um envio sem deixar logs detalhados ligados permanentemente, adicione uma variável de ambiente no Cloudflare Worker:
+
+```text
+RELAY_DEBUG=true
+```
+
+Depois de reproduzir o problema, consulte os logs pelo `X-Relay-Trace-Id` retornado pela resposta. Desative/remova a variável ao terminar a investigação.
 
 ## 4. Typecheck e deploy
 

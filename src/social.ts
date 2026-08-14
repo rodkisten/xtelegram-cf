@@ -1,4 +1,5 @@
 import type { Env, MediaType } from "./types";
+import { debugError, debugUrl, relayDebug } from "./lib/debug";
 
 export type SocialProvider = "instagram" | "twitter" | "tiktok";
 export type ResolvedSocialMediaType = "video" | "photo" | "audio";
@@ -35,6 +36,8 @@ export interface SocialResolution {
 export interface SocialResolveOptions {
   /** A client-captured X handle used only if public syndication is unavailable. */
   twitterHandleHint?: string;
+  /** Correlates resolver steps with the original Worker request. */
+  traceId?: string;
 }
 
 const USER_AGENT =
@@ -63,6 +66,12 @@ export async function resolveSocialMedia(
 ): Promise<SocialResolution> {
   const source = detectSocialProvider(sourceUrl);
   if (!source) throw new Error("Unsupported social URL. Supported: Instagram, Twitter/X, TikTok.");
+  const traceId = String(options.traceId || "social");
+  relayDebug(env, traceId, "social.detected", {
+    provider: source,
+    sourceUrl: debugUrl(sourceUrl),
+    hasTwitterHandleHint: Boolean(options.twitterHandleHint),
+  });
 
   // The X client can legitimately emit /i/status/:id from an immersive viewer
   // or a virtualized Bookmarks card. Turn that internal shell URL into a
@@ -71,6 +80,12 @@ export async function resolveSocialMedia(
   const canonicalSourceUrl = source === "twitter"
     ? await canonicalizeTwitterUrl(sourceUrl, options.twitterHandleHint)
     : sourceUrl;
+  relayDebug(env, traceId, "social.canonicalized", {
+    provider: source,
+    sourceUrl: debugUrl(sourceUrl),
+    canonicalSourceUrl: debugUrl(canonicalSourceUrl),
+    changed: canonicalSourceUrl !== sourceUrl,
+  });
 
   const attempts: ResolverAttempt[] = [];
   const providers = source === "instagram"
@@ -84,16 +99,45 @@ export async function resolveSocialMedia(
 
   for (const provider of providers) {
     const startedAt = Date.now();
+    relayDebug(env, traceId, "social.resolver.started", {
+      provider: provider.id,
+      source,
+      sourceUrl: debugUrl(canonicalSourceUrl),
+    });
     try {
       const result = await provider.run();
       if (!result.media.length) throw new Error("Resolver returned no usable media");
-      attempts.push({ provider: provider.id, ok: true, durationMs: Date.now() - startedAt });
+      const durationMs = Date.now() - startedAt;
+      attempts.push({ provider: provider.id, ok: true, durationMs });
+      relayDebug(env, traceId, "social.resolver.succeeded", {
+        provider: provider.id,
+        durationMs,
+        mediaCount: result.media.length,
+        mediaTypes: result.media.map((item) => item.type),
+      });
       return { source, sourceUrl: canonicalSourceUrl, resolver: provider.id, attempts, ...result };
     } catch (error) {
-      attempts.push({ provider: provider.id, ok: false, durationMs: Date.now() - startedAt, error: errorMessage(error) });
+      const durationMs = Date.now() - startedAt;
+      const message = errorMessage(error);
+      attempts.push({ provider: provider.id, ok: false, durationMs, error: message });
+      relayDebug(env, traceId, "social.resolver.failed", {
+        provider: provider.id,
+        durationMs,
+        error: debugError(error),
+      });
     }
   }
 
+  relayDebug(env, traceId, "social.all-resolvers-failed", {
+    provider: source,
+    attemptCount: attempts.length,
+    attempts: attempts.map((attempt) => ({
+      provider: attempt.provider,
+      ok: attempt.ok,
+      durationMs: attempt.durationMs,
+      error: attempt.error || null,
+    })),
+  });
   throw new SocialResolverError(`All ${source} resolvers failed`, attempts);
 }
 
