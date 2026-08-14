@@ -1,4 +1,5 @@
 import type { Env, ParseMode } from "../types";
+import { debugUrl } from "../lib/debug";
 
 export type SocialPlatform = "twitter" | "instagram";
 
@@ -68,7 +69,7 @@ export async function resolveSocialDeliveryContent(
   } catch (error) {
     console.warn("[media-relay] Social metadata enrichment failed", {
       platform: target.platform,
-      sourceUrl: target.url,
+      sourceUrl: debugUrl(target.url),
       error: error instanceof Error ? error.message : String(error),
     });
     social = fallbackMetadata(target.platform, target.url, "fetch-error");
@@ -195,7 +196,7 @@ async function resolveTwitterMetadata(sourceUrl: string, env: Env): Promise<Soci
       }
     } catch (error) {
       console.debug("[media-relay] Twitter syndication metadata failed", {
-        sourceUrl: normalized,
+        sourceUrl: debugUrl(normalized),
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -222,7 +223,7 @@ async function resolveTwitterMetadata(sourceUrl: string, env: Env): Promise<Soci
     }
   } catch (error) {
     console.debug("[media-relay] Twitter page metadata failed", {
-      sourceUrl: normalized,
+      sourceUrl: debugUrl(normalized),
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -266,7 +267,7 @@ async function resolveInstagramMetadata(sourceUrl: string, env: Env): Promise<So
     }
   } catch (error) {
     console.debug("[media-relay] Instagram page metadata failed", {
-      sourceUrl: normalized,
+      sourceUrl: debugUrl(normalized),
       error: error instanceof Error ? error.message : String(error),
     });
   }
