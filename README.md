@@ -1,40 +1,16 @@
-# xtelegram-cf · Telegram Media Relay v2.10
+# xtelegram-cf · Telegram Media Relay v2.9.2
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
+## O que a v2.9.2 corrige
 
-## O que a v2.10 adiciona
+- **Carrosséis mistos não abortam mais no primeiro erro de grupo:** o Worker tenta, nesta ordem, `sendMediaGroup` por URL, o mesmo grupo como `attach://` multipart e, somente após uma rejeição definitiva (`400`, `413` ou `415`) de ambos, `sendPhoto`/`sendVideo` na mesma ordem.
+- O último passo é limitado a lotes com foto+vídeo. Ele mantém o álbum nativo quando o Telegram aceita o grupo; só degrada para mensagens ordenadas quando o próprio Telegram rejeita a combinação. Falhas de rede/5xx continuam sem retry para evitar duplicações ambíguas.
+- Cada item de `mediaItems` aceita `mediaHeaders` (ou `headers`) próprios; `mediaHeaders` no nível do payload é o fallback para todos os itens. Isso preserva `Referer` e `User-Agent` exigidos por CDNs sociais.
+- O fallback tem orçamento em `MULTIPART_MAX_TOTAL_BYTES`, prepara os itens sequencialmente para limitar memória do Worker e não repete falhas ambíguas de rede/5xx que poderiam duplicar mensagens.
+- A resposta de cada lote inclui `transport`, `fallbackAttempted`, `orderedFallbackAttempted`, `attemptCount` e `fallbackError` para diagnóstico. Em uma falha parcial do último passo, o claim D1 permanece até o TTL para impedir que um retry imediato duplique os itens já enviados.
 
-- **Enriquecimento social no próprio Worker** para URLs canônicas de Instagram e X/Twitter. O client não precisa mais abrir a publicação nem montar o caption.
-- Antes de chamar a Bot API, o relay tenta obter `@autor` e caption/texto diretamente da publicação. Para X, usa o endpoint público de syndication como estratégia primária e o HTML/meta tags como fallback; para Instagram, usa o HTML público, Open Graph e JSON embutido.
-- Caption Telegram social fica no formato **origem + @ + caption + link Origem**. O conteúdo é escapado e enviado em `parse_mode=HTML`.
-- Se nenhuma metadata confiável for recuperada, o caption vira **somente a URL original da publicação**, sem reaproveitar título/texto potencialmente incorreto enviado pelo client.
-- O enrichment é compartilhado por `/send`, álbuns, multipart, `/batch` e `/resolve-and-send`.
-- Resultados de metadata são deduplicados em memória por URL, possuem cache curto de 10 minutos e chamadas concorrentes para a mesma publicação compartilham a mesma Promise.
-- `SOCIAL_METADATA_TIMEOUT_MS` controla o timeout de rede (default 5 s, mínimo 1 s, máximo 12 s).
-- A metadata persistida no D1 ganha `socialPlatform`, `socialOrigin`, `socialSourceUrl`, `socialAuthor`, `socialCaption`, `socialMetadataStrategy` e `socialMetadataEnriched`.
-
-Exemplo de caption enriquecido:
-
-```text
-Instagram
-
-@usuario
-
-Texto original da publicação
-
-Origem
-```
-
-Se o Instagram/X bloquear a leitura ou a publicação não expuser metadata pública:
-
-```text
-https://www.instagram.com/reel/ABC123/
-```
-
----
-
-## O que a v2.9 adiciona
+## Base da v2.9
 
 - **Claims atômicos por mídia + canal** antes do side effect externo no Telegram. Requests concorrentes deixam de passar juntos pela janela `check → send → persist`; o segundo recebe `delivery_in_progress` enquanto o primeiro possui o claim.
 - `delivery_claims` usa TTL configurável por `DELIVERY_CLAIM_TTL_SECONDS` (30 min por padrão) para cobrir resolução/HLS lentos. Claims de canais com falha conhecida são liberados; se o Telegram respondeu sucesso mas a persistência D1 falhar, o claim do canal bem-sucedido é mantido até expirar para evitar um reenvio externo imediato com estado de persistência incerto.
@@ -412,7 +388,11 @@ O HLS é preparado apenas depois da verificação de duplicidade. Se o mesmo pos
     },
     {
       "mediaUrl": "https://example.com/3.mp4",
-      "mediaType": "video"
+      "mediaType": "video",
+      "mediaHeaders": {
+        "Referer": "https://www.instagram.com/",
+        "User-Agent": "Mozilla/5.0"
+      }
     }
   ],
   "provider": "instagram",
@@ -446,6 +426,10 @@ E somente fotos:
 ```
 
 O Worker divide automaticamente álbuns grandes em lotes compatíveis com Telegram. Um canal só entra em `inserted` quando todos os lotes daquele canal foram aceitos.
+
+`mediaHeaders` pode ser enviado em cada item (preferencial) ou no nível raiz do payload como fallback. O Worker só usa esses headers quando precisa baixar o item para o fallback multipart; o caminho normal continua URL-first.
+
+Para foto+vídeo, `metadata.allowOrderedSingleFallback` pode ser definido como `false` para desabilitar a recuperação final. O padrão é `true`: ela só roda depois de rejeições definitivas dos dois transportes de álbum e preserva a ordem original.
 
 ---
 
@@ -1030,7 +1014,7 @@ Opcional.
 
 ### `MULTIPART_MAX_TOTAL_BYTES`
 
-Opcional.
+Opcional. Limita o total combinado de bytes em um encaminhamento multipart e no fallback `attach://` de cada lote de álbum. O default é conservador para evitar pressão de memória no Worker.
 
 ---
 
@@ -1070,7 +1054,7 @@ src/routes/send/single.ts
   Envio de mídia única/HLS.
 
 src/routes/send/album.ts
-  Carrossel/sendMediaGroup e chunking 2-10.
+  Carrossel/sendMediaGroup, chunking 2-10 e fallback URL → attach:// → foto/vídeo ordenados para lotes mistos rejeitados.
 
 src/routes/send/multipart.ts
 src/routes/send/multipart-utils.ts
@@ -1107,7 +1091,6 @@ src/hls/*
 - `/resolve` e `/resolve-and-send` agora passam pela mesma autorização central das demais rotas protegidas; não há mais auth comentada dentro de handlers.
 - `force=true` continua reenviando histórico, mas agora também adquire claim atômico e não atravessa uma entrega concorrente.
 - `DELIVERY_CLAIM_TTL_SECONDS` voltou a ser efetivamente aplicado aos claims.
-- `SOCIAL_METADATA_TIMEOUT_MS` controla o timeout do fetch server-side de metadata social (default `5000`).
 - `TELEGRAM_CHANNEL_ID` é aceito como alias legado de `TELEGRAM_CHAT_ID`, corrigindo projetos que usavam o nome antigo no Wrangler.
 - Resoluções sociais heterogêneas com múltiplos itens ganham identidade estável por item, evitando colisão de todos os filhos no mesmo `media_key`.
 - `/resolve-and-send` não aborta mais toda a resolução no primeiro item que falha: retorna `207` quando há sucesso parcial.
@@ -1117,6 +1100,7 @@ src/hls/*
 - Se um álbum/multipart ficar parcialmente enviado a um canal, o claim desse canal permanece até TTL em vez de ser liberado imediatamente e permitir um retry duplicar os chunks que já chegaram.
 - Multipart sem `mediaKey`, `mediaId` ou URL estável não usa mais `nome+tamanho+MIME` como identidade, pois isso causava falsos conflitos; nesses casos a identidade é request-scoped.
 - Secrets foram removidos de `wrangler.jsonc`; use Wrangler secrets ou `.dev.vars` local.
+- Carrosséis com foto+vídeo em CDN protegido preservam ordem e headers por item; quando ambos os formatos de `sendMediaGroup` são definitivamente rejeitados, o Worker faz a recuperação ordenada por foto/vídeo em vez de falhar o post inteiro.
 
 ---
 
