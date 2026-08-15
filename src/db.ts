@@ -34,6 +34,10 @@ export interface PersistMediaInput {
   mediaType: MediaType | AlbumMediaType | "album";
   mediaCount: number;
   metadata: Record<string, string> | null;
+  caption?: string | null;
+  parseMode?: string | null;
+  resolvedMediaUrl?: string | null;
+  mediaStatus?: "pending" | "ready" | "sent";
   deliveries: Array<{
     requestedChatId: string;
     telegramChatId: string | number | null;
@@ -63,6 +67,10 @@ export interface StoredMediaRow {
   media_type: string;
   media_count: number;
   metadata_json: string | null;
+  caption: string | null;
+  caption_parse_mode: string | null;
+  resolved_media_url: string | null;
+  media_status: string;
   first_seen_at: string;
   updated_at: string;
 }
@@ -176,7 +184,8 @@ export async function checkStoredMediaDeliveries(
     `SELECT
       m.media_key, m.provider, m.provider_media_id, m.canonical_url,
       m.source_url, m.page_url, m.media_type, m.media_count,
-      m.metadata_json, m.first_seen_at, m.updated_at,
+      m.metadata_json, m.caption, m.caption_parse_mode, m.resolved_media_url, m.media_status,
+      m.first_seen_at, m.updated_at,
       d.channel_id, d.telegram_chat_id, d.telegram_chat_title,
       d.first_message_ids_json, d.last_message_ids_json,
       d.send_count, d.first_sent_at, d.last_sent_at
@@ -359,6 +368,76 @@ export async function releaseDeliveryClaims(
   await db.prepare("DELETE FROM delivery_claims WHERE media_key = ?1 AND request_id = ?2").bind(key, requestId).run();
 }
 
+export interface PersistKnownMediaInput {
+  identity: MediaIdentity;
+  sourceUrl?: string | null;
+  pageUrl?: string | null;
+  mediaType?: MediaType | AlbumMediaType | "album" | "pending";
+  mediaCount?: number;
+  metadata?: Record<string, string> | null;
+  caption?: string | null;
+  parseMode?: string | null;
+  resolvedMediaUrl?: string | null;
+  mediaStatus?: "pending" | "ready" | "sent";
+}
+
+/**
+ * Persist knowledge about a media item without claiming it was delivered.
+ * This is the caption-first half of the relay reconciliation model.
+ */
+export async function persistKnownMedia(
+  db: D1Database,
+  input: PersistKnownMediaInput,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const metadataJson = input.metadata ? JSON.stringify(input.metadata) : null;
+  const caption = String(input.caption || "").trim() || null;
+  const status = input.mediaStatus || (input.resolvedMediaUrl ? "ready" : "pending");
+
+  await db.prepare(
+    `INSERT INTO media (
+      media_key, provider, provider_media_id, canonical_url, source_url, page_url,
+      media_type, media_count, metadata_json, caption, caption_parse_mode,
+      resolved_media_url, media_status, first_seen_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(media_key) DO UPDATE SET
+      canonical_url = excluded.canonical_url,
+      source_url = COALESCE(excluded.source_url, media.source_url),
+      page_url = COALESCE(excluded.page_url, media.page_url),
+      media_type = CASE WHEN excluded.media_type = 'pending' THEN media.media_type ELSE excluded.media_type END,
+      media_count = MAX(media.media_count, excluded.media_count),
+      metadata_json = COALESCE(excluded.metadata_json, media.metadata_json),
+      caption = COALESCE(NULLIF(excluded.caption, ''), media.caption),
+      caption_parse_mode = CASE
+        WHEN NULLIF(excluded.caption, '') IS NOT NULL THEN excluded.caption_parse_mode
+        ELSE media.caption_parse_mode
+      END,
+      resolved_media_url = COALESCE(excluded.resolved_media_url, media.resolved_media_url),
+      media_status = CASE
+        WHEN media.media_status = 'sent' THEN 'sent'
+        WHEN excluded.media_status = 'ready' THEN 'ready'
+        ELSE media.media_status
+      END,
+      updated_at = excluded.updated_at`,
+  ).bind(
+    input.identity.key,
+    input.identity.provider,
+    input.identity.providerMediaId,
+    input.identity.canonicalUrl,
+    input.sourceUrl || null,
+    input.pageUrl || null,
+    input.mediaType || "pending",
+    Math.max(1, input.mediaCount || 1),
+    metadataJson,
+    caption,
+    caption ? input.parseMode || null : null,
+    input.resolvedMediaUrl || null,
+    status,
+    now,
+    now,
+  ).run();
+}
+
 export async function persistSuccessfulDeliveries(
   db: D1Database,
   input: PersistMediaInput,
@@ -370,8 +449,9 @@ export async function persistSuccessfulDeliveries(
     db.prepare(
       `INSERT INTO media (
         media_key, provider, provider_media_id, canonical_url, source_url, page_url,
-        media_type, media_count, metadata_json, first_seen_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        media_type, media_count, metadata_json, caption, caption_parse_mode,
+        resolved_media_url, media_status, first_seen_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(media_key) DO UPDATE SET
         canonical_url = excluded.canonical_url,
         source_url = COALESCE(excluded.source_url, media.source_url),
@@ -379,6 +459,17 @@ export async function persistSuccessfulDeliveries(
         media_type = excluded.media_type,
         media_count = excluded.media_count,
         metadata_json = COALESCE(excluded.metadata_json, media.metadata_json),
+        caption = COALESCE(NULLIF(excluded.caption, ''), media.caption),
+        caption_parse_mode = CASE
+          WHEN NULLIF(excluded.caption, '') IS NOT NULL THEN excluded.caption_parse_mode
+          ELSE media.caption_parse_mode
+        END,
+        resolved_media_url = COALESCE(excluded.resolved_media_url, media.resolved_media_url),
+        media_status = CASE
+          WHEN excluded.media_status = 'sent' THEN 'sent'
+          WHEN media.media_status = 'sent' THEN 'sent'
+          ELSE excluded.media_status
+        END,
         updated_at = excluded.updated_at`,
     ).bind(
       input.identity.key,
@@ -390,6 +481,10 @@ export async function persistSuccessfulDeliveries(
       input.mediaType,
       input.mediaCount,
       metadataJson,
+      input.caption || null,
+      input.parseMode || null,
+      input.resolvedMediaUrl || null,
+      input.mediaStatus || "sent",
       now,
       now,
     ),
@@ -491,6 +586,10 @@ function formatMediaRow(row: StoredMediaRow) {
     mediaType: row.media_type,
     mediaCount: row.media_count,
     metadata: parseJson(row.metadata_json),
+    caption: row.caption ?? null,
+    parseMode: row.caption_parse_mode ?? null,
+    resolvedMediaUrl: row.resolved_media_url ?? null,
+    status: row.media_status || "sent",
     firstSeenAt: row.first_seen_at,
     updatedAt: row.updated_at,
   };
