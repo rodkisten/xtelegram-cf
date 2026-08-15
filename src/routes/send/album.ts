@@ -21,8 +21,7 @@ import {
   retainSuccessfulClaimsUntilPersistence,
 } from "../../services/delivery-plan";
 import {
-  resolveDefaultTelegramChatId,
-  resolveTelegramChatIds,
+  resolveTelegramChatIdsForEnv,
 } from "../../services/channels";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import { toBlobArrayBuffer } from "../../services/telegram-delivery";
@@ -96,6 +95,7 @@ function albumItemToRelayInput(
     mediaType: item.mediaType,
     mediaHeaders: item.mediaHeaders,
     channels: [],
+    usernames: input.usernames,
     metadata: item.metadata ?? input.metadata,
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
@@ -621,12 +621,10 @@ export async function handleJsonAlbumSend(
     itemCount: input.items.length,
     mediaTypes: input.items.map((item) => item.mediaType),
     requestedChannelCount: input.channels.length,
+    routingUsernames: input.usernames,
     force: input.force,
   });
-  const chatIds = resolveTelegramChatIds(
-    input.channels,
-    resolveDefaultTelegramChatId(env),
-  );
+  const chatIds = resolveTelegramChatIdsForEnv(env, input.channels, input.usernames);
 
   if (!chatIds.length) {
     relayDebug(env, traceId, "album.no-channels", {});
@@ -634,7 +632,7 @@ export async function handleJsonAlbumSend(
       {
         ok: false,
         error:
-          "No Telegram channel was provided. Send channel/channels in the request or configure TELEGRAM_CHAT_ID as the default.",
+          "No Telegram channel was provided. Send channel/channels or username/usernames in the request, configure TELEGRAM_USERNAME_CHANNEL_MAP_JSON, or configure TELEGRAM_CHAT_ID as the default.",
       },
       400,
     );

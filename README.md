@@ -149,18 +149,13 @@ Equivalente a:
 npx wrangler d1 create xtelegram-relay
 ```
 
-O Wrangler retornará um `database_id` e um bloco de binding. Copie-o para `wrangler.jsonc` usando **exatamente** `RELAY_DB` como binding:
+O Wrangler retornará um `database_id` e um bloco de binding. Copie-o para `wrangler.toml` usando **exatamente** `RELAY_DB` como binding:
 
-```jsonc
-{
-  "d1_databases": [
-    {
-      "binding": "RELAY_DB",
-      "database_name": "xtelegram-relay",
-      "database_id": "SEU-UUID-AQUI"
-    }
-  ]
-}
+```toml
+[[d1_databases]]
+binding = "RELAY_DB"
+database_name = "xtelegram-relay"
+database_id = "SEU-UUID-AQUI"
 ```
 
 ## 2. Aplicar a migration
@@ -192,7 +187,7 @@ migrations/0002_delivery_claims.sql
 
 ## 3. Configurar secrets
 
-Nunca coloque token de bot ou `RELAY_TOKEN` em `wrangler.jsonc`.
+Nunca coloque token de bot ou `RELAY_TOKEN` em `wrangler.toml`.
 
 ```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN
@@ -1052,7 +1047,7 @@ Variáveis:
 
 ### `MAX_MEDIA_BYTES`
 
-Default no `wrangler.jsonc`:
+Default no `wrangler.toml`:
 
 ```text
 32000000
@@ -1158,7 +1153,7 @@ src/hls/*
 - Álbuns e multipart param de enviar novos chunks/arquivos para um canal após a primeira falha, reduzindo side effects parciais.
 - Se um álbum/multipart ficar parcialmente enviado a um canal, o claim desse canal permanece até TTL em vez de ser liberado imediatamente e permitir um retry duplicar os chunks que já chegaram.
 - Multipart sem `mediaKey`, `mediaId` ou URL estável não usa mais `nome+tamanho+MIME` como identidade, pois isso causava falsos conflitos; nesses casos a identidade é request-scoped.
-- Secrets foram removidos de `wrangler.jsonc`; use Wrangler secrets ou `.dev.vars` local.
+- Secrets foram removidos de `wrangler.toml`; use Wrangler secrets ou `.dev.vars` local.
 
 ---
 
@@ -1191,7 +1186,7 @@ npm run deploy
 
 # Observação sobre segurança
 
-Se um token real de Telegram ou relay já tiver sido commitado/publicado anteriormente, rotacione-o. A configuração desta versão deixa secrets fora de `wrangler.jsonc` e fornece apenas `.dev.vars.example` para desenvolvimento local.
+Se um token real de Telegram ou relay já tiver sido commitado/publicado anteriormente, rotacione-o. A configuração desta versão deixa secrets fora de `wrangler.toml` e fornece apenas `.dev.vars.example` para desenvolvimento local.
 
 ## Caption-first reconciliation (v2.11)
 
@@ -1224,3 +1219,34 @@ Media state is no longer coupled to Telegram delivery. A post can be registered 
 If the media has never been sent, the caption is stored and the media stays `pending`. If delivery history already contains Telegram `chat_id` + `message_id`, the relay persists the caption and calls `editMessageCaption` for the stored delivery. Album captions target the first message ID of the latest persisted album delivery.
 
 Explicit captions always win over server-side social metadata scraping. Scraping is now a fallback used only when the caller did not already provide a caption.
+
+
+## Username → channel routing (v2.12)
+
+Every send path accepts optional `username` or `usernames`. The relay can translate those handles to Telegram chats using `TELEGRAM_USERNAME_CHANNEL_MAP_JSON` from `wrangler.toml`. Matching is case-insensitive. A comma-separated configuration key is expanded to each handle.
+
+```toml
+[vars]
+TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
+{
+  "@USERNAME": ["-1001111111111", "-1002222222222"],
+  "@username1,@username2": ["-1001111111111"]
+}
+'''
+```
+
+Example request:
+
+```json
+{
+  "mediaUrl": "https://cdn.example.com/video.mp4",
+  "sourceUrl": "https://x.com/username/status/123",
+  "username": "@username",
+  "caption": "caption already captured",
+  "channels": ["-1003333333333"]
+}
+```
+
+Routing is additive and deduplicated: explicit `channel/channels` + chats resolved from `username/usernames` are unioned before delivery claims. If the same chat appears more than once, Telegram is called only once for that media/chat pair. When no explicit or mapped chat exists, the normal `TELEGRAM_CHAT_ID` fallback is used. The username field remains optional.
+
+`POST /media/check` also accepts username routing. If no routing fields are supplied there, it preserves the existing status-check behavior and may inspect all stored deliveries for that media identity.

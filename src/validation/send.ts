@@ -9,6 +9,7 @@ import {
   normalizeOptionalText,
   normalizeParseMode,
   normalizeTelegramChannels,
+  normalizeRoutingUsernames,
   resolvePayloadCaption,
 } from "./common";
 
@@ -51,6 +52,8 @@ export function validateRequestBody(body: unknown): SendValidationResult {
 
   const channelValidation = normalizeTelegramChannels(record.channel, record.channels);
   if (!channelValidation.ok) return { ok: false, error: channelValidation.error };
+  const usernameValidation = normalizeRoutingUsernames(record.username, record.usernames);
+  if (!usernameValidation.ok) return { ok: false, error: usernameValidation.error };
 
   return {
     ok: true,
@@ -66,6 +69,7 @@ export function validateRequestBody(body: unknown): SendValidationResult {
       mediaType,
       mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
       channels: channelValidation.value,
+      usernames: usernameValidation.value,
       metadata: normalizeMetadata(record.metadata),
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),
@@ -174,6 +178,8 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
 
   const channelValidation = normalizeTelegramChannels(record.channel, record.channels);
   if (!channelValidation.ok) return { kind: "invalid", error: channelValidation.error };
+  const usernameValidation = normalizeRoutingUsernames(record.username, record.usernames);
+  if (!usernameValidation.ok) return { kind: "invalid", error: usernameValidation.error };
 
   const pageUrl = normalizeOptionalSourceUrl(record.pageUrl);
   const explicitCaption = normalizeCaption(record.caption);
@@ -190,6 +196,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       caption: resolvePayloadCaption(record),
       parseMode: explicitCaption ? parseMode : null,
       channels: channelValidation.value,
+      usernames: usernameValidation.value,
       metadata: normalizeMetadata(record.metadata),
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),

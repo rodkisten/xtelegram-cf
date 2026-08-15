@@ -23,8 +23,7 @@ import {
   retainSuccessfulClaimsUntilPersistence,
 } from "../../services/delivery-plan";
 import {
-  resolveDefaultTelegramChatId,
-  resolveTelegramChatIds,
+  resolveTelegramChatIdsForEnv,
 } from "../../services/channels";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import {
@@ -47,13 +46,11 @@ export async function handleSingleSend(
     mediaUrl: debugUrl(input.mediaUrl.href),
     sourceUrl: debugUrl(input.sourceUrl),
     requestedChannelCount: input.channels.length,
+    routingUsernames: input.usernames,
     force: input.force,
     hasMediaHeaders: Object.keys(input.mediaHeaders || {}).length > 0,
   });
-  const chatIds = resolveTelegramChatIds(
-    input.channels,
-    resolveDefaultTelegramChatId(env),
-  );
+  const chatIds = resolveTelegramChatIdsForEnv(env, input.channels, input.usernames);
 
   if (!chatIds.length) {
     relayDebug(env, traceId, "single.no-channels", {});
@@ -61,7 +58,7 @@ export async function handleSingleSend(
       {
         ok: false,
         error:
-          "No Telegram channel was provided. Send channel/channels in the request or configure TELEGRAM_CHAT_ID as the default.",
+          "No Telegram channel was provided. Send channel/channels or username/usernames in the request, configure TELEGRAM_USERNAME_CHANNEL_MAP_JSON, or configure TELEGRAM_CHAT_ID as the default.",
       },
       400,
     );

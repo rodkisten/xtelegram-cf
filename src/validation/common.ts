@@ -57,6 +57,47 @@ export function normalizeTelegramChannels(
   return { ok: true, value: channels };
 }
 
+
+export type UsernameValidationResult =
+  | { ok: true; value: string[] }
+  | { ok: false; error: string };
+
+export function normalizeRoutingUsernames(
+  usernameValue: unknown,
+  usernamesValue: unknown,
+): UsernameValidationResult {
+  const values: unknown[] = [];
+  if (usernameValue !== undefined && usernameValue !== null) values.push(usernameValue);
+  if (usernamesValue !== undefined && usernamesValue !== null) {
+    if (Array.isArray(usernamesValue)) values.push(...usernamesValue);
+    else values.push(usernamesValue);
+  }
+
+  const usernames: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== "string") {
+      return { ok: false, error: "username/usernames must contain strings." };
+    }
+    for (const raw of value.split(",")) {
+      const handle = raw.trim().replace(/^@+/, "").toLowerCase();
+      if (!handle) continue;
+      if (handle.length > 100 || /[\s\u0000-\u001F,]/.test(handle)) {
+        return { ok: false, error: "Invalid username value." };
+      }
+      const normalized = `@${handle}`;
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        usernames.push(normalized);
+      }
+    }
+  }
+  if (usernames.length > 32) {
+    return { ok: false, error: "A maximum of 32 usernames can be routed per request." };
+  }
+  return { ok: true, value: usernames };
+}
+
 export function normalizeNullableText(value: unknown, maximumLength: number): string | null {
   const normalized = normalizeOptionalText(value, maximumLength);
   return normalized || null;

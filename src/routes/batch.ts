@@ -15,12 +15,11 @@ import { mapWithConcurrency } from "../lib/concurrency";
 import { getErrorMessage } from "../lib/errors";
 import { debugError, relayDebug, relayTraceId } from "../lib/debug";
 import {
-  resolveDefaultTelegramChatId,
-  resolveTelegramChatIds,
+  resolveTelegramChatIdsForEnv,
 } from "../services/channels";
 import { detectSocialProvider } from "../social";
 import type { Env } from "../types";
-import { normalizeTelegramChannels } from "../validation/common";
+import { normalizeRoutingUsernames, normalizeTelegramChannels } from "../validation/common";
 import { normalizeMediaIdentityInput } from "../validation/media-identity";
 import { handleResolve } from "./resolve";
 import { handleSend } from "./send";
@@ -30,6 +29,8 @@ interface BatchBody {
   items?: unknown;
   channel?: unknown;
   channels?: unknown;
+  username?: unknown;
+  usernames?: unknown;
   force?: unknown;
   caption?: unknown;
   parseMode?: unknown;
@@ -91,9 +92,16 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     return json({ ok: false, error: channelValidation.error }, 400);
   }
 
-  const sharedChannels = resolveTelegramChatIds(
+  const sharedUsernameValidation = normalizeRoutingUsernames(body.username, body.usernames);
+  if (!sharedUsernameValidation.ok) {
+    relayDebug(env, traceId, "batch.invalid-usernames", { error: sharedUsernameValidation.error });
+    return json({ ok: false, error: sharedUsernameValidation.error }, 400);
+  }
+
+  const sharedChannels = resolveTelegramChatIdsForEnv(
+    env,
     channelValidation.value,
-    resolveDefaultTelegramChatId(env),
+    sharedUsernameValidation.value,
   );
   if (!sharedChannels.length) {
     relayDebug(env, traceId, "batch.no-channels", { itemCount: rawItems.length });
@@ -137,10 +145,13 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         return;
       }
 
+      const hasItemRouting =
+        item.channel !== undefined || item.channels !== undefined ||
+        item.username !== undefined || item.usernames !== undefined;
       const itemChannelsValidation =
         item.channel !== undefined || item.channels !== undefined
           ? normalizeTelegramChannels(item.channel, item.channels)
-          : ({ ok: true, value: sharedChannels } as const);
+          : ({ ok: true, value: [] as string[] } as const);
       if (!itemChannelsValidation.ok) {
         invalidResults.set(index, {
           index,
@@ -151,12 +162,23 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         return;
       }
 
-      const channels = resolveTelegramChatIds(
-        itemChannelsValidation.value.length
-          ? itemChannelsValidation.value
-          : sharedChannels,
-        resolveDefaultTelegramChatId(env),
+      const itemUsernameValidation = normalizeRoutingUsernames(
+        hasItemRouting ? item.username : body.username,
+        hasItemRouting ? item.usernames : body.usernames,
       );
+      if (!itemUsernameValidation.ok) {
+        invalidResults.set(index, {
+          index,
+          ok: false,
+          status: 400,
+          error: itemUsernameValidation.error,
+        });
+        return;
+      }
+
+      const channels = hasItemRouting
+        ? resolveTelegramChatIdsForEnv(env, itemChannelsValidation.value, itemUsernameValidation.value)
+        : sharedChannels;
       if (!channels.length) {
         invalidResults.set(index, {
           index,
@@ -175,6 +197,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         caption: item.caption ?? body.caption,
         parseMode: item.parseMode ?? body.parseMode,
         metadata: item.metadata ?? body.metadata,
+        usernames: item.usernames ?? item.username ?? body.usernames ?? body.username,
       };
       delete payload.channel;
 
