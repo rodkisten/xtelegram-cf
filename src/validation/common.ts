@@ -1,6 +1,7 @@
 import { MAX_TELEGRAM_CHANNELS_PER_REQUEST } from "../config/constants";
 import { normalizeOptionalSourceUrl } from "../lib/http";
 import type { MediaType, ParseMode } from "../types";
+import { normalizeTelegramDestination } from "../services/channels";
 
 const ALLOWED_PARSE_MODES = new Set<ParseMode>(["HTML", "MarkdownV2"]);
 const ALLOWED_MEDIA_TYPES = new Set<MediaType>(["video", "audio", "document", "photo"]);
@@ -35,9 +36,16 @@ export function normalizeTelegramChannels(
       };
     }
 
-    const normalized = String(value).trim();
-    if (!normalized || normalized.length > 128 || /[\u0000-\u001F]/.test(normalized)) {
+    const raw = String(value).trim();
+    if (!raw || raw.length > 128 || /[\u0000-\u001F]/.test(raw)) {
       return { ok: false, error: "Invalid Telegram channel value." };
+    }
+    const normalized = normalizeTelegramDestination(raw);
+    if (!normalized) {
+      return {
+        ok: false,
+        error: "Invalid Telegram destination. Use <chat_id>, <chat_id>:<message_thread_id>, or @channel.",
+      };
     }
 
     if (!seen.has(normalized)) {
