@@ -21,6 +21,7 @@ import {
   retainSuccessfulClaimsUntilPersistence,
 } from "../../services/delivery-plan";
 import {
+  parseTelegramDestination,
   resolveTelegramChatIdsForEnv,
 } from "../../services/channels";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
@@ -236,6 +237,7 @@ async function sendPreparedAlbumItemsIndividually(
   uploads: PreparedAlbumUpload[],
   env: Env,
   chatId: string,
+  messageThreadId: number | null,
   batchIndex: number,
 ): Promise<OrderedSinglesAttempt> {
   const sent: TelegramMessage[] = [];
@@ -246,6 +248,7 @@ async function sendPreparedAlbumItemsIndividually(
     const result = await sendTelegramUpload({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       file: upload.file,
       filename: upload.filename,
       contentType: upload.contentType,
@@ -286,6 +289,7 @@ async function sendAlbumItemsIndividually(
   batch: RelayAlbumInput["items"],
   env: Env,
   chatId: string,
+  messageThreadId: number | null,
   batchIndex: number,
 ): Promise<OrderedSinglesAttempt> {
   const sent: TelegramMessage[] = [];
@@ -321,6 +325,7 @@ async function sendAlbumItemsIndividually(
     const result = await sendTelegramUpload({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       file: new Blob([toBlobArrayBuffer(prepared.bytes)], { type: prepared.contentType }),
       filename: albumUploadFilename(prepared, item, index),
       contentType: prepared.contentType,
@@ -362,6 +367,7 @@ async function sendAlbumUrlsIndividually(
   batch: RelayAlbumInput["items"],
   env: Env,
   chatId: string,
+  messageThreadId: number | null,
   batchIndex: number,
 ): Promise<OrderedSinglesAttempt> {
   const sent: TelegramMessage[] = [];
@@ -371,6 +377,7 @@ async function sendAlbumUrlsIndividually(
     const result = await sendTelegramUrl({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       mediaUrl: item.mediaUrl.href,
       mediaType: item.mediaType,
       caption: itemCaption(input, item, index, batchIndex),
@@ -407,9 +414,22 @@ async function sendAlbumBatch(
   input: RelayAlbumInput,
   batch: RelayAlbumInput["items"],
   env: Env,
-  chatId: string,
+  destinationKey: string,
   batchIndex: number,
 ): Promise<TelegramAlbumBatchAttempt> {
+  const destination = parseTelegramDestination(destinationKey);
+  if (!destination) {
+    return {
+      result: { ok: false, description: `Invalid Telegram destination: ${destinationKey}` },
+      transport: "url",
+      fallbackAttempted: false,
+      orderedFallbackAttempted: false,
+      fallbackError: null,
+      hadExternalSideEffect: false,
+      attemptCount: 0,
+    };
+  }
+  const { chatId, messageThreadId } = destination;
   let preferredUploadAttempted = false;
   let preferredUploadError: string | null = null;
 
@@ -422,6 +442,7 @@ async function sendAlbumBatch(
       const uploaded = await sendTelegramMediaGroupUpload({
         botToken: env.TELEGRAM_BOT_TOKEN,
         chatId,
+        messageThreadId,
         items: uploads,
         caption: batchIndex === 0 ? input.caption : "",
         parseMode: batchIndex === 0 ? input.parseMode : null,
@@ -468,6 +489,7 @@ async function sendAlbumBatch(
     direct = await sendTelegramMediaGroupUrl({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       items: batch.map((item) => ({
         mediaUrl: item.mediaUrl.href,
         mediaType: item.mediaType,
@@ -511,6 +533,7 @@ async function sendAlbumBatch(
     const uploaded = await sendTelegramMediaGroupUpload({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       items: uploads,
       caption: batchIndex === 0 ? input.caption : "",
       parseMode: batchIndex === 0 ? input.parseMode : null,
@@ -536,6 +559,7 @@ async function sendAlbumBatch(
         uploads,
         env,
         chatId,
+        messageThreadId,
         batchIndex,
       );
       return {
@@ -573,9 +597,9 @@ async function sendAlbumBatch(
   } catch (error) {
     const fallbackError = getErrorMessage(error);
     if (mixedFallback) {
-      const ordered = await sendAlbumItemsIndividually(input, batch, env, chatId, batchIndex);
+      const ordered = await sendAlbumItemsIndividually(input, batch, env, chatId, messageThreadId, batchIndex);
       const urlFallback = !ordered.result.ok && ordered.safeToTryUrls
-        ? await sendAlbumUrlsIndividually(input, batch, env, chatId, batchIndex)
+        ? await sendAlbumUrlsIndividually(input, batch, env, chatId, messageThreadId, batchIndex)
         : null;
       const finalAttempt = urlFallback || ordered;
       return {
