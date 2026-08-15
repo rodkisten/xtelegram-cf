@@ -1,4 +1,4 @@
-import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
+import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import {
@@ -698,18 +698,6 @@ export async function handleJsonAlbumSend(
       socialMetadataStrategy: socialContent.social?.strategy || null,
     });
 
-    await persistKnownMedia(db, {
-      identity: plan.identity,
-      sourceUrl: input.sourceUrl,
-      pageUrl: input.pageUrl,
-      mediaType: "album",
-      mediaCount: input.items.length,
-      metadata: socialContent.metadata,
-      caption: socialContent.caption || null,
-      parseMode: socialContent.parseMode,
-      mediaStatus: "ready",
-    });
-
     // The fallback transports must use the same enriched caption and metadata
     // as the URL-first album path, so social delivery behavior stays intact.
     const deliveryInput: RelayAlbumInput = {
@@ -855,9 +843,6 @@ export async function handleJsonAlbumSend(
         mediaType: "album",
         mediaCount: input.items.length,
         metadata: socialContent.metadata,
-        caption: socialContent.caption,
-        parseMode: socialContent.parseMode,
-        mediaStatus: "sent",
         deliveries: completedChannels.map((chatId) => {
           const channelDeliveries = deliveries.filter(
             (delivery) => delivery.requestedChatId === chatId,

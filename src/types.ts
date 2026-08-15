@@ -77,7 +77,6 @@ export interface TelegramApiResult<T = unknown> {
 
 export interface TelegramMessage {
   message_id?: number;
-  caption?: string;
   chat?: {
     id?: number | string;
     title?: string;

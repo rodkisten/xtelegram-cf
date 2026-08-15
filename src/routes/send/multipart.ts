@@ -385,9 +385,6 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
         mediaType: uploadedFiles.length > 1 ? "album" : uploadedFiles[0]!.mediaType,
         mediaCount: uploadedFiles.length,
         metadata: socialContent.metadata,
-        caption: socialContent.caption,
-        parseMode: socialContent.parseMode,
-        mediaStatus: "sent",
         deliveries: completedChannels.map((chatId) => {
           const messages = deliveries
             .filter((entry) => entry.requestedChatId === chatId && entry.result.ok)
