@@ -17,15 +17,19 @@ import {
   normalizeCaption,
   normalizeMetadata,
   normalizeParseMode,
+  normalizeRoutingUsernames,
   normalizeTelegramChannels,
 } from "../../validation/common";
 import { syncCaptionToTelegramDeliveries } from "../../services/media-caption-sync";
+import { resolveTelegramChatIdsForEnv } from "../../services/channels";
 import type { Env } from "../../types";
 
 interface MediaCheckBody {
   items?: unknown;
   channel?: unknown;
   channels?: unknown;
+  username?: unknown;
+  usernames?: unknown;
 }
 
 interface NormalizedMediaCheckInput {
@@ -37,6 +41,7 @@ interface NormalizedMediaCheckInput {
   metadata: Record<string, string> | null;
   sourceUrl: string | null;
   pageUrl: string | null;
+  requestedChannels: string[];
 }
 
 export async function handleMediaCheck(request: Request, env: Env): Promise<Response> {
@@ -67,18 +72,14 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
     relayDebug(env, traceId, "media-check.invalid-channels", { error: channelValidation.error });
     return json({ ok: false, error: channelValidation.error }, 400);
   }
-
-  const requestedChannels = [...new Set(channelValidation.value)];
-  if (requestedChannels.length > MAX_MEDIA_CHECK_CHANNELS) {
-    relayDebug(env, traceId, "media-check.too-many-channels", { channelCount: requestedChannels.length });
-    return json(
-      {
-        ok: false,
-        error: `channels can contain at most ${MAX_MEDIA_CHECK_CHANNELS} entries`,
-      },
-      400,
-    );
+  const usernameValidation = normalizeRoutingUsernames(body.username, body.usernames);
+  if (!usernameValidation.ok) {
+    relayDebug(env, traceId, "media-check.invalid-usernames", { error: usernameValidation.error });
+    return json({ ok: false, error: usernameValidation.error }, 400);
   }
+  const hasTopLevelRouting =
+    body.channel !== undefined || body.channels !== undefined ||
+    body.username !== undefined || body.usernames !== undefined;
 
   let db: D1Database;
   try {
@@ -102,6 +103,35 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
         const record = input && typeof input === "object" && !Array.isArray(input)
           ? input as Record<string, unknown>
           : {};
+        const hasPerItemRouting =
+          record.channel !== undefined || record.channels !== undefined ||
+          record.username !== undefined || record.usernames !== undefined;
+        const itemChannelValidation =
+          record.channel !== undefined || record.channels !== undefined
+            ? normalizeTelegramChannels(record.channel, record.channels, { maxChannels: MAX_MEDIA_CHECK_CHANNELS })
+            : hasPerItemRouting
+              ? ({ ok: true, value: [] as string[] } as const)
+              : channelValidation;
+        if (!itemChannelValidation.ok) {
+          invalid.set(index, itemChannelValidation.error);
+          return;
+        }
+        const itemUsernameValidation = hasPerItemRouting
+          ? normalizeRoutingUsernames(record.username, record.usernames)
+          : usernameValidation;
+        if (!itemUsernameValidation.ok) {
+          invalid.set(index, itemUsernameValidation.error);
+          return;
+        }
+        const hasItemRouting = hasTopLevelRouting || hasPerItemRouting;
+        const itemRequestedChannels = hasItemRouting
+          ? resolveTelegramChatIdsForEnv(env, itemChannelValidation.value, itemUsernameValidation.value)
+          : [];
+        if (itemRequestedChannels.length > MAX_MEDIA_CHECK_CHANNELS) {
+          invalid.set(index, `channels can contain at most ${MAX_MEDIA_CHECK_CHANNELS} entries`);
+          return;
+        }
+
         const caption = normalizeCaption(record.caption);
         const parseMode = caption ? normalizeParseMode(record.parseMode ?? record.parse_mode) : null;
         if (caption && (record.parseMode || record.parse_mode) && !parseMode) {
@@ -120,6 +150,7 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
           metadata: normalizeMetadata(record.metadata),
           sourceUrl,
           pageUrl,
+          requestedChannels: itemRequestedChannels,
         });
       } catch (error) {
         invalid.set(index, getErrorMessage(error));
@@ -148,6 +179,8 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
     relayDebug(env, traceId, "media-check.caption-persist-failed", { error: debugError(error) });
     return json({ ok: false, error: getErrorMessage(error), stage: "caption-persist" }, 500);
   }
+
+  const requestedChannels = [...new Set(valid.flatMap((item) => item.requestedChannels))];
 
   relayDebug(env, traceId, "media-check.items-normalized", {
     requested: body.items.length,
@@ -226,8 +259,8 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
         ? { persisted: true, status: record?.media.status ?? "pending" }
         : null,
       telegramCaptionSync: captionSyncByIndex.get(index) ?? [],
-      ...(requestedChannels.length
-        ? { requestedChannels: buildRequestedChannelStatus(requestedChannels, deliveries) }
+      ...(normalized.requestedChannels.length
+        ? { requestedChannels: buildRequestedChannelStatus(normalized.requestedChannels, deliveries) }
         : {}),
     };
   });
