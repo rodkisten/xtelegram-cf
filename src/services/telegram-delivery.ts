@@ -7,6 +7,7 @@ import type {
   TelegramMessage,
 } from "../types";
 import { getErrorMessage } from "../lib/errors";
+import { parseTelegramDestination } from "./channels";
 
 export interface TelegramDelivery {
   requestedChatId: string;
@@ -25,14 +26,23 @@ export async function sendPreparedMediaToChats(options: {
 
   // Sequential by design: a large upload Blob must not be multiplied in memory
   // for several concurrent Bot API requests inside the same Worker isolate.
-  for (const chatId of options.chatIds) {
+  for (const destinationKey of options.chatIds) {
+    const destination = parseTelegramDestination(destinationKey);
     let result: TelegramApiResult<TelegramMessage>;
+    if (!destination) {
+      deliveries.push({
+        requestedChatId: destinationKey,
+        result: { ok: false, description: `Invalid Telegram destination: ${destinationKey}` },
+      });
+      continue;
+    }
     try {
       result =
         options.prepared.type === "file"
           ? await sendTelegramUrl({
               botToken: options.botToken,
-              chatId,
+              chatId: destination.chatId,
+              messageThreadId: destination.messageThreadId,
               mediaUrl: options.prepared.url,
               mediaType: options.mediaType,
               caption: options.caption,
@@ -40,7 +50,8 @@ export async function sendPreparedMediaToChats(options: {
             })
           : await sendTelegramUpload({
               botToken: options.botToken,
-              chatId,
+              chatId: destination.chatId,
+              messageThreadId: destination.messageThreadId,
               file: new Blob([toBlobArrayBuffer(options.prepared.bytes)], {
                 type: options.prepared.contentType,
               }),
@@ -57,7 +68,7 @@ export async function sendPreparedMediaToChats(options: {
       };
     }
 
-    deliveries.push({ requestedChatId: chatId, result });
+    deliveries.push({ requestedChatId: destination.key, result });
   }
 
   return deliveries;
