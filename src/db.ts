@@ -1,4 +1,5 @@
 import type { AlbumMediaType, Env, MediaType } from "./types";
+import { parseTelegramDestination } from "./services/channels";
 
 export interface MediaIdentityInput {
   provider?: string | null;
@@ -49,6 +50,7 @@ export interface PersistMediaInput {
 export interface StoredDeliveryRow {
   channel_id: string;
   telegram_chat_id: string | null;
+  message_thread_id: number | null;
   telegram_chat_title: string | null;
   first_message_ids_json: string;
   last_message_ids_json: string;
@@ -186,7 +188,7 @@ export async function checkStoredMediaDeliveries(
       m.source_url, m.page_url, m.media_type, m.media_count,
       m.metadata_json, m.caption, m.caption_parse_mode, m.resolved_media_url, m.media_status,
       m.first_seen_at, m.updated_at,
-      d.channel_id, d.telegram_chat_id, d.telegram_chat_title,
+      d.channel_id, d.telegram_chat_id, d.message_thread_id, d.telegram_chat_title,
       d.first_message_ids_json, d.last_message_ids_json,
       d.send_count, d.first_sent_at, d.last_sent_at
      FROM media AS m
@@ -209,6 +211,7 @@ export async function checkStoredMediaDeliveries(
       record.deliveries.push(formatDeliveryRow({
         channel_id: row.channel_id,
         telegram_chat_id: row.telegram_chat_id ?? null,
+        message_thread_id: row.message_thread_id ?? null,
         telegram_chat_title: row.telegram_chat_title ?? null,
         first_message_ids_json: row.first_message_ids_json ?? "[]",
         last_message_ids_json: row.last_message_ids_json ?? "[]",
@@ -495,11 +498,12 @@ export async function persistSuccessfulDeliveries(
     statements.push(
       db.prepare(
         `INSERT INTO media_deliveries (
-          media_key, channel_id, telegram_chat_id, telegram_chat_title,
+          media_key, channel_id, telegram_chat_id, message_thread_id, telegram_chat_title,
           first_message_ids_json, last_message_ids_json, send_count, first_sent_at, last_sent_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         ON CONFLICT(media_key, channel_id) DO UPDATE SET
           telegram_chat_id = excluded.telegram_chat_id,
+          message_thread_id = excluded.message_thread_id,
           telegram_chat_title = COALESCE(excluded.telegram_chat_title, media_deliveries.telegram_chat_title),
           last_message_ids_json = excluded.last_message_ids_json,
           send_count = media_deliveries.send_count + 1,
@@ -508,6 +512,7 @@ export async function persistSuccessfulDeliveries(
         input.identity.key,
         delivery.requestedChatId,
         delivery.telegramChatId == null ? null : String(delivery.telegramChatId),
+        parseTelegramDestination(delivery.requestedChatId)?.messageThreadId ?? null,
         delivery.telegramChatTitle,
         messageIds,
         messageIds,
@@ -599,6 +604,7 @@ function formatDeliveryRow(row: StoredDeliveryRow) {
   return {
     channelId: row.channel_id,
     telegramChatId: row.telegram_chat_id,
+    messageThreadId: row.message_thread_id ?? null,
     telegramChatTitle: row.telegram_chat_title,
     firstMessageIds: parseJson(row.first_message_ids_json) || [],
     lastMessageIds: parseJson(row.last_message_ids_json) || [],
