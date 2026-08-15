@@ -4,6 +4,8 @@ import type { MediaType } from "../../types";
 export interface MultipartPayload {
   channel?: string | number;
   channels?: Array<string | number> | string | number;
+  username?: string;
+  usernames?: string[] | string;
   caption?: string;
   parseMode?: string;
   mediaType?: string;
