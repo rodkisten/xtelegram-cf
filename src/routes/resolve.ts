@@ -19,6 +19,7 @@ import {
 import type { Env } from "../types";
 import {
   normalizeMetadata,
+  normalizeRoutingUsernames,
   normalizeParseMode,
   normalizeTelegramChannels,
 } from "../validation/common";
@@ -29,6 +30,8 @@ interface ResolveRequestBody {
   sourceUrl?: unknown;
   channel?: unknown;
   channels?: unknown;
+  username?: unknown;
+  usernames?: unknown;
   caption?: unknown;
   parseMode?: unknown;
   metadata?: unknown;
@@ -128,6 +131,12 @@ export async function handleResolve(
     return json({ ok: false, error: channelValidation.error }, 400);
   }
 
+  const usernameValidation = normalizeRoutingUsernames(body.username, body.usernames);
+  if (!usernameValidation.ok) {
+    relayDebug(env, traceId, "resolve.invalid-usernames", { error: usernameValidation.error });
+    return json({ ok: false, error: usernameValidation.error }, 400);
+  }
+
   const parseMode = normalizeParseMode(body.parseMode);
   if (body.parseMode && !parseMode) {
     relayDebug(env, traceId, "resolve.invalid-parse-mode", { parseMode: String(body.parseMode) });
@@ -151,6 +160,7 @@ export async function handleResolve(
     caption,
     parseMode,
     channels: channelValidation.value,
+    usernames: usernameValidation.value,
     mediaId: explicitMediaId || undefined,
     mediaKey: explicitMediaKey || undefined,
     force: body.force === true,
