@@ -14,6 +14,8 @@ export interface Env {
   SOCIAL_METADATA_TIMEOUT_MS?: string;
   /** Enables privacy-safe structured pipeline logs. Disabled unless true. */
   RELAY_DEBUG?: string;
+  /** Optional JSON map from @username keys to Telegram chat IDs. */
+  TELEGRAM_USERNAME_CHANNEL_MAP_JSON?: string;
 }
 
 export type ParseMode = "HTML" | "MarkdownV2";
@@ -32,6 +34,7 @@ export interface RelayInput {
   mediaType: MediaType | null;
   mediaHeaders: Record<string, string>;
   channels: string[];
+  usernames: string[];
   metadata: Record<string, string> | null;
   mediaId: string | null;
   mediaKey: string | null;
@@ -58,6 +61,7 @@ export interface RelayAlbumInput {
   caption: string;
   parseMode: ParseMode | null;
   channels: string[];
+  usernames: string[];
   metadata: Record<string, string> | null;
   mediaId: string | null;
   mediaKey: string | null;
