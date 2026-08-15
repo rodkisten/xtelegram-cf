@@ -1,5 +1,6 @@
 import {
   checkStoredMediaDeliveries,
+  persistKnownMedia,
   requireRelayDb,
   resolveMediaIdentity,
   type MediaIdentity,
@@ -12,7 +13,13 @@ import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import { debugError, relayDebug, relayTraceId } from "../../lib/debug";
 import { normalizeMediaIdentityInput } from "../../validation/media-identity";
-import { normalizeTelegramChannels } from "../../validation/common";
+import {
+  normalizeCaption,
+  normalizeMetadata,
+  normalizeParseMode,
+  normalizeTelegramChannels,
+} from "../../validation/common";
+import { syncCaptionToTelegramDeliveries } from "../../services/media-caption-sync";
 import type { Env } from "../../types";
 
 interface MediaCheckBody {
@@ -25,6 +32,11 @@ interface NormalizedMediaCheckInput {
   index: number;
   input: unknown;
   identity: MediaIdentity;
+  caption: string;
+  parseMode: import("../../types").ParseMode | null;
+  metadata: Record<string, string> | null;
+  sourceUrl: string | null;
+  pageUrl: string | null;
 }
 
 export async function handleMediaCheck(request: Request, env: Env): Promise<Response> {
@@ -87,13 +99,55 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
           invalid.set(index, "Provide a mediaKey, provider + mediaId, or an HTTP(S) URL");
           return;
         }
-        valid.push({ index, input, identity: await resolveMediaIdentity(identityInput) });
+        const record = input && typeof input === "object" && !Array.isArray(input)
+          ? input as Record<string, unknown>
+          : {};
+        const caption = normalizeCaption(record.caption);
+        const parseMode = caption ? normalizeParseMode(record.parseMode ?? record.parse_mode) : null;
+        if (caption && (record.parseMode || record.parse_mode) && !parseMode) {
+          invalid.set(index, "Invalid parseMode. Allowed values: HTML, MarkdownV2");
+          return;
+        }
+        const sourceUrl = typeof record.sourceUrl === "string" ? record.sourceUrl :
+          typeof record.url === "string" ? record.url : null;
+        const pageUrl = typeof record.pageUrl === "string" ? record.pageUrl : null;
+        valid.push({
+          index,
+          input,
+          identity: await resolveMediaIdentity(identityInput),
+          caption,
+          parseMode,
+          metadata: normalizeMetadata(record.metadata),
+          sourceUrl,
+          pageUrl,
+        });
       } catch (error) {
         invalid.set(index, getErrorMessage(error));
       }
     }),
   );
   valid.sort((left, right) => left.index - right.index);
+
+  // Caption-first reconciliation: a status probe may teach the relay about a
+  // post before its downloadable media URL exists. Persist only entries that
+  // actually carry useful mutable data; pure checks remain read-only.
+  try {
+    await Promise.all(valid.map(async (item) => {
+      if (!item.caption && !item.metadata) return;
+      await persistKnownMedia(db, {
+        identity: item.identity,
+        sourceUrl: item.sourceUrl,
+        pageUrl: item.pageUrl,
+        caption: item.caption || null,
+        parseMode: item.parseMode,
+        metadata: item.metadata,
+        mediaStatus: "pending",
+      });
+    }));
+  } catch (error) {
+    relayDebug(env, traceId, "media-check.caption-persist-failed", { error: debugError(error) });
+    return json({ ok: false, error: getErrorMessage(error), stage: "caption-persist" }, 500);
+  }
 
   relayDebug(env, traceId, "media-check.items-normalized", {
     requested: body.items.length,
@@ -116,6 +170,24 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
       { ok: false, error: getErrorMessage(error), stage: "database-query" },
       500,
     );
+  }
+
+  const captionSyncByIndex = new Map<number, Awaited<ReturnType<typeof syncCaptionToTelegramDeliveries>>>();
+  for (const item of valid) {
+    if (!item.caption) continue;
+    const record = records.get(item.identity.key);
+    if (!record?.deliveries.length) continue;
+    const sync = await syncCaptionToTelegramDeliveries({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      caption: item.caption,
+      parseMode: item.parseMode,
+      deliveries: record.deliveries.map((delivery) => ({
+        channelId: delivery.channelId,
+        telegramChatId: delivery.telegramChatId,
+        lastMessageIds: delivery.lastMessageIds,
+      })),
+    });
+    captionSyncByIndex.set(item.index, sync);
   }
 
   const results = body.items.map((input, index) => {
@@ -150,6 +222,10 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
       exists: Boolean(record),
       media: record?.media ?? null,
       channels: deliveries,
+      captionPersistence: normalized.caption
+        ? { persisted: true, status: record?.media.status ?? "pending" }
+        : null,
+      telegramCaptionSync: captionSyncByIndex.get(index) ?? [],
       ...(requestedChannels.length
         ? { requestedChannels: buildRequestedChannelStatus(requestedChannels, deliveries) }
         : {}),
