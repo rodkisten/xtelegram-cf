@@ -4,12 +4,14 @@ import type { ParseMode } from "../types";
 export interface CaptionSyncDelivery {
   channelId: string;
   telegramChatId: string | null;
+  messageThreadId?: number | null;
   lastMessageIds: unknown;
 }
 
 export interface CaptionSyncResult {
   channelId: string;
   chatId: string | null;
+  messageThreadId: number | null;
   messageId: number | null;
   ok: boolean;
   skipped: boolean;
@@ -40,6 +42,7 @@ export async function syncCaptionToTelegramDeliveries(options: {
       results.push({
         channelId: delivery.channelId,
         chatId,
+        messageThreadId: delivery.messageThreadId ?? null,
         messageId,
         ok: false,
         skipped: true,
@@ -60,6 +63,7 @@ export async function syncCaptionToTelegramDeliveries(options: {
     results.push({
       channelId: delivery.channelId,
       chatId,
+      messageThreadId: delivery.messageThreadId ?? null,
       messageId,
       ok: result.ok || alreadyCurrent,
       skipped: alreadyCurrent,
