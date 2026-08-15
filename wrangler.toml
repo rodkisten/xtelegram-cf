@@ -27,14 +27,19 @@ MAX_MEDIA_BYTES = "32000000"
 HLS_CONCURRENCY = "4"
 DELIVERY_CLAIM_TTL_SECONDS = "1800"
 RELAY_DEBUG = "true"
-RELAY_TOKEN = "12345678"
 TELEGRAM_CHAT_ID = "-1003991698263"
-TRLEGRAM_CHANNEL_ID = "-1003991698263"
-TELEGRAM_BOT_TOKEN = "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg"
 
-# Optional username -> Telegram chat routing. Keys are case-insensitive.
-# A comma-separated key maps every username in that key to the same chats.
-# Explicit channel/channels from a request are UNIONED with mapped chats and deduplicated.
+# Optional username -> Telegram destination routing. Keys are case-insensitive.
+# Destination formats:
+#   <chat_id>                    => send to the chat itself
+#   <chat_id>:<message_thread_id> => send to a forum topic in that supergroup
+# A comma-separated key maps every username in that key to the same destinations.
+# Explicit channel/channels from a request are UNIONED with mapped destinations.
+# Deduplication is by (chat_id, message_thread_id), so different topics remain distinct.
+#
+# Topic example:
+#   "@example": ["-1003991698263:42"]
+#   "@example1,@example2": ["-1003991698263:42", "-1003991698263:87"]
 TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 {
   "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-621561106"],
@@ -42,8 +47,7 @@ TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 }
 '''
 
-# Keep TELEGRAM_BOT_TOKEN and RELAY_TOKEN in Wrangler secrets, not in this file:
+# Keep credentials in Wrangler secrets, not in this file:
 #   npx wrangler secret put TELEGRAM_BOT_TOKEN
 #   npx wrangler secret put RELAY_TOKEN
-# Optional fallback when neither channel(s) nor username routing resolves a destination:
-#   npx wrangler secret put TELEGRAM_CHAT_ID
+# TELEGRAM_CHAT_ID may also be stored as a secret if preferred.

@@ -10,6 +10,7 @@ import type {
 interface TelegramSendBase {
   botToken: string;
   chatId: string;
+  messageThreadId?: number | null;
   caption: string;
   parseMode: ParseMode | null;
   mediaType: MediaType;
@@ -40,6 +41,7 @@ export async function sendTelegramUrl(
     chat_id: options.chatId,
     [field]: options.mediaUrl,
   };
+  if (options.messageThreadId != null) payload.message_thread_id = options.messageThreadId;
 
   if (options.mediaType === "video") {
     payload.supports_streaming = true;
@@ -72,6 +74,7 @@ export async function sendTelegramUpload(
   const form = new FormData();
 
   form.set("chat_id", options.chatId);
+  if (options.messageThreadId != null) form.set("message_thread_id", String(options.messageThreadId));
   form.set(field, options.file, options.filename);
 
   if (options.mediaType === "video") {
@@ -94,6 +97,7 @@ export async function sendTelegramUpload(
 export async function sendTelegramMediaGroupUrl(options: {
   botToken: string;
   chatId: string;
+  messageThreadId?: number | null;
   items: TelegramAlbumUrlItem[];
   caption: string;
   parseMode: ParseMode | null;
@@ -139,6 +143,7 @@ export async function sendTelegramMediaGroupUrl(options: {
     },
     body: JSON.stringify({
       chat_id: options.chatId,
+      ...(options.messageThreadId != null ? { message_thread_id: options.messageThreadId } : {}),
       media,
     }),
   });
@@ -152,6 +157,7 @@ export async function sendTelegramMediaGroupUrl(options: {
 export async function sendTelegramMediaGroupUpload(options: {
   botToken: string;
   chatId: string;
+  messageThreadId?: number | null;
   items: TelegramAlbumUploadItem[];
   caption: string;
   parseMode: ParseMode | null;
@@ -196,6 +202,7 @@ export async function sendTelegramMediaGroupUpload(options: {
   });
 
   form.set("chat_id", options.chatId);
+  if (options.messageThreadId != null) form.set("message_thread_id", String(options.messageThreadId));
   form.set("media", JSON.stringify(media));
   return requestTelegram<TelegramMessage[]>(options.botToken, "sendMediaGroup", {
     body: form,

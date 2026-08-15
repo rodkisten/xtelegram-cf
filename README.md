@@ -1221,16 +1221,19 @@ If the media has never been sent, the caption is stored and the media stays `pen
 Explicit captions always win over server-side social metadata scraping. Scraping is now a fallback used only when the caller did not already provide a caption.
 
 
-## Username → channel routing (v2.12)
+## Username → Telegram destination routing (v2.13)
 
-Every send path accepts optional `username` or `usernames`. The relay can translate those handles to Telegram chats using `TELEGRAM_USERNAME_CHANNEL_MAP_JSON` from `wrangler.toml`. Matching is case-insensitive. A comma-separated configuration key is expanded to each handle.
+Every send path accepts optional `username` or `usernames`. The relay translates those handles to Telegram destinations using `TELEGRAM_USERNAME_CHANNEL_MAP_JSON` from `wrangler.toml`. Matching is case-insensitive. A comma-separated configuration key is expanded to each handle.
+
+A destination can be a normal chat ID (`<chat_id>`) or a forum topic (`<chat_id>:<message_thread_id>`). The compact string is parsed internally into `{ chatId, messageThreadId? }`; the Bot API receives `message_thread_id` separately.
 
 ```toml
 [vars]
 TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 {
-  "@USERNAME": ["-1001111111111", "-1002222222222"],
-  "@username1,@username2": ["-1001111111111"]
+  "@USERNAME": ["-1001111111111:42"],
+  "@username1,@username2": ["-1001111111111:42", "-1001111111111:87"],
+  "@withouttopic": ["-1002222222222"]
 }
 '''
 ```
@@ -1247,6 +1250,8 @@ Example request:
 }
 ```
 
-Routing is additive and deduplicated: explicit `channel/channels` + chats resolved from `username/usernames` are unioned before delivery claims. If the same chat appears more than once, Telegram is called only once for that media/chat pair. When no explicit or mapped chat exists, the normal `TELEGRAM_CHAT_ID` fallback is used. The username field remains optional.
+Routing is additive and deduplicated: explicit `channel/channels` + destinations resolved from `username/usernames` are unioned before delivery claims. Deduplication uses the full `(chat_id, message_thread_id)` pair, so `-100123:10` and `-100123:20` are intentionally different destinations while repeated `-100123:10` values collapse to one delivery. Destinations without a topic remain backwards-compatible. When no explicit or mapped destination exists, the normal `TELEGRAM_CHAT_ID` fallback is used. The username field remains optional.
+
+Successful deliveries persist the compact destination key in `channel_id`, the actual Telegram `chat_id`, `message_thread_id`, and message IDs. Caption reconciliation therefore selects the correct chat/topic delivery; `editMessageCaption` itself uses the persisted `chat_id + message_id`, as required by the Telegram Bot API.
 
 `POST /media/check` also accepts username routing. If no routing fields are supplied there, it preserves the existing status-check behavior and may inspect all stored deliveries for that media identity.

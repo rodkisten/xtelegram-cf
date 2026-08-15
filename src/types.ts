@@ -14,7 +14,7 @@ export interface Env {
   SOCIAL_METADATA_TIMEOUT_MS?: string;
   /** Enables privacy-safe structured pipeline logs. Disabled unless true. */
   RELAY_DEBUG?: string;
-  /** Optional JSON map from @username keys to Telegram chat IDs. */
+  /** Optional JSON map from @username keys to Telegram destinations (<chat_id> or <chat_id>:<message_thread_id>). */
   TELEGRAM_USERNAME_CHANNEL_MAP_JSON?: string;
 }
 
