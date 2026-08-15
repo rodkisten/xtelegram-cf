@@ -42,8 +42,8 @@ TELEGRAM_CHAT_ID = "-1003991698263"
 #   "@example1,@example2": ["-1003991698263:42", "-1003991698263:87"]
 TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 {
-  "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-621561106"],
-  "@rodkisten,@therodkisten,@rodinhocosta": ["-1003991698263"]
+  "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-1003991698263:65"],
+  "@rodkisten,@therodkisten,@rodinhocosta": ["-1003991698263:3"]
 }
 '''
 
