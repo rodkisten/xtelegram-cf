@@ -9,8 +9,7 @@ import {
 } from "../../lib/debug";
 import { resolveMaxMediaBytes } from "../../media";
 import {
-  resolveDefaultTelegramChatId,
-  resolveTelegramChatIds,
+  resolveTelegramChatIdsForEnv,
 } from "../../services/channels";
 import {
   buildDeliveryConflict,
@@ -28,6 +27,7 @@ import {
   normalizeMetadata,
   normalizeParseMode,
   normalizeTelegramChannels,
+  normalizeRoutingUsernames,
   resolvePayloadCaption,
 } from "../../validation/common";
 import {
@@ -105,10 +105,13 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     );
   }
 
-  const chatIds = resolveTelegramChatIds(
-    channelValidation.value,
-    resolveDefaultTelegramChatId(env),
-  );
+  const usernameValidation = normalizeRoutingUsernames(payload.username, payload.usernames);
+  if (!usernameValidation.ok) {
+    relayDebug(env, traceId, "multipart.invalid-usernames", { error: usernameValidation.error });
+    return json({ ok: false, error: usernameValidation.error, stage: "validate-usernames" }, 400);
+  }
+
+  const chatIds = resolveTelegramChatIdsForEnv(env, channelValidation.value, usernameValidation.value);
   if (!chatIds.length) {
     relayDebug(env, traceId, "multipart.no-channels", {});
     return json(
@@ -117,7 +120,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
         error: "No Telegram channel was provided.",
         stage: "validate-channels",
         details: {
-          hint: "Send channel/channels inside payload or configure TELEGRAM_CHAT_ID.",
+          hint: "Send channel/channels or username/usernames inside payload, configure TELEGRAM_USERNAME_CHANNEL_MAP_JSON, or configure TELEGRAM_CHAT_ID.",
         },
       },
       400,
