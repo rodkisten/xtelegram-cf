@@ -9,6 +9,7 @@ import {
 } from "../../lib/debug";
 import { resolveMaxMediaBytes } from "../../media";
 import {
+  parseTelegramDestination,
   resolveTelegramChatIdsForEnv,
 } from "../../services/channels";
 import {
@@ -292,14 +293,17 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
 
     // Channel-first lets us stop a destination after its first failure instead
     // of creating even more partial side effects on the same Telegram chat.
-    for (const chatId of plan.channelsToSend) {
+    for (const destinationKey of plan.channelsToSend) {
+      const destination = parseTelegramDestination(destinationKey);
+      if (!destination) continue;
       for (let fileIndex = 0; fileIndex < uploadedFiles.length; fileIndex += 1) {
         const uploaded = uploadedFiles[fileIndex]!;
         let result: TelegramApiResult<TelegramMessage>;
         try {
           result = await sendTelegramUpload({
             botToken: env.TELEGRAM_BOT_TOKEN,
-            chatId,
+            chatId: destination.chatId,
+            messageThreadId: destination.messageThreadId,
             file: uploaded.file,
             filename: sanitizeUploadedFilename(uploaded.file.name, fileIndex),
             contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
@@ -321,7 +325,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
           contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
           size: uploaded.file.size,
           mediaType: uploaded.mediaType,
-          requestedChatId: chatId,
+          requestedChatId: destination.key,
           result,
         });
 
