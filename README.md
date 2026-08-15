@@ -1192,3 +1192,35 @@ npm run deploy
 # Observação sobre segurança
 
 Se um token real de Telegram ou relay já tiver sido commitado/publicado anteriormente, rotacione-o. A configuração desta versão deixa secrets fora de `wrangler.jsonc` e fornece apenas `.dev.vars.example` para desenvolvimento local.
+
+## Caption-first reconciliation (v2.11)
+
+Media state is no longer coupled to Telegram delivery. A post can be registered before its downloadable media URL is known:
+
+- `pending`: identity/caption is known, but media is not resolved yet.
+- `ready`: media has been resolved/prepared and can be delivered.
+- `sent`: at least one Telegram delivery was persisted.
+
+`POST /media/check` remains a normal status check, but item objects may also carry `caption`, `parseMode` and `metadata`. When those fields are present the check becomes an idempotent reconciliation operation.
+
+```json
+{
+  "items": [
+    {
+      "provider": "twitter",
+      "mediaId": "1234567890",
+      "sourceUrl": "https://x.com/user/status/1234567890",
+      "caption": "<b>@user</b>\nPost caption",
+      "parseMode": "HTML",
+      "metadata": {
+        "author": "@user"
+      }
+    }
+  ],
+  "channels": ["-1001234567890"]
+}
+```
+
+If the media has never been sent, the caption is stored and the media stays `pending`. If delivery history already contains Telegram `chat_id` + `message_id`, the relay persists the caption and calls `editMessageCaption` for the stored delivery. Album captions target the first message ID of the latest persisted album delivery.
+
+Explicit captions always win over server-side social metadata scraping. Scraping is now a fallback used only when the caller did not already provide a caption.

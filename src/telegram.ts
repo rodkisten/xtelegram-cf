@@ -202,6 +202,26 @@ export async function sendTelegramMediaGroupUpload(options: {
   });
 }
 
+export async function editTelegramMessageCaption(options: {
+  botToken: string;
+  chatId: string | number;
+  messageId: number;
+  caption: string;
+  parseMode: ParseMode | null;
+}): Promise<TelegramApiResult<TelegramMessage | true>> {
+  const payload: Record<string, unknown> = {
+    chat_id: options.chatId,
+    message_id: options.messageId,
+    caption: options.caption,
+  };
+  if (options.parseMode) payload.parse_mode = options.parseMode;
+
+  return requestTelegram<TelegramMessage | true>(options.botToken, "editMessageCaption", {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export function validateEnvironment(env: Env): string | null {
   if (!env.TELEGRAM_BOT_TOKEN) {
     return "Missing TELEGRAM_BOT_TOKEN secret";

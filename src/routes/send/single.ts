@@ -1,4 +1,4 @@
-import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
+import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import {
   inferTelegramMediaType,
   prepareMedia,
@@ -198,6 +198,21 @@ export async function handleSingleSend(
       socialMetadataStrategy: socialContent.social?.strategy || null,
     });
 
+    // Persist the resolved media independently from Telegram. If delivery fails
+    // after this point, a later request can resume from a durable `ready` row.
+    await persistKnownMedia(db, {
+      identity: plan.identity,
+      sourceUrl: input.sourceUrl,
+      pageUrl: input.pageUrl,
+      mediaType,
+      mediaCount: 1,
+      metadata: socialContent.metadata,
+      caption: socialContent.caption || null,
+      parseMode: socialContent.parseMode,
+      resolvedMediaUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
+      mediaStatus: "ready",
+    });
+
     relayDebug(env, traceId, "single.telegram.started", {
       delivery,
       mediaType,
@@ -241,6 +256,10 @@ export async function handleSingleSend(
         mediaType,
         mediaCount: 1,
         metadata: socialContent.metadata,
+        caption: socialContent.caption,
+        parseMode: socialContent.parseMode,
+        resolvedMediaUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
+        mediaStatus: "sent",
         deliveries: successfulDeliveries.map((entry) => ({
           requestedChatId: entry.requestedChatId,
           telegramChatId: entry.result.result?.chat?.id ?? null,

@@ -53,6 +53,18 @@ export async function resolveSocialDeliveryContent(
   input: SocialDeliveryInput,
   env: Env,
 ): Promise<SocialDeliveryContent> {
+  // Explicit caller content is authoritative. This enables caption-first
+  // workflows where metadata is captured before a downloadable media URL is
+  // available, and avoids replacing a richer caption with scraper output.
+  if (input.caption.trim()) {
+    return {
+      caption: input.caption,
+      parseMode: input.parseMode,
+      metadata: input.metadata,
+      social: null,
+    };
+  }
+
   const target = resolveSocialTarget(input);
   if (!target) {
     return {
