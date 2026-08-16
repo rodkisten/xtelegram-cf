@@ -1,5 +1,8 @@
 # xtelegram-cf · Telegram Media Relay v2.10.4
 
+
+> **v2.13.1 caption guarantee:** when a request does not provide an explicit `caption`, the relay always includes the best known original/source URL in the generated Telegram caption. It accepts `pageUrl`, `sourceUrl`, `tweetUrl`, `postUrl`, `storyUrl`, `reelUrl`, `tiktokUrl`, `originalUrl`, `permalink`, `shareUrl`, and `canonicalUrl`; if none exists, it falls back to the direct media URL.
+
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
 
 ## Correção da v2.10.4 · rastreio seguro de ponta a ponta
