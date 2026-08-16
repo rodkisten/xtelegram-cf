@@ -143,10 +143,10 @@ export async function handleResolve(
     return json({ ok: false, error: "Invalid parseMode. Allowed values: HTML, MarkdownV2" }, 400);
   }
 
-  const caption =
-    typeof body.caption === "string"
-      ? body.caption
-      : resolution.caption || resolution.title || "";
+  const explicitCaption = typeof body.caption === "string" ? body.caption.trim() : "";
+  const resolvedCaption = typeof resolution.caption === "string" ? resolution.caption.trim() : "";
+  const caption = explicitCaption || resolvedCaption || resolution.sourceUrl;
+  const captionExplicit = Boolean(explicitCaption);
   const explicitMediaId = typeof body.mediaId === "string" ? body.mediaId.trim() : "";
   const explicitMediaKey = typeof body.mediaKey === "string" ? body.mediaKey.trim() : "";
   const metadata = {
@@ -158,7 +158,8 @@ export async function handleResolve(
     pageUrl: resolution.sourceUrl,
     provider: resolution.source,
     caption,
-    parseMode,
+    captionExplicit,
+    parseMode: captionExplicit ? parseMode : null,
     channels: channelValidation.value,
     usernames: usernameValidation.value,
     mediaId: explicitMediaId || undefined,

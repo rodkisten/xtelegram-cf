@@ -1,5 +1,7 @@
 # xtelegram-cf · Telegram Media Relay v2.10.4
 
+> **v2.13.2 resolver caption fix:** generic resolver labels such as `Twitter video` / `Twitter media` are never promoted to Telegram captions. `/resolve-and-send` uses only an explicit caller caption or a real resolver caption; otherwise it falls back to the original post URL. Internally generated captions are marked `captionExplicit=false`, so Twitter/X and Instagram metadata enrichment still runs.
+
 
 > **v2.13.1 caption guarantee:** when a request does not provide an explicit `caption`, the relay always includes the best known original/source URL in the generated Telegram caption. It accepts `pageUrl`, `sourceUrl`, `tweetUrl`, `postUrl`, `storyUrl`, `reelUrl`, `tiktokUrl`, `originalUrl`, `permalink`, `shareUrl`, and `canonicalUrl`; if none exists, it falls back to the direct media URL.
 
