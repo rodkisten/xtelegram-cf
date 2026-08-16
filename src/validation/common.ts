@@ -116,17 +116,49 @@ export function normalizeOptionalText(value: unknown, maximumLength: number): st
   return String(value).trim().slice(0, maximumLength);
 }
 
+export function resolveOriginalSourceUrl(record: Record<string, unknown>): string | null {
+  const candidates = [
+    record.pageUrl,
+    record.sourceUrl,
+    record.tweetUrl,
+    record.postUrl,
+    record.storyUrl,
+    record.reelUrl,
+    record.tiktokUrl,
+    record.originalUrl,
+    record.permalink,
+    record.shareUrl,
+    record.canonicalUrl,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeOptionalSourceUrl(candidate);
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
+function resolveFallbackMediaUrl(record: Record<string, unknown>): string | null {
+  for (const candidate of [record.mediaUrl, record.photoUrl, record.videoUrl, record.fileUrl, record.url]) {
+    const normalized = normalizeOptionalSourceUrl(candidate);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
 export function resolvePayloadCaption(record: Record<string, unknown>): string {
   const explicit = normalizeCaption(record.caption);
   if (explicit) return explicit;
 
   const title = normalizeOptionalText(record.title, 1000);
   const text = normalizeOptionalText(record.text, 20_000);
-  const pageUrl = normalizeOptionalSourceUrl(
-    record.pageUrl ?? record.sourceUrl ?? record.tweetUrl,
-  );
+  const sourceUrl = resolveOriginalSourceUrl(record) || resolveFallbackMediaUrl(record);
 
-  return [title, text, pageUrl || ""].filter(Boolean).join("\n\n");
+  // A generated caption must never be linkless when the relay knows any URL.
+  // Prefer the original post/story/reel/tweet URL; fall back to the media URL
+  // only when the caller did not provide a stable source URL.
+  return [title, text, sourceUrl || ""].filter(Boolean).join("\n\n");
 }
 
 export function normalizeCaption(value: unknown): string {
