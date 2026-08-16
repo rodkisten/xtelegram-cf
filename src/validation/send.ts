@@ -64,8 +64,8 @@ export function validateRequestBody(body: unknown): SendValidationResult {
       title: normalizeOptionalText(record.title, 1000),
       text: normalizeOptionalText(record.text, 20_000),
       caption: resolvePayloadCaption(record),
-      captionExplicit: Boolean(normalizeCaption(record.caption)),
-      parseMode: normalizeCaption(record.caption) ? parseMode : null,
+      captionExplicit: resolveCaptionExplicitFlag(record),
+      parseMode: resolveCaptionExplicitFlag(record) ? parseMode : null,
       mediaType,
       mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
       channels: channelValidation.value,
@@ -194,8 +194,8 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       title: normalizeOptionalText(record.title, 1000),
       text: normalizeOptionalText(record.text, 20_000),
       caption: resolvePayloadCaption(record),
-      captionExplicit: Boolean(explicitCaption),
-      parseMode: explicitCaption ? parseMode : null,
+      captionExplicit: resolveCaptionExplicitFlag(record),
+      parseMode: resolveCaptionExplicitFlag(record) ? parseMode : null,
       channels: channelValidation.value,
       usernames: usernameValidation.value,
       metadata: normalizeMetadata(record.metadata),
@@ -204,6 +204,12 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       force: record.force === true,
     },
   };
+}
+
+function resolveCaptionExplicitFlag(record: Record<string, unknown>): boolean {
+  if (record.captionExplicit === false) return false;
+  if (record.captionExplicit === true) return Boolean(normalizeCaption(record.caption));
+  return Boolean(normalizeCaption(record.caption));
 }
 
 function normalizeAlbumMediaType(value: unknown, mediaUrl: string): AlbumMediaType | null {
