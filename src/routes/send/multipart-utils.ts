@@ -14,6 +14,15 @@ export interface MultipartPayload {
   pageUrl?: string;
   frameUrl?: string;
   sourceUrl?: string;
+  tweetUrl?: string;
+  postUrl?: string;
+  storyUrl?: string;
+  reelUrl?: string;
+  tiktokUrl?: string;
+  originalUrl?: string;
+  permalink?: string;
+  shareUrl?: string;
+  canonicalUrl?: string;
   mediaUrl?: string;
   photoUrl?: string;
   videoUrl?: string;
@@ -54,9 +63,21 @@ export function collectUploadedFiles(
 export function buildMultipartIdentityInput(
   payload: MultipartPayload,
 ): MediaIdentityInput {
-  const stableUrl =
-    payload.sourceUrl ||
+  const originalUrl =
     payload.pageUrl ||
+    payload.sourceUrl ||
+    payload.tweetUrl ||
+    payload.postUrl ||
+    payload.storyUrl ||
+    payload.reelUrl ||
+    payload.tiktokUrl ||
+    payload.originalUrl ||
+    payload.permalink ||
+    payload.shareUrl ||
+    payload.canonicalUrl ||
+    null;
+  const stableUrl =
+    originalUrl ||
     payload.mediaUrl ||
     payload.photoUrl ||
     payload.videoUrl ||
@@ -67,7 +88,7 @@ export function buildMultipartIdentityInput(
       provider: payload.provider || "multipart",
       mediaId: payload.mediaId || null,
       mediaKey: payload.mediaKey || null,
-      sourceUrl: payload.sourceUrl || payload.pageUrl || null,
+      sourceUrl: originalUrl,
       pageUrl: payload.pageUrl || null,
       mediaUrl: stableUrl,
     };

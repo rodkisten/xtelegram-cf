@@ -92,6 +92,7 @@ function albumItemToRelayInput(
     title: input.title,
     text: input.text,
     caption: item.caption || input.caption,
+    captionExplicit: Boolean(item.caption) || input.captionExplicit,
     parseMode: item.parseMode ?? input.parseMode,
     mediaType: item.mediaType,
     mediaHeaders: item.mediaHeaders,
@@ -712,6 +713,7 @@ export async function handleJsonAlbumSend(
       sourceUrl: input.sourceUrl,
       pageUrl: input.pageUrl,
       caption: input.caption,
+      captionExplicit: input.captionExplicit,
       parseMode: input.parseMode,
       metadata: input.metadata,
     }, env);

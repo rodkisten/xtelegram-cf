@@ -24,12 +24,14 @@ import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import { sendTelegramUpload } from "../../telegram";
 import type { Env, MediaType, TelegramApiResult, TelegramMessage } from "../../types";
 import {
+  normalizeCaption,
   normalizeMediaType,
   normalizeMetadata,
   normalizeParseMode,
   normalizeTelegramChannels,
   normalizeRoutingUsernames,
   resolvePayloadCaption,
+  resolveOriginalSourceUrl,
 } from "../../validation/common";
 import {
   buildMultipartIdentityInput,
@@ -273,9 +275,10 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     const baseMetadata = normalizeMetadata(payload.metadata);
     const socialContent = await resolveSocialDeliveryContent({
       provider: payload.provider || null,
-      sourceUrl: payload.sourceUrl || null,
+      sourceUrl: resolveOriginalSourceUrl(payload as Record<string, unknown>),
       pageUrl: payload.pageUrl || null,
       caption: resolvePayloadCaption(payload as Record<string, unknown>),
+      captionExplicit: Boolean(normalizeCaption(payload.caption)),
       parseMode,
       metadata: baseMetadata,
     }, env);
@@ -387,7 +390,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       });
       insertedChannelIds = await persistSuccessfulDeliveries(db, {
         identity: plan.identity,
-        sourceUrl: payload.sourceUrl || payload.pageUrl || null,
+        sourceUrl: resolveOriginalSourceUrl(payload as Record<string, unknown>),
         pageUrl: payload.pageUrl || null,
         mediaType: uploadedFiles.length > 1 ? "album" : uploadedFiles[0]!.mediaType,
         mediaCount: uploadedFiles.length,

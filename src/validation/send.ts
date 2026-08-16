@@ -11,6 +11,7 @@ import {
   normalizeTelegramChannels,
   normalizeRoutingUsernames,
   resolvePayloadCaption,
+  resolveOriginalSourceUrl,
 } from "./common";
 
 export type SendValidationResult =
@@ -36,9 +37,7 @@ export function validateRequestBody(body: unknown): SendValidationResult {
   }
 
   const pageUrl = normalizeOptionalSourceUrl(record.pageUrl);
-  const sourceUrl = normalizeOptionalSourceUrl(
-    record.sourceUrl ?? record.tweetUrl ?? record.pageUrl,
-  );
+  const sourceUrl = resolveOriginalSourceUrl(record);
   const parseMode = normalizeParseMode(record.parseMode);
 
   if (record.parseMode && !parseMode) {
@@ -65,6 +64,7 @@ export function validateRequestBody(body: unknown): SendValidationResult {
       title: normalizeOptionalText(record.title, 1000),
       text: normalizeOptionalText(record.text, 20_000),
       caption: resolvePayloadCaption(record),
+      captionExplicit: Boolean(normalizeCaption(record.caption)),
       parseMode: normalizeCaption(record.caption) ? parseMode : null,
       mediaType,
       mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
@@ -188,12 +188,13 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
     kind: "valid",
     value: {
       items,
-      sourceUrl: normalizeOptionalSourceUrl(record.sourceUrl ?? record.tweetUrl ?? record.pageUrl),
+      sourceUrl: resolveOriginalSourceUrl(record),
       pageUrl,
       provider: normalizeNullableText(record.provider, 120),
       title: normalizeOptionalText(record.title, 1000),
       text: normalizeOptionalText(record.text, 20_000),
       caption: resolvePayloadCaption(record),
+      captionExplicit: Boolean(explicitCaption),
       parseMode: explicitCaption ? parseMode : null,
       channels: channelValidation.value,
       usernames: usernameValidation.value,
