@@ -15,6 +15,7 @@ export interface SocialPostMetadata {
 
 export interface SocialDeliveryContent {
   caption: string;
+  captionExplicit?: boolean;
   parseMode: ParseMode | null;
   metadata: Record<string, string> | null;
   social: SocialPostMetadata | null;
@@ -25,6 +26,7 @@ interface SocialDeliveryInput {
   sourceUrl?: string | null;
   pageUrl?: string | null;
   caption: string;
+  captionExplicit?: boolean;
   parseMode: ParseMode | null;
   metadata: Record<string, string> | null;
 }
@@ -56,7 +58,7 @@ export async function resolveSocialDeliveryContent(
   // Explicit caller content is authoritative. This enables caption-first
   // workflows where metadata is captured before a downloadable media URL is
   // available, and avoids replacing a richer caption with scraper output.
-  if (input.caption.trim()) {
+  if (input.captionExplicit && input.caption.trim()) {
     return {
       caption: input.caption,
       parseMode: input.parseMode,
