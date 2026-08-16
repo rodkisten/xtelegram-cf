@@ -151,7 +151,8 @@ export function resolvePayloadCaption(record: Record<string, unknown>): string {
   const explicit = normalizeCaption(record.caption);
   if (explicit) return explicit;
 
-  const title = normalizeOptionalText(record.title, 1000);
+  const rawTitle = normalizeOptionalText(record.title, 1000);
+  const title = isGenericMediaTitle(rawTitle) ? "" : rawTitle;
   const text = normalizeOptionalText(record.text, 20_000);
   const sourceUrl = resolveOriginalSourceUrl(record) || resolveFallbackMediaUrl(record);
 
@@ -159,6 +160,19 @@ export function resolvePayloadCaption(record: Record<string, unknown>): string {
   // Prefer the original post/story/reel/tweet URL; fall back to the media URL
   // only when the caller did not provide a stable source URL.
   return [title, text, sourceUrl || ""].filter(Boolean).join("\n\n");
+}
+
+function isGenericMediaTitle(value: string): boolean {
+  const normalized = value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+
+  if (!normalized) return false;
+
+  return /^(?:(?:twitter|x|instagram|tiktok)\s+)?(?:video|media|photo|foto|image|imagem|audio|post|story|reel)(?:\s+(?:video|media|photo|foto|image|imagem|audio))?$/.test(normalized) ||
+    /^(?:twitter|x|instagram|tiktok)\s+(?:video|media|photo|foto|image|imagem|audio|post|story|reel)$/.test(normalized);
 }
 
 export function normalizeCaption(value: unknown): string {
