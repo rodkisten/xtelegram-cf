@@ -30,6 +30,7 @@ export interface RelayInput {
   title: string;
   text: string;
   caption: string;
+  captionExplicit: boolean;
   parseMode: ParseMode | null;
   mediaType: MediaType | null;
   mediaHeaders: Record<string, string>;
@@ -59,6 +60,7 @@ export interface RelayAlbumInput {
   title: string;
   text: string;
   caption: string;
+  captionExplicit: boolean;
   parseMode: ParseMode | null;
   channels: string[];
   usernames: string[];
