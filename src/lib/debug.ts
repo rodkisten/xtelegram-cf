@@ -61,8 +61,7 @@ export function relayDebug(
         traceId,
         step,
         ...safeDetails,
-      }),
-    );
+      });
   } catch {
     // Logging must never alter a delivery outcome.
   }
