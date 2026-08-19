@@ -56,9 +56,7 @@ export function relayDebug(
   if (!relayDebugEnabled(env)) return;
   try {
     const safeDetails = sanitizeDebugValue(details) as Record<string, unknown>;
-    console.log(
-      DEBUG_PREFIX,
-      JSON.stringify({
+    console.log({
         at: new Date().toISOString(),
         traceId,
         step,
@@ -82,7 +80,7 @@ export function debugUrl(value: unknown): string | null {
 }
 
 export function debugError(error: unknown): string {
-  if (error instanceof Error) return truncate(error.message || error.name, 420);
+  if (error instanceof Error) return truncate(`${error} \n ${error?.name} \n ${error?.message}` || error.name, 420);
   return truncate(String(error || "Unknown error"), 420);
 }
 
