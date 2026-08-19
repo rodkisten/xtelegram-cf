@@ -5,7 +5,7 @@ export const RELAY_TRACE_HEADER = "X-Relay-Trace-Id";
 const DEBUG_PREFIX = "[media-relay:debug]";
 const SENSITIVE_KEY = /(?:authorization|token|cookie|secret|password|api[_-]?key|signature|sig|expires?|credential)/i;
 const URL_KEY = /(?:url|uri|href)$/i;
-
+const TRUNCATE_AT = 800;
 /**
  * Debug logging is deliberately opt-in. Set RELAY_DEBUG=true in the Worker
  * environment to emit a structured line for each meaningful pipeline step.
@@ -80,7 +80,7 @@ export function debugUrl(value: unknown): string | null {
 }
 
 export function debugError(error: unknown): string {
-  if (error instanceof Error) return truncate(`${error} \n ${error?.name} \n ${error?.message}` || error.name, 420);
+  if (error instanceof Error) return truncate(`${error} \n ${error?.name} \n ${error?.message}`, TRUNCATE_AT);
   return truncate(String(error || "Unknown error"), 420);
 }
 
