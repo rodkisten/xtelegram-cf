@@ -47,7 +47,10 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     relayDebug(env, traceId, "send.album-completed", { status: response.status });
     return response;
   }
-
+ 
+  //@rod added for debugging
+  relayDebug(env, traceId, "send.single-body", body);
+  
   const validation = validateRequestBody(body);
   if (!validation.ok) {
     relayDebug(env, traceId, "send.single-invalid", { error: validation.error });
