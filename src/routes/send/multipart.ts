@@ -1,6 +1,7 @@
 import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import { mapWithConcurrency } from "../../lib/concurrency";
 import {
   debugChannelSummary,
   debugError,
@@ -287,18 +288,21 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       socialMetadataStrategy: socialContent.social?.strategy || null,
     });
     const caption = socialContent.caption;
-    const deliveries: MultipartDelivery[] = [];
-
     relayDebug(env, traceId, "multipart.telegram.started", {
       fileCount: uploadedFiles.length,
       channelCount: plan.channelsToSend.length,
     });
 
-    // Channel-first lets us stop a destination after its first failure instead
-    // of creating even more partial side effects on the same Telegram chat.
-    for (const destinationKey of plan.channelsToSend) {
+    // Preserve file order inside each destination, but destinations are
+    // independent after the D1 claims are acquired. Sending two channels at a
+    // time removes avoidable cross-channel latency without multiplying the
+    // uploaded file across an unbounded number of concurrent requests.
+    const processChannel = async (destinationKey: string): Promise<MultipartDelivery[]> => {
       const destination = parseTelegramDestination(destinationKey);
-      if (!destination) continue;
+      if (!destination) return [];
+
+      const channelDeliveries: MultipartDelivery[] = [];
+
       for (let fileIndex = 0; fileIndex < uploadedFiles.length; fileIndex += 1) {
         const uploaded = uploadedFiles[fileIndex]!;
         let result: TelegramApiResult<TelegramMessage>;
@@ -321,7 +325,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
           };
         }
 
-        deliveries.push({
+        channelDeliveries.push({
           fileIndex,
           field: uploaded.field,
           filename: uploaded.file.name,
@@ -342,8 +346,17 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
 
         if (!result.ok) break;
       }
-    }
 
+      return channelDeliveries;
+    };
+
+    const channelConcurrency = Math.min(2, plan.channelsToSend.length);
+    const deliveriesByChannel = await mapWithConcurrency(
+      plan.channelsToSend,
+      channelConcurrency,
+      processChannel,
+    );
+    const deliveries = deliveriesByChannel.flat();
     const failed = deliveries.filter((entry) => !entry.result.ok);
     const succeeded = deliveries.filter((entry) => entry.result.ok);
     const completedChannels = plan.channelsToSend.filter((chatId) => {
