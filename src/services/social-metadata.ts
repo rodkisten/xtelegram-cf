@@ -177,72 +177,120 @@ async function resolveTwitterMetadata(sourceUrl: string, env: Env): Promise<Soci
   const normalized = normalizeTwitterPostUrl(new URL(sourceUrl));
   const parsed = new URL(normalized);
   const match = parsed.pathname.match(/^\/([^/]+)\/status\/(\d+)/i);
-  const usernameFromUrl = cleanUsername(match?.[1] || "");
   const tweetId = match?.[2] || "";
 
-  if (tweetId) {
-    try {
-      const token = randomToken();
-      const data = await fetchJson(
-        `https://cdn.syndication.twimg.com/tweet-result?id=${encodeURIComponent(tweetId)}&lang=en&token=${encodeURIComponent(token)}`,
-        resolveTimeoutMs(env),
-      );
-      const author = cleanUsername(
-        stringValue(data?.user?.screen_name) ||
-        stringValue(data?.user?.username) ||
-        stringValue(data?.screen_name),
-      );
-      const caption = cleanCaption(
-        stringValue(data?.text) ||
-        stringValue(data?.full_text) ||
-        stringValue(data?.tweet?.text),
-      );
-      if (author || caption) {
-        return {
-          platform: "twitter",
-          origin: "X",
-          sourceUrl: normalized,
-          author: author ? `@${author}` : null,
-          caption: caption || null,
-          strategy: "twitter-syndication",
-          enriched: true,
-        };
-      }
-    } catch (error) {
+  if (!tweetId) {
+    return fallbackMetadata("twitter", normalized, "url-fallback");
+  }
+
+  // Syndication and the public HTML page are independent sources. Racing them
+  // removes the old worst-case waterfall where a failed syndication request
+  // consumed the full timeout before HTML was even attempted. The first source
+  // that produces useful metadata wins and the slower request is aborted.
+  const raceController = new AbortController();
+  const timeoutMs = resolveTimeoutMs(env);
+
+  const attempts = [
+    resolveTwitterSyndication(normalized, tweetId, timeoutMs, raceController.signal),
+    resolveTwitterHtmlMetadata(normalized, timeoutMs, raceController.signal),
+  ];
+
+  try {
+    const metadata = await Promise.any(attempts);
+    raceController.abort("twitter-metadata-resolved");
+    return metadata;
+  } catch {
+    raceController.abort("twitter-metadata-failed");
+    return fallbackMetadata("twitter", normalized, "url-fallback");
+  }
+}
+
+async function resolveTwitterSyndication(
+  normalized: string,
+  tweetId: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<SocialPostMetadata> {
+  try {
+    const token = randomToken();
+    const data = await fetchJson(
+      `https://cdn.syndication.twimg.com/tweet-result?id=${encodeURIComponent(tweetId)}&lang=en&token=${encodeURIComponent(token)}`,
+      timeoutMs,
+      signal,
+    );
+    const author = cleanUsername(
+      stringValue(data?.user?.screen_name) ||
+      stringValue(data?.user?.username) ||
+      stringValue(data?.screen_name),
+    );
+    const caption = cleanCaption(
+      stringValue(data?.text) ||
+      stringValue(data?.full_text) ||
+      stringValue(data?.tweet?.text),
+    );
+
+    if (!author && !caption) {
+      throw new Error("Twitter syndication returned no useful metadata");
+    }
+
+    return {
+      platform: "twitter",
+      origin: "X",
+      sourceUrl: normalized,
+      author: author ? `@${author}` : null,
+      caption: caption || null,
+      strategy: "twitter-syndication",
+      enriched: true,
+    };
+  } catch (error) {
+    // Cancellation is expected when the other metadata source wins the race.
+    if (!signal.aborted) {
       console.debug("[media-relay] Twitter syndication metadata failed", {
         sourceUrl: debugUrl(normalized),
         error: error instanceof Error ? error.message : String(error),
       });
     }
+    throw error;
   }
+}
 
+async function resolveTwitterHtmlMetadata(
+  normalized: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<SocialPostMetadata> {
   try {
-    const html = await fetchHtml(normalized, resolveTimeoutMs(env));
+    const html = await fetchHtml(normalized, timeoutMs, signal);
     const ogTitle = metaContent(html, "og:title");
     const ogDescription = metaContent(html, "og:description") || metaContent(html, "twitter:description");
     const author = cleanUsername(
       firstMatch(ogTitle, [/@([A-Za-z0-9_]{1,15})/, /\((?:@)?([A-Za-z0-9_]{1,15})\)/]),
     );
     const caption = cleanCaption(ogDescription);
-    if (author || caption) {
-      return {
-        platform: "twitter",
-        origin: "X",
-        sourceUrl: normalized,
-        author: author ? `@${author}` : null,
-        caption: caption || null,
-        strategy: "twitter-html-meta",
-        enriched: true,
-      };
-    }
-  } catch (error) {
-    console.debug("[media-relay] Twitter page metadata failed", {
-      sourceUrl: debugUrl(normalized),
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
 
-  return fallbackMetadata("twitter", normalized, "url-fallback");
+    if (!author && !caption) {
+      throw new Error("Twitter HTML metadata contained no useful metadata");
+    }
+
+    return {
+      platform: "twitter",
+      origin: "X",
+      sourceUrl: normalized,
+      author: author ? `@${author}` : null,
+      caption: caption || null,
+      strategy: "twitter-html-meta",
+      enriched: true,
+    };
+  } catch (error) {
+    // Cancellation is expected when the other metadata source wins the race.
+    if (!signal.aborted) {
+      console.debug("[media-relay] Twitter page metadata failed", {
+        sourceUrl: debugUrl(normalized),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
+  }
 }
 
 async function resolveInstagramMetadata(sourceUrl: string, env: Env): Promise<SocialPostMetadata> {
@@ -367,7 +415,7 @@ function canonicalLookupUrl(platform: SocialPlatform, sourceUrl: string): string
   }
 }
 
-async function fetchHtml(url: string, timeoutMs: number): Promise<string> {
+async function fetchHtml(url: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
   const response = await fetchWithTimeout(url, {
     headers: {
       Accept: "text/html,application/xhtml+xml",
@@ -385,7 +433,7 @@ async function fetchHtml(url: string, timeoutMs: number): Promise<string> {
   return text.slice(0, 2_500_000);
 }
 
-async function fetchJson(url: string, timeoutMs: number): Promise<any> {
+async function fetchJson(url: string, timeoutMs: number, signal?: AbortSignal): Promise<any> {
   const response = await fetchWithTimeout(url, {
     headers: {
       Accept: "application/json,text/plain,*/*",
@@ -402,13 +450,25 @@ async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<Response> {
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(externalSignal?.reason || "social-metadata-aborted");
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      abortFromCaller();
+    } else {
+      externalSignal.addEventListener("abort", abortFromCaller, { once: true });
+    }
+  }
+
   const timer = setTimeout(() => controller.abort("social-metadata-timeout"), timeoutMs);
+
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
