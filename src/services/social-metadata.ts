@@ -42,6 +42,7 @@ const MAX_SOCIAL_CAPTION_TEXT = 820;
 
 const cache = new Map<string, { expiresAt: number; value: SocialPostMetadata }>();
 const inFlight = new Map<string, Promise<SocialPostMetadata>>();
+const SOCIAL_CACHE_PATH_PREFIX = "https://xtelegram-social-cache.invalid/v1/";
 
 /**
  * Enrich Telegram captions for Instagram and Twitter/X server-side.
@@ -125,10 +126,20 @@ export async function resolveSocialPostMetadata(
   if (running) return running;
 
   const promise = (async () => {
+    // The in-memory cache only survives while a Worker isolate is warm.
+    // Cloudflare's edge Cache API lets hot social posts skip the external
+    // metadata request even when the request lands on a different isolate.
+    const edgeCached = await readEdgeSocialCache(key);
+    if (edgeCached) {
+      remember(key, edgeCached);
+      return edgeCached;
+    }
+
     const value = platform === "twitter"
       ? await resolveTwitterMetadata(sourceUrl, env)
       : await resolveInstagramMetadata(sourceUrl, env);
     remember(key, value);
+    void writeEdgeSocialCache(key, value);
     return value;
   })().finally(() => inFlight.delete(key));
 
@@ -555,6 +566,99 @@ function mergeMetadata(
     if (value) result[key] = value.slice(0, 2000);
   }
   return Object.keys(result).length ? result : null;
+}
+
+/**
+ * Reads a previously resolved social metadata record from the edge cache.
+ *
+ * @example
+ * Input: a canonical X post cache key
+ * Output: the cached SocialPostMetadata, or null on a cache miss/error
+ */
+async function readEdgeSocialCache(key: string): Promise<SocialPostMetadata | null> {
+  try {
+    const cache = getEdgeCache();
+    if (!cache) return null;
+
+    const response = await cache.match(createSocialCacheRequest(key));
+    if (!response) return null;
+
+    const value = (await response.json()) as SocialPostMetadata;
+    return isValidSocialMetadata(value) ? value : null;
+  } catch {
+    // Cache availability must never become a dependency for message delivery.
+    return null;
+  }
+}
+
+/**
+ * Stores resolved social metadata at the edge so warm data survives isolate
+ * churn and avoids repeating expensive public-page requests.
+ *
+ * @example
+ * Input: a resolved Instagram post metadata object
+ * Output: the metadata is available to subsequent Worker invocations
+ */
+async function writeEdgeSocialCache(key: string, value: SocialPostMetadata): Promise<void> {
+  try {
+    const response = new Response(JSON.stringify(value), {
+      headers: {
+        "Cache-Control": `public, max-age=${Math.floor(CACHE_TTL_MS / 1000)}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+    });
+
+    const cache = getEdgeCache();
+    if (!cache) return;
+
+    await cache.put(createSocialCacheRequest(key), response);
+  } catch {
+    // A cache write is an optimization only and must never delay delivery.
+  }
+}
+
+/**
+ * Returns Cloudflare's default edge cache while keeping local TypeScript DOM
+ * typings compatible with the Workers-specific `caches.default` extension.
+ *
+ * @example
+ * Input: no arguments
+ * Output: the default edge Cache, or null when the runtime does not expose it
+ */
+function getEdgeCache(): Cache | null {
+  const cacheStorage = globalThis.caches as CacheStorage & { default?: Cache };
+  return cacheStorage.default || null;
+}
+
+/**
+ * Creates a deterministic synthetic cache request without exposing the source
+ * URL as a query parameter or allowing it to influence the actual Worker route.
+ *
+ * @example
+ * Input: `twitter:https://x.com/user/status/123`
+ * Output: a stable synthetic Request used exclusively as a Cache API key
+ */
+function createSocialCacheRequest(key: string): Request {
+  return new Request(`${SOCIAL_CACHE_PATH_PREFIX}${encodeURIComponent(key)}`);
+}
+
+/**
+ * Validates cached metadata before trusting it as a Telegram caption source.
+ *
+ * @example
+ * Input: `{ platform: "twitter", origin: "X", sourceUrl: "...", ... }`
+ * Output: true
+ */
+function isValidSocialMetadata(value: unknown): value is SocialPostMetadata {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<SocialPostMetadata>;
+  return (candidate.platform === "twitter" || candidate.platform === "instagram") &&
+    (candidate.origin === "X" || candidate.origin === "Instagram") &&
+    typeof candidate.sourceUrl === "string" &&
+    (typeof candidate.author === "string" || candidate.author === null) &&
+    (typeof candidate.caption === "string" || candidate.caption === null) &&
+    typeof candidate.strategy === "string" &&
+    typeof candidate.enriched === "boolean";
 }
 
 function remember(key: string, value: SocialPostMetadata): void {

@@ -149,10 +149,10 @@ function resolveFallbackMediaUrl(record: Record<string, unknown>): string | null
 
 export function resolvePayloadCaption(record: Record<string, unknown>): string {
   const explicit = normalizeCaption(record.caption);
-  if (explicit) return explicit;
+  if (explicit && !isGenericMediaLabel(explicit)) return explicit;
 
   const rawTitle = normalizeOptionalText(record.title, 1000);
-  const title = isGenericMediaTitle(rawTitle) ? "" : rawTitle;
+  const title = isGenericMediaLabel(rawTitle) ? "" : rawTitle;
   const text = normalizeOptionalText(record.text, 20_000);
   const sourceUrl = resolveOriginalSourceUrl(record) || resolveFallbackMediaUrl(record);
 
@@ -162,7 +162,7 @@ export function resolvePayloadCaption(record: Record<string, unknown>): string {
   return [title, text, sourceUrl || ""].filter(Boolean).join("\n\n");
 }
 
-function isGenericMediaTitle(value: string): boolean {
+export function isGenericMediaLabel(value: string): boolean {
   const normalized = value
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")

@@ -48,20 +48,28 @@ export async function prepareMedia(
     headers: input.mediaHeaders,
     preferSelfContained: true,
   });
-  // An explicit .m3u8 URL is already enough to select the HLS pipeline. Avoid
-  // an unnecessary HEAD round-trip before the resolver immediately performs the
-  // real playlist GET. This removes one network RTT from the common HLS path.
-  const probe = looksLikeHlsUrl(input.mediaUrl)
+  // URLs with a known media extension or a known X video CDN host cannot be
+  // HLS playlists. Skip the HEAD probe entirely for those inputs. The previous
+  // implementation paid one network RTT just to rediscover information already
+  // encoded in the URL, which was especially noticeable on small media sends.
+  const probe = shouldSkipMediaProbe(input.mediaUrl.href)
     ? {
         url: input.mediaUrl.href,
-        contentType: "application/vnd.apple.mpegurl",
+        contentType: inferContentTypeFromUrl(input.mediaUrl.href),
         contentLength: null,
-        isPlaylist: true,
+        isPlaylist: false,
       }
-    : await resolver.probe(input.mediaUrl, {
-        headers: input.mediaHeaders,
-        signal: options.signal,
-      });
+    : looksLikeHlsUrl(input.mediaUrl)
+      ? {
+          url: input.mediaUrl.href,
+          contentType: "application/vnd.apple.mpegurl",
+          contentLength: null,
+          isPlaylist: true,
+        }
+      : await resolver.probe(input.mediaUrl, {
+          headers: input.mediaHeaders,
+          signal: options.signal,
+        });
 
   if (!probe.isPlaylist && !looksLikeHlsUrl(input.mediaUrl)) {
     const direct: ResolvedDirectFile = {
@@ -178,6 +186,28 @@ export async function prepareMedia(
   };
 }
 
+/**
+ * Determines whether media probing can be skipped safely because the URL itself
+ * already identifies a non-HLS media resource. This avoids an unnecessary HEAD
+ * request while preserving probing for opaque URLs whose content type is unknown.
+ *
+ * @example
+ * Input: `https://cdn.example.com/video.mp4`
+ * Output: true
+ */
+function shouldSkipMediaProbe(mediaUrl: string): boolean {
+  if (looksLikeHlsUrl(mediaUrl)) return false;
+
+  if (shouldPreferWorkerUploadForTelegram({ mediaType: "video" }, mediaUrl)) {
+    return true;
+  }
+
+  const extension = getFileExtension(mediaUrl);
+  return VIDEO_EXTENSIONS.has(extension) ||
+    PHOTO_EXTENSIONS.has(extension) ||
+    AUDIO_EXTENSIONS.has(extension);
+}
+
 export function resolveMaxMediaBytes(rawValue: string | undefined): number {
   const value = Number(rawValue);
 
@@ -188,10 +218,10 @@ export function resolveConcurrency(rawValue: string | undefined): number {
   const value = Number(rawValue);
 
   if (!Number.isFinite(value)) {
-    return 2;
+    return 4;
   }
 
-  return Math.min(4, Math.max(1, Math.floor(value)));
+  return Math.min(6, Math.max(1, Math.floor(value)));
 }
 
 export function resolveHlsMaxMediaBytes(rawValue: string | undefined): number {

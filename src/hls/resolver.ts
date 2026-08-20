@@ -99,21 +99,12 @@ export class HlsResolver {
       throw new Error("HLS resolver did not reach a media playlist");
     }
 
-    const audio = root.selectedVariant
-      ? await this.resolveAudioRendition(
-          root.masterPlaylist,
-          root.selectedVariant,
-          root.variables,
-          options,
-        )
-      : null;
-
     return {
       root: chain[0] || root.playlist,
       chain,
       selectedVariant: root.selectedVariant,
       mediaPlaylist: root.playlist,
-      audio,
+      audio: root.audio,
     };
   }
 
@@ -129,6 +120,7 @@ export class HlsResolver {
     selectedVariant: HlsVariant | null;
     masterPlaylist: HlsMasterPlaylist | null;
     variables: ReadonlyMap<string, string>;
+    audio: HlsResolvedRendition | null;
   }> {
     if (depth > this.maxDepth) {
       throw new Error("Too many nested HLS playlists");
@@ -162,6 +154,7 @@ export class HlsResolver {
         selectedVariant: null,
         masterPlaylist: null,
         variables,
+        audio: null,
       };
     }
 
@@ -172,14 +165,20 @@ export class HlsResolver {
       const candidateChain = [...chain];
 
       try {
-        const nested = await this.resolvePlaylist(
-          variant.uri,
-          depth + 1,
-          new Set(visited),
-          candidateChain,
-          variables,
-          options,
-        );
+        // The selected variant and its audio rendition are independent network
+        // resources. Resolve both at the same time so an HLS master playlist
+        // does not pay the video-playlist RTT and then the audio-playlist RTT.
+        const [nested, audio] = await Promise.all([
+          this.resolvePlaylist(
+            variant.uri,
+            depth + 1,
+            new Set(visited),
+            candidateChain,
+            variables,
+            options,
+          ),
+          this.resolveAudioRendition(parsed, variant, variables, options),
+        ]);
 
         chain.splice(0, chain.length, ...candidateChain);
 
@@ -188,6 +187,7 @@ export class HlsResolver {
           selectedVariant: variant,
           masterPlaylist: parsed,
           variables,
+          audio: audio || nested.audio,
         };
       } catch (error) {
         lastError = error;
