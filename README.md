@@ -1,4 +1,4 @@
-# xtelegram-cf · Telegram Media Relay v2.10.4
+# xtelegram-cf · Telegram Media Relay v2.13.5
 
 > **v2.13.2 resolver caption fix:** generic resolver labels such as `Twitter video` / `Twitter media` are never promoted to Telegram captions. `/resolve-and-send` uses only an explicit caller caption or a real resolver caption; otherwise it falls back to the original post URL. Internally generated captions are marked `captionExplicit=false`, so Twitter/X and Instagram metadata enrichment still runs.
 
@@ -6,6 +6,14 @@
 > **v2.13.1 caption guarantee:** when a request does not provide an explicit `caption`, the relay always includes the best known original/source URL in the generated Telegram caption. It accepts `pageUrl`, `sourceUrl`, `tweetUrl`, `postUrl`, `storyUrl`, `reelUrl`, `tiktokUrl`, `originalUrl`, `permalink`, `shareUrl`, and `canonicalUrl`; if none exists, it falls back to the direct media URL.
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
+
+## Performance da v2.13.5
+
+- Social metadata uses a two-level cache: warm-isolate memory first, then Cloudflare edge Cache API, before any X/Instagram network request.
+- X metadata still races syndication and public HTML; duplicate concurrent requests share one in-flight Promise.
+- Media URLs with known extensions or known X video CDN hosts skip the HLS `HEAD` probe.
+- HLS video variants and selected audio playlists resolve concurrently; segment downloads remain concurrent, with default segment concurrency set to 4 and a configurable maximum of 6.
+- Cache failures never affect delivery; the relay falls back to the existing network resolver automatically.
 
 ## Correção da v2.10.4 · rastreio seguro de ponta a ponta
 
