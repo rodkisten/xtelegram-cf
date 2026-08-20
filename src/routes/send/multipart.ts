@@ -31,6 +31,7 @@ import {
   normalizeParseMode,
   normalizeTelegramChannels,
   normalizeRoutingUsernames,
+  isGenericMediaLabel,
   resolvePayloadCaption,
   resolveOriginalSourceUrl,
 } from "../../validation/common";
@@ -274,12 +275,13 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   try {
     relayDebug(env, traceId, "multipart.social-metadata.started", {});
     const baseMetadata = normalizeMetadata(payload.metadata);
+    const payloadCaption = normalizeCaption(payload.caption);
     const socialContent = await resolveSocialDeliveryContent({
       provider: payload.provider || null,
       sourceUrl: resolveOriginalSourceUrl(payload as Record<string, unknown>),
       pageUrl: payload.pageUrl || null,
       caption: resolvePayloadCaption(payload as Record<string, unknown>),
-      captionExplicit: Boolean(normalizeCaption(payload.caption)),
+      captionExplicit: Boolean(payloadCaption && !isGenericMediaLabel(payloadCaption)),
       parseMode,
       metadata: baseMetadata,
     }, env);
