@@ -23,7 +23,7 @@ persist = true
 head_sampling_rate = 1
 
 [vars]
-MAX_MEDIA_BYTES = "96000000"
+MAX_MEDIA_BYTES = "32000000"
 HLS_CONCURRENCY = "4"
 DELIVERY_CLAIM_TTL_SECONDS = "1800"
 RELAY_DEBUG = "true"
