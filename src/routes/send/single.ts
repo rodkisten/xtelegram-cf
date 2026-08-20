@@ -118,39 +118,103 @@ export async function handleSingleSend(
     const hlsMaxMediaBytes = resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES);
     let prepared: PreparedMedia;
 
+    const prepareStartedAt = Date.now();
+    const socialStartedAt = Date.now();
+
+    // Media preparation and social metadata enrichment have no data dependency:
+    // both only need the validated input. Start them together so network latency
+    // is overlapped instead of paying for two sequential pipelines.
+    relayDebug(env, traceId, "single.prepare-media.started", {
+      mediaUrl: debugUrl(input.mediaUrl.href),
+      maxMediaBytes,
+      hlsMaxMediaBytes,
+      concurrency,
+    });
+    relayDebug(env, traceId, "single.social-metadata.started", {
+      provider: input.provider || null,
+      hasCaption: Boolean(input.caption),
+    });
+
+    const preparePromise = prepareMedia(input, {
+      maxMediaBytes,
+      hlsMaxMediaBytes,
+      concurrency,
+      signal: request.signal,
+    });
+
+    const socialPromise = resolveSocialDeliveryContent({
+      provider: input.provider,
+      sourceUrl: input.sourceUrl,
+      pageUrl: input.pageUrl,
+      caption: input.caption,
+      captionExplicit: input.captionExplicit,
+      parseMode: input.parseMode,
+      metadata: input.metadata,
+    }, env);
+
+    let socialContent: Awaited<ReturnType<typeof resolveSocialDeliveryContent>>;
+
     try {
-      relayDebug(env, traceId, "single.prepare-media.started", {
-        mediaUrl: debugUrl(input.mediaUrl.href),
-        maxMediaBytes,
-        hlsMaxMediaBytes,
-        concurrency,
+      [prepared, socialContent] = await Promise.all([preparePromise, socialPromise]);
+      relayDebug(env, traceId, "single.prepare-media.succeeded", {
+        durationMs: Date.now() - prepareStartedAt,
       });
-      prepared = await prepareMedia(input, {
-        maxMediaBytes,
-        hlsMaxMediaBytes,
-        concurrency,
-        signal: request.signal,
+      relayDebug(env, traceId, "single.social-metadata.completed", {
+        durationMs: Date.now() - socialStartedAt,
+        parseMode: socialContent.parseMode || null,
+        captionLength: socialContent.caption.length,
+        metadataKeys: Object.keys(socialContent.metadata || {}).slice(0, 24),
+        socialMetadataStrategy: socialContent.social?.strategy || null,
       });
     } catch (error) {
-      relayDebug(env, traceId, "single.prepare-media.failed", {
-        mediaUrl: debugUrl(input.mediaUrl.href),
-        error: debugError(error),
-      });
+      // Promise.all reports the first rejection. The error is classified below
+      // using the independently observed promise states so callers retain the
+      // existing stage-specific API instead of receiving a generic failure.
+      const [prepareResult, socialResult] = await Promise.allSettled([preparePromise, socialPromise]);
 
-      return json(
-        {
-          ok: false,
-          error: getErrorMessage(error),
-          stage: "prepare-media",
-          source: {
-            inputUrl: input.mediaUrl.href,
-            sourceUrl: input.sourceUrl,
+      if (prepareResult.status === "rejected") {
+        relayDebug(env, traceId, "single.prepare-media.failed", {
+          mediaUrl: debugUrl(input.mediaUrl.href),
+          durationMs: Date.now() - prepareStartedAt,
+          error: debugError(prepareResult.reason),
+        });
+
+        return json(
+          {
+            ok: false,
+            error: getErrorMessage(prepareResult.reason),
+            stage: "prepare-media",
+            source: {
+              inputUrl: input.mediaUrl.href,
+              sourceUrl: input.sourceUrl,
+            },
+            channels: chatIds,
+            metadata: input.metadata,
           },
-          channels: chatIds,
+          422,
+        );
+      }
+
+      if (socialResult.status === "rejected") {
+        relayDebug(env, traceId, "single.social-metadata.failed", {
+          durationMs: Date.now() - socialStartedAt,
+          error: debugError(socialResult.reason),
+        });
+        // Social enrichment normally handles provider failures internally, but
+        // preserve a deterministic fallback if a future implementation throws.
+        socialContent = {
+          caption: input.sourceUrl || input.mediaUrl.href,
+          parseMode: null,
           metadata: input.metadata,
-        },
-        422,
-      );
+          social: null,
+        };
+      } else {
+        socialContent = socialResult.value;
+      }
+
+      // A rejected preparation returns above, so the remaining branch is
+      // necessarily fulfilled and TypeScript can safely narrow the result.
+      prepared = prepareResult.value;
     }
 
     const mediaType =
@@ -173,27 +237,6 @@ export async function handleSingleSend(
       hls: prepared.type === "file" ? false : prepared.hls,
       remuxed: prepared.type === "file" ? false : prepared.remuxed,
       channelsToSend: plan.channelsToSend.length,
-    });
-
-    relayDebug(env, traceId, "single.social-metadata.started", {
-      provider: input.provider || null,
-      hasCaption: Boolean(input.caption),
-    });
-    const socialContent = await resolveSocialDeliveryContent({
-      provider: input.provider,
-      sourceUrl: input.sourceUrl,
-      pageUrl: input.pageUrl,
-      caption: input.caption,
-      captionExplicit: input.captionExplicit,
-      parseMode: input.parseMode,
-      metadata: input.metadata,
-    }, env);
-
-    relayDebug(env, traceId, "single.social-metadata.completed", {
-      parseMode: socialContent.parseMode || null,
-      captionLength: socialContent.caption.length,
-      metadataKeys: Object.keys(socialContent.metadata || {}).slice(0, 24),
-      socialMetadataStrategy: socialContent.social?.strategy || null,
     });
 
     // Persist the resolved media independently from Telegram. If delivery fails
