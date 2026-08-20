@@ -1,4 +1,4 @@
-# xtelegram-cf · Telegram Media Relay v2.13.5
+# xtelegram-cf · Telegram Media Relay v2.13.6
 
 > **v2.13.2 resolver caption fix:** generic resolver labels such as `Twitter video` / `Twitter media` are never promoted to Telegram captions. `/resolve-and-send` uses only an explicit caller caption or a real resolver caption; otherwise it falls back to the original post URL. Internally generated captions are marked `captionExplicit=false`, so Twitter/X and Instagram metadata enrichment still runs.
 
@@ -6,6 +6,15 @@
 > **v2.13.1 caption guarantee:** when a request does not provide an explicit `caption`, the relay always includes the best known original/source URL in the generated Telegram caption. It accepts `pageUrl`, `sourceUrl`, `tweetUrl`, `postUrl`, `storyUrl`, `reelUrl`, `tiktokUrl`, `originalUrl`, `permalink`, `shareUrl`, and `canonicalUrl`; if none exists, it falls back to the direct media URL.
 
 Cloudflare Worker em TypeScript para resolver, preparar e enviar vídeos, fotos, áudio e carrosséis para Telegram, agora com **Cloudflare D1/SQLite**, deduplicação por mídia, histórico por canal, envio parcial, `force=true`, consultas e batch de links.
+
+## Proteção de aspect ratio da v2.13.6
+
+- **Vídeos são tratados como Worker-owned uploads sempre que couberem no limite de mídia.** O relay não deixa o Telegram buscar uma versão remota quando pode controlar o arquivo e seus metadados.
+- O Worker lê `width` e `height` reais do container MP4/MOV antes do `sendVideo` e também reconhece dimensões de WebM.
+- Rotação MP4 (`90`, `180` e `270`) é considerada na dimensão de exibição, evitando trocar portrait/landscape ou comprimir a imagem verticalmente.
+- `sendVideo` recebe explicitamente `width`, `height` e `duration` quando disponíveis. O mesmo contrato é usado em `sendMediaGroup` e nos uploads multipart.
+- Se o Worker recebeu um vídeo mas não conseguiu determinar suas dimensões reais, **ele se recusa a enviá-lo como vídeo** em vez de mandar metadata inventada e correr o risco de o Telegram espremê-lo.
+- Não existe fallback para `width=1920`, `height=1080` ou qualquer outra proporção arbitrária. Dimensões são sempre derivadas do arquivo ou da resolução declarada pela variante HLS selecionada.
 
 ## Performance da v2.13.5
 

@@ -1,6 +1,7 @@
 import { HlsDownloader } from "./hls/downloader";
 import { HlsRemuxer } from "./hls/remuxer";
 import { HlsResolver, looksLikeHlsUrl } from "./hls/resolver";
+import { parseVideoDimensions } from "./media/video-metadata";
 import { fetchPublic, getBaseContentType, getFileExtension } from "./lib/http";
 import type {
   MediaType,
@@ -10,8 +11,8 @@ import type {
 } from "./types";
 
 const TELEGRAM_REMOTE_URL_LIMIT = 20_000_000;
-const DEFAULT_MAX_MEDIA_BYTES = 100_000_000; // it was 49
-const HARD_MAX_MEDIA_BYTES = 100_000_000;
+const DEFAULT_MAX_MEDIA_BYTES = 49_000_000;
+const HARD_MAX_MEDIA_BYTES = 49_000_000;
 const DEFAULT_HLS_MAX_MEDIA_BYTES = 16_000_000;
 const HARD_HLS_MAX_MEDIA_BYTES = 24_000_000;
 
@@ -48,10 +49,9 @@ export async function prepareMedia(
     headers: input.mediaHeaders,
     preferSelfContained: true,
   });
-  // URLs with a known media extension or a known X video CDN host cannot be
-  // HLS playlists. Skip the HEAD probe entirely for those inputs. The previous
-  // implementation paid one network RTT just to rediscover information already
-  // encoded in the URL, which was especially noticeable on small media sends.
+  // URLs with a known media type cannot be HLS playlists. Skip the HEAD probe
+  // entirely for those inputs. The previous implementation paid one network RTT
+  // just to rediscover information already encoded in the URL.
   const probe = shouldSkipMediaProbe(input.mediaUrl.href)
     ? {
         url: input.mediaUrl.href,
@@ -80,9 +80,13 @@ export async function prepareMedia(
       selectedBitrate: null,
       selectedResolution: null,
       playlistDepth: 0,
+      videoMetadata: null,
     };
-    const isPreferredTwitterVideo = shouldPreferWorkerUploadForTelegram(input, direct.url);
-    if (isPreferredTwitterVideo && direct.contentLength == null) {
+    const inferredMediaType =
+      input.mediaType || inferTelegramMediaType(direct.url, direct.contentType);
+    const isVideo = inferredMediaType === "video";
+
+    if (isVideo && direct.contentLength == null) {
       const rangedLength = await probeContentLengthByRange(
         direct.url,
         input.mediaHeaders,
@@ -90,16 +94,10 @@ export async function prepareMedia(
       );
       if (rangedLength != null) direct.contentLength = rangedLength;
     }
-    const preferWorkerUpload =
-      !options.forceUpload &&
-      direct.contentLength != null &&
-      direct.contentLength > 0 &&
-      direct.contentLength <= maxMediaBytes &&
-      isPreferredTwitterVideo;
 
     if (
       !options.forceUpload &&
-      !preferWorkerUpload &&
+      !isVideo &&
       (direct.contentLength == null ||
         direct.contentLength <= TELEGRAM_REMOTE_URL_LIMIT)
     ) {
@@ -118,18 +116,29 @@ export async function prepareMedia(
       maxMediaBytes,
       options.signal,
     );
+    const mediaType =
+      input.mediaType || inferTelegramMediaType(direct.url, direct.contentType);
+    const videoMetadata =
+      mediaType === "video"
+        ? parseVideoDimensions(bytes, direct.contentType)
+        : null;
+
+    if (mediaType === "video" && !videoMetadata) {
+      throw new Error(
+        "Unable to determine the real video dimensions. Refusing to send the video without width/height metadata to prevent Telegram aspect-ratio distortion.",
+      );
+    }
 
     return {
       type: "upload",
       bytes,
       filename: filenameFromUrl(direct.url),
       contentType: direct.contentType || "application/octet-stream",
-      mediaType:
-        input.mediaType ||
-        inferTelegramMediaType(direct.url, direct.contentType),
+      mediaType,
       selectedBitrate: null,
       selectedResolution: null,
       playlistDepth: 0,
+      videoMetadata,
       sourceUrl: direct.url,
       hls: false,
       segmentCount: 1,
@@ -161,19 +170,38 @@ export async function prepareMedia(
   }
 
   const variant = resolved.selectedVariant;
+  const parsedVideoMetadata = parseVideoDimensions(remuxed.bytes, remuxed.contentType);
+  const videoMetadata =
+    parsedVideoMetadata ||
+    (variant?.resolution
+      ? {
+          width: variant.resolution.width,
+          height: variant.resolution.height,
+          durationSeconds: null,
+          rotation: 0 as const,
+        }
+      : null);
+
+  const preparedMediaType = input.mediaType || remuxed.mediaType;
+  if (preparedMediaType === "video" && !videoMetadata) {
+    throw new Error(
+      "Unable to determine the real HLS video dimensions. Refusing to send the video without width/height metadata to prevent Telegram aspect-ratio distortion.",
+    );
+  }
 
   return {
     type: "upload",
     bytes: remuxed.bytes,
     filename: remuxed.filename,
     contentType: remuxed.contentType,
-    mediaType: input.mediaType || remuxed.mediaType,
+    mediaType: preparedMediaType,
     selectedBitrate:
       variant?.averageBandwidth ||
       variant?.bandwidth ||
       null,
     selectedResolution: variant?.resolution?.label || null,
     playlistDepth: Math.max(0, resolved.chain.length - 1),
+    videoMetadata,
     sourceUrl: resolved.mediaPlaylist.url,
     hls: true,
     segmentCount:
@@ -266,26 +294,20 @@ export function inferTelegramMediaType(
 }
 
 /**
- * Telegram's server-side URL fetch occasionally chooses an incompatible
- * rendition for X's signed video CDN. When the Worker can prove the file fits
- * its upload ceiling, forward the exact bytes with the required X Referer
- * instead. Photos and every other provider remain URL-first.
+ * Forces Worker-owned uploads for videos whenever the configured size limit
+ * permits it. This is intentionally provider-agnostic: the Worker must inspect
+ * the actual container dimensions and send those dimensions to Telegram instead
+ * of allowing a remote fetch to guess the media geometry.
+ *
+ * @example
+ * shouldPreferWorkerUploadForTelegram({ mediaType: "video" }, "https://cdn.example/video.mp4");
+ * // true
  */
 export function shouldPreferWorkerUploadForTelegram(
   input: Pick<RelayInput, "mediaType">,
-  mediaUrl: string,
+  _mediaUrl: string,
 ): boolean {
-  if (input.mediaType !== "video") return false;
-
-  try {
-    const url = new URL(mediaUrl);
-    const hostname = url.hostname.toLowerCase();
-    return hostname === "video.twimg.com" ||
-      (hostname.endsWith(".twimg.com") &&
-        /\/(?:amplify_video|ext_tw_video|tweet_video|video)\//i.test(url.pathname));
-  } catch {
-    return false;
-  }
+  return input.mediaType === "video";
 }
 
 function clampHlsMaxMediaBytes(value?: number): number {

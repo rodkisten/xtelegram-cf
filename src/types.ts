@@ -90,6 +90,17 @@ export interface TelegramMessage {
   };
 }
 
+export interface VideoMetadata {
+  /** Display width in pixels after applying container rotation metadata. */
+  width: number;
+  /** Display height in pixels after applying container rotation metadata. */
+  height: number;
+  /** Duration in seconds when available from the container. */
+  durationSeconds: number | null;
+  /** Container rotation metadata normalized to a quarter-turn. */
+  rotation: 0 | 90 | 180 | 270;
+}
+
 export interface ResolvedDirectFile {
   type: "file";
   url: string;
@@ -98,6 +109,7 @@ export interface ResolvedDirectFile {
   selectedBitrate: number | null;
   selectedResolution: string | null;
   playlistDepth: number;
+  videoMetadata: VideoMetadata | null;
 }
 
 export interface PreparedUpload {
@@ -109,6 +121,7 @@ export interface PreparedUpload {
   selectedBitrate: number | null;
   selectedResolution: string | null;
   playlistDepth: number;
+  videoMetadata: VideoMetadata | null;
   sourceUrl: string;
   hls: boolean;
   segmentCount: number;

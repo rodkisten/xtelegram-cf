@@ -80,6 +80,7 @@ interface PreparedAlbumUpload {
   file: Blob;
   filename: string;
   contentType: string;
+  videoMetadata: PreparedUpload["videoMetadata"];
 }
 
 function albumItemToRelayInput(
@@ -220,6 +221,7 @@ async function prepareAlbumUploads(
       file: new Blob([toBlobArrayBuffer(prepared.bytes)], { type: prepared.contentType }),
       filename: albumUploadFilename(prepared, item, index),
       contentType: prepared.contentType,
+      videoMetadata: prepared.videoMetadata,
     });
   }
 
@@ -255,6 +257,7 @@ async function sendPreparedAlbumItemsIndividually(
       file: upload.file,
       filename: upload.filename,
       contentType: upload.contentType,
+      videoMetadata: upload.videoMetadata,
       mediaType: upload.mediaType,
       caption: itemCaption(input, item, index, batchIndex),
       parseMode: itemParseMode(input, item, index, batchIndex),
@@ -268,7 +271,9 @@ async function sendPreparedAlbumItemsIndividually(
         hadExternalSideEffect: sent.length > 0,
         attemptCount: index + 1,
         safeToTryUrls:
-          sent.length === 0 && [400, 413, 415].includes(Number(result.httpStatus || 0)),
+          !batch.some((entry) => entry.mediaType === "video") &&
+          sent.length === 0 &&
+          [400, 413, 415].includes(Number(result.httpStatus || 0)),
       };
     }
     if (result.result) sent.push(result.result);
@@ -321,7 +326,9 @@ async function sendAlbumItemsIndividually(
         },
         hadExternalSideEffect: sent.length > 0,
         attemptCount: index,
-        safeToTryUrls: sent.length === 0,
+        safeToTryUrls:
+          !batch.some((entry) => entry.mediaType === "video") &&
+          sent.length === 0,
       };
     }
 
@@ -332,6 +339,7 @@ async function sendAlbumItemsIndividually(
       file: new Blob([toBlobArrayBuffer(prepared.bytes)], { type: prepared.contentType }),
       filename: albumUploadFilename(prepared, item, index),
       contentType: prepared.contentType,
+      videoMetadata: prepared.videoMetadata,
       mediaType: item.mediaType,
       caption: itemCaption(input, item, index, batchIndex),
       parseMode: itemParseMode(input, item, index, batchIndex),
@@ -436,9 +444,9 @@ async function sendAlbumBatch(
   let preferredUploadAttempted = false;
   let preferredUploadError: string | null = null;
 
-  // X videos are a special case: Telegram's remote fetch has no way to carry
-  // the X Referer and may rematerialize an incompatible rendition. Preserve
-  // the native album by sending the same ordered bytes as attach:// first.
+  // Videos are intentionally Worker-owned whenever possible. This gives the
+  // relay control over the exact bytes and the real width/height sent to
+  // Telegram, instead of allowing a remote fetch to choose media geometry.
   if (batchPrefersWorkerUpload(input, batch)) {
     try {
       const uploads = await prepareAlbumUploads(input, batch, env);
@@ -464,26 +472,49 @@ async function sendAlbumBatch(
         };
       }
 
-      // Do not retry an ambiguous upload result with URL delivery; it could
-      // create a duplicate album. Definitive Bot API rejections are safe to
-      // continue through the existing URL → upload fallback tree.
+      // Do not retry an ambiguous upload result. A network/5xx response may
+      // already have reached Telegram and could create a duplicate album.
       if (!shouldRetryAlbumAsUpload(uploaded)) {
         return {
           result: uploaded,
           transport: "multipart-upload",
           fallbackAttempted: false,
           orderedFallbackAttempted: false,
-          fallbackError: uploaded.description || "Telegram rejected the preferred X upload",
+          fallbackError: uploaded.description || "Telegram rejected the video upload",
           hadExternalSideEffect: false,
           attemptCount: 1,
         };
       }
-      preferredUploadError = uploaded.description || "Telegram rejected the preferred X upload";
+      preferredUploadError = uploaded.description || "Telegram rejected the video upload";
     } catch (error) {
-      // Preparation has no Telegram side effect. Keep URL-first as the safe
-      // escape hatch for a file too large for Worker memory/upload limits.
       preferredUploadError = getErrorMessage(error);
     }
+
+    // A video must never fall back to a remote URL after the Worker has tried
+    // to establish exact media geometry. Retry only through the ordered upload
+    // path, which reuses the same metadata-aware sendVideo implementation.
+    const ordered = await sendAlbumItemsIndividually(
+      input,
+      batch,
+      env,
+      chatId,
+      messageThreadId,
+      batchIndex,
+    );
+    return {
+      result: appendFallbackContext(
+        ordered.result,
+        `Worker video upload fallback: ${preferredUploadError || "preferred album upload failed"}.`,
+      ),
+      transport: "ordered-single-upload",
+      fallbackAttempted: true,
+      orderedFallbackAttempted: true,
+      fallbackError: ordered.result.ok
+        ? null
+        : ordered.result.description || "Ordered video upload fallback failed",
+      hadExternalSideEffect: ordered.hadExternalSideEffect,
+      attemptCount: (preferredUploadAttempted ? 1 : 0) + ordered.attemptCount + 1,
+    };
   }
 
   const priorAttemptCount = preferredUploadAttempted ? 1 : 0;

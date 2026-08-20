@@ -44,6 +44,7 @@ export async function sendPreparedMediaToChats(options: {
               mediaType: options.mediaType,
               caption: options.caption,
               parseMode: options.parseMode,
+              videoMetadata: options.prepared.videoMetadata,
             })
           : await sendTelegramUpload({
               botToken: options.botToken,
@@ -59,6 +60,7 @@ export async function sendPreparedMediaToChats(options: {
               mediaType: options.mediaType,
               caption: options.caption,
               parseMode: options.parseMode,
+              videoMetadata: options.prepared.videoMetadata,
             });
 
       return { requestedChatId: destination.key, result };
@@ -124,6 +126,9 @@ export function buildProcessingResult(prepared: PreparedMedia) {
         filename: prepared.filename,
         contentType: prepared.contentType,
         size: prepared.bytes.byteLength,
+        videoWidth: prepared.videoMetadata?.width ?? null,
+        videoHeight: prepared.videoMetadata?.height ?? null,
+        videoRotation: prepared.videoMetadata?.rotation ?? null,
         hls: prepared.hls,
         segmentCount: prepared.segmentCount,
         encrypted: prepared.encrypted,

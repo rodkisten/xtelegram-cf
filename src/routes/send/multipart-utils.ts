@@ -1,5 +1,5 @@
 import type { MediaIdentityInput } from "../../db";
-import type { MediaType } from "../../types";
+import type { MediaType, VideoMetadata } from "../../types";
 
 export interface MultipartPayload {
   channel?: string | number;
@@ -37,6 +37,7 @@ export interface UploadedFileRecord {
   field: string;
   file: File;
   mediaType: MediaType;
+  videoMetadata?: VideoMetadata | null;
 }
 
 export function collectUploadedFiles(
