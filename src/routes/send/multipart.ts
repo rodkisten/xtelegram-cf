@@ -8,6 +8,7 @@ import {
   relayDebug,
   relayTraceId,
 } from "../../lib/debug";
+import { parseVideoDimensions } from "../../media/video-metadata";
 import { resolveMaxMediaBytes } from "../../media";
 import {
   parseTelegramDestination,
@@ -23,7 +24,7 @@ import {
 import { getTelegramMethodName } from "../../services/telegram-delivery";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import { sendTelegramUpload } from "../../telegram";
-import type { Env, MediaType, TelegramApiResult, TelegramMessage } from "../../types";
+import type { Env, MediaType, TelegramApiResult, TelegramMessage, VideoMetadata } from "../../types";
 import {
   normalizeCaption,
   normalizeMediaType,
@@ -52,6 +53,7 @@ interface MultipartDelivery {
   contentType: string;
   size: number;
   mediaType: MediaType;
+  videoMetadata: VideoMetadata | null;
   requestedChatId: string;
   result: TelegramApiResult<TelegramMessage>;
 }
@@ -179,6 +181,25 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   }
 
   const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+  for (const uploaded of uploadedFiles) {
+    uploaded.videoMetadata = null;
+    if (uploaded.mediaType !== "video") continue;
+
+    const bytes = new Uint8Array(await uploaded.file.arrayBuffer());
+    uploaded.videoMetadata = parseVideoDimensions(bytes, uploaded.file.type);
+    if (!uploaded.videoMetadata) {
+      return json(
+        {
+          ok: false,
+          error:
+            `Unable to determine the real dimensions of uploaded video ${uploaded.file.name || uploaded.field}. Refusing to send it without width/height metadata to prevent Telegram aspect-ratio distortion.`,
+          stage: "video-metadata",
+        },
+        422,
+      );
+    }
+  }
+
   const oversized = uploadedFiles.filter(({ file }) => file.size > maxMediaBytes);
   if (oversized.length) {
     relayDebug(env, traceId, "multipart.file-too-large", {
@@ -317,6 +338,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
             filename: sanitizeUploadedFilename(uploaded.file.name, fileIndex),
             contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
             mediaType: uploaded.mediaType,
+            videoMetadata: uploaded.videoMetadata,
             caption: fileIndex === 0 ? caption : "",
             parseMode: fileIndex === 0 ? socialContent.parseMode : null,
           });
@@ -334,6 +356,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
           contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
           size: uploaded.file.size,
           mediaType: uploaded.mediaType,
+          videoMetadata: uploaded.videoMetadata || null,
           requestedChatId: destination.key,
           result,
         });
