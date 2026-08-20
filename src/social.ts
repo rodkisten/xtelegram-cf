@@ -92,8 +92,10 @@ export async function resolveSocialMedia(
     ? [{ id: "zoraahub", run: () => resolveZoraaHub(canonicalSourceUrl) }]
     : source === "twitter"
       ? [
-          { id: "twirrl", run: () => resolveTwirrl(canonicalSourceUrl, env.TWIRRL_VERSION_TOKEN) },
+          
           { id: "dtwitter", run: () => resolveDTwitter(canonicalSourceUrl) },
+          { id: "twirrl", run: () => resolveTwirrl(canonicalSourceUrl, env.TWIRRL_VERSION_TOKEN) },
+
         ]
       : [{ id: "dtiktok", run: () => resolveDTikTok(canonicalSourceUrl) }];
 
