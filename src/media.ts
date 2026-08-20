@@ -48,10 +48,20 @@ export async function prepareMedia(
     headers: input.mediaHeaders,
     preferSelfContained: true,
   });
-  const probe = await resolver.probe(input.mediaUrl, {
-    headers: input.mediaHeaders,
-    signal: options.signal,
-  });
+  // An explicit .m3u8 URL is already enough to select the HLS pipeline. Avoid
+  // an unnecessary HEAD round-trip before the resolver immediately performs the
+  // real playlist GET. This removes one network RTT from the common HLS path.
+  const probe = looksLikeHlsUrl(input.mediaUrl)
+    ? {
+        url: input.mediaUrl.href,
+        contentType: "application/vnd.apple.mpegurl",
+        contentLength: null,
+        isPlaylist: true,
+      }
+    : await resolver.probe(input.mediaUrl, {
+        headers: input.mediaHeaders,
+        signal: options.signal,
+      });
 
   if (!probe.isPlaylist && !looksLikeHlsUrl(input.mediaUrl)) {
     const direct: ResolvedDirectFile = {
