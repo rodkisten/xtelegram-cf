@@ -41,6 +41,7 @@ import type {
   TelegramApiResult,
   TelegramMessage,
 } from "../../types";
+import { isGenericMediaLabel } from "../../validation/common";
 import { resolveMultipartMaxTotalBytes } from "./multipart-utils";
 
 type AlbumTransport =
@@ -93,7 +94,7 @@ function albumItemToRelayInput(
     title: input.title,
     text: input.text,
     caption: item.caption || input.caption,
-    captionExplicit: Boolean(item.caption) || input.captionExplicit,
+    captionExplicit: Boolean(item.caption && !isGenericMediaLabel(item.caption)) || input.captionExplicit,
     parseMode: item.parseMode ?? input.parseMode,
     mediaType: item.mediaType,
     mediaHeaders: item.mediaHeaders,
