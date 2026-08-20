@@ -1,6 +1,7 @@
 import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import { mapWithConcurrency } from "../../lib/concurrency";
 import {
   debugChannelSummary,
   debugError,
@@ -750,16 +751,18 @@ export async function handleJsonAlbumSend(
       metadata: socialContent.metadata,
     };
     const batches = chunkTelegramAlbum(deliveryInput.items);
-    const deliveries: TelegramAlbumBatchDelivery[] = [];
-
     relayDebug(env, traceId, "album.telegram.started", {
       channelCount: plan.channelsToSend.length,
       batchCount: batches.length,
       mixedPhotoVideo: isMixedPhotoVideoBatch(deliveryInput.items),
     });
 
-    for (const chatId of plan.channelsToSend) {
+    // Album chunks must remain ordered within a channel, but Telegram channels
+    // are independent. Process a small number of channels concurrently so a
+    // slow destination does not serialize every other destination.
+    const processAlbumChannel = async (chatId: string): Promise<TelegramAlbumBatchDelivery[]> => {
       let itemOffset = 0;
+      const channelDeliveries: TelegramAlbumBatchDelivery[] = [];
 
       for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex]!;
@@ -782,7 +785,7 @@ export async function handleJsonAlbumSend(
           error: attempt.result.ok ? null : attempt.result.description || null,
         });
 
-        deliveries.push({
+        channelDeliveries.push({
           requestedChatId: chatId,
           batchIndex,
           itemOffset,
@@ -801,7 +804,17 @@ export async function handleJsonAlbumSend(
         // chunks that cannot be represented as one successful channel delivery.
         if (!attempt.result.ok) break;
       }
-    }
+
+      return channelDeliveries;
+    };
+
+    const channelConcurrency = Math.min(2, plan.channelsToSend.length);
+    const deliveriesByChannel = await mapWithConcurrency(
+      plan.channelsToSend,
+      channelConcurrency,
+      processAlbumChannel,
+    );
+    const deliveries = deliveriesByChannel.flat();
 
     const formatted = deliveries.map((delivery) => ({
       requestedChatId: delivery.requestedChatId,
