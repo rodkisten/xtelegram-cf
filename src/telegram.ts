@@ -5,7 +5,10 @@ import type {
   ParseMode,
   TelegramApiResult,
   TelegramMessage,
+  VideoMetadata,
 } from "./types";
+
+const MAX_TELEGRAM_VIDEO_DIMENSION = 65_535;
 
 interface TelegramSendBase {
   botToken: string;
@@ -14,11 +17,13 @@ interface TelegramSendBase {
   caption: string;
   parseMode: ParseMode | null;
   mediaType: MediaType;
+  videoMetadata?: VideoMetadata | null;
 }
 
 export interface TelegramAlbumUrlItem {
   mediaUrl: string;
   mediaType: AlbumMediaType;
+  videoMetadata?: VideoMetadata | null;
   caption?: string;
   parseMode?: ParseMode | null;
 }
@@ -27,6 +32,7 @@ export interface TelegramAlbumUploadItem {
   mediaType: AlbumMediaType;
   file: Blob;
   filename: string;
+  videoMetadata?: VideoMetadata | null;
   caption?: string;
   parseMode?: ParseMode | null;
 }
@@ -45,6 +51,7 @@ export async function sendTelegramUrl(
 
   if (options.mediaType === "video") {
     payload.supports_streaming = true;
+    appendVideoMetadata(payload, options.videoMetadata);
   }
 
   if (options.caption) {
@@ -79,6 +86,7 @@ export async function sendTelegramUpload(
 
   if (options.mediaType === "video") {
     form.set("supports_streaming", "true");
+    appendVideoMetadata(form, options.videoMetadata);
   }
 
   if (options.caption) {
@@ -118,6 +126,7 @@ export async function sendTelegramMediaGroupUrl(options: {
 
     if (item.mediaType === "video") {
       entry.supports_streaming = true;
+      appendVideoMetadata(entry, item.videoMetadata);
     }
 
     const caption = item.caption || (index === 0 ? options.caption : "");
@@ -182,6 +191,7 @@ export async function sendTelegramMediaGroupUpload(options: {
 
     if (item.mediaType === "video") {
       entry.supports_streaming = true;
+      appendVideoMetadata(entry, item.videoMetadata);
     }
 
     const caption = item.caption || (index === 0 ? options.caption : "");
@@ -239,6 +249,54 @@ export function validateEnvironment(env: Env): string | null {
   }
 
   return null;
+}
+
+/**
+ * Adds only validated video metadata to a Telegram payload. Telegram will use
+ * these values for the media preview and player geometry instead of guessing
+ * dimensions that can squash a portrait or rotated source.
+ *
+ * @example
+ * const payload: Record<string, unknown> = {};
+ * appendVideoMetadata(payload, {
+ *   width: 1080,
+ *   height: 1920,
+ *   durationSeconds: 12,
+ *   rotation: 0,
+ * });
+ */
+function appendVideoMetadata(
+  target: Record<string, unknown> | FormData,
+  metadata: VideoMetadata | null | undefined,
+): void {
+  if (!metadata) return;
+  if (!isValidVideoDimension(metadata.width) || !isValidVideoDimension(metadata.height)) {
+    return;
+  }
+
+  const values = {
+    width: String(Math.round(metadata.width)),
+    height: String(Math.round(metadata.height)),
+    duration:
+      metadata.durationSeconds != null && Number.isFinite(metadata.durationSeconds)
+        ? String(Math.max(0, Math.round(metadata.durationSeconds)))
+        : null,
+  };
+
+  if (target instanceof FormData) {
+    target.set("width", values.width);
+    target.set("height", values.height);
+    if (values.duration) target.set("duration", values.duration);
+    return;
+  }
+
+  target.width = Number(values.width);
+  target.height = Number(values.height);
+  if (values.duration) target.duration = Number(values.duration);
+}
+
+function isValidVideoDimension(value: number): boolean {
+  return Number.isFinite(value) && value > 0 && value <= MAX_TELEGRAM_VIDEO_DIMENSION;
 }
 
 function getTelegramMethod(mediaType: MediaType): {
