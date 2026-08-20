@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import { getErrorMessage } from "../lib/errors";
 import { parseTelegramDestination } from "./channels";
+import { mapWithConcurrency } from "../lib/concurrency";
 
 export interface TelegramDelivery {
   requestedChatId: string;
@@ -22,22 +23,18 @@ export async function sendPreparedMediaToChats(options: {
   caption: string;
   parseMode: ParseMode | null;
 }): Promise<TelegramDelivery[]> {
-  const deliveries: TelegramDelivery[] = [];
-
-  // Sequential by design: a large upload Blob must not be multiplied in memory
-  // for several concurrent Bot API requests inside the same Worker isolate.
-  for (const destinationKey of options.chatIds) {
+  const sendOne = async (destinationKey: string): Promise<TelegramDelivery> => {
     const destination = parseTelegramDestination(destinationKey);
-    let result: TelegramApiResult<TelegramMessage>;
+
     if (!destination) {
-      deliveries.push({
+      return {
         requestedChatId: destinationKey,
         result: { ok: false, description: `Invalid Telegram destination: ${destinationKey}` },
-      });
-      continue;
+      };
     }
+
     try {
-      result =
+      const result =
         options.prepared.type === "file"
           ? await sendTelegramUrl({
               botToken: options.botToken,
@@ -52,6 +49,8 @@ export async function sendPreparedMediaToChats(options: {
               botToken: options.botToken,
               chatId: destination.chatId,
               messageThreadId: destination.messageThreadId,
+              // Reuse the same byte buffer for every destination. The Blob only
+              // materializes the exact view and avoids an eager full-file copy.
               file: new Blob([toBlobArrayBuffer(options.prepared.bytes)], {
                 type: options.prepared.contentType,
               }),
@@ -61,17 +60,24 @@ export async function sendPreparedMediaToChats(options: {
               caption: options.caption,
               parseMode: options.parseMode,
             });
+
+      return { requestedChatId: destination.key, result };
     } catch (error) {
-      result = {
-        ok: false,
-        description: `Unexpected exception while sending media: ${getErrorMessage(error)}`,
+      return {
+        requestedChatId: destination.key,
+        result: {
+          ok: false,
+          description: `Unexpected exception while sending media: ${getErrorMessage(error)}`,
+        },
       };
     }
+  };
 
-    deliveries.push({ requestedChatId: destination.key, result });
-  }
-
-  return deliveries;
+  // URL deliveries are cheap because Telegram fetches the remote media itself,
+  // so parallelize them aggressively. Worker-owned uploads are intentionally
+  // capped lower to keep memory/network pressure predictable for large files.
+  const concurrency = options.prepared.type === "file" ? 4 : 2;
+  return mapWithConcurrency(options.chatIds, concurrency, sendOne);
 }
 
 /**

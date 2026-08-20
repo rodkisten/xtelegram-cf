@@ -114,20 +114,25 @@ export class HlsDownloader {
     } = {},
   ): Promise<HlsDownloadResult> {
     const budget = new MediaBudget(this.maxMediaBytes);
-    const video = await this.downloadPlaylist(
-      resolved.mediaPlaylist,
-      "video",
-      budget,
-      options,
-    );
-    const audio = resolved.audio
-      ? await this.downloadPlaylist(
-          resolved.audio.playlist,
-          "audio",
-          budget,
-          options,
-        )
-      : null;
+    // Video and audio renditions are independent once the resolver has selected
+    // their playlists. Download them concurrently so total HLS latency is close
+    // to the slower track instead of the sum of both track download times.
+    const [video, audio] = await Promise.all([
+      this.downloadPlaylist(
+        resolved.mediaPlaylist,
+        "video",
+        budget,
+        options,
+      ),
+      resolved.audio
+        ? this.downloadPlaylist(
+            resolved.audio.playlist,
+            "audio",
+            budget,
+            options,
+          )
+        : Promise.resolve<DownloadedTrack | null>(null),
+    ]);
 
     return {
       resolved,
