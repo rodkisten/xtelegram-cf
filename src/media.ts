@@ -2,6 +2,7 @@ import { HlsDownloader } from "./hls/downloader";
 import { HlsRemuxer } from "./hls/remuxer";
 import { HlsResolver, looksLikeHlsUrl } from "./hls/resolver";
 import { parseVideoDimensions } from "./media/video-metadata";
+import { resolveTwitterMediumMedia } from "./social";
 import { fetchPublic, getBaseContentType, getFileExtension } from "./lib/http";
 import type {
   MediaType,
@@ -10,11 +11,12 @@ import type {
   ResolvedDirectFile,
 } from "./types";
 
-const TELEGRAM_REMOTE_URL_LIMIT = 60_000_000; // 20
-const DEFAULT_MAX_MEDIA_BYTES = 100_000_000; //49
-const HARD_MAX_MEDIA_BYTES = 100_000_000;
-const DEFAULT_HLS_MAX_MEDIA_BYTES = 32_000_000; //12
-const HARD_HLS_MAX_MEDIA_BYTES = 96_000_000; // 24
+const TELEGRAM_REMOTE_URL_LIMIT = 20_000_000;
+const MEDIUM_QUALITY_FALLBACK_TRIGGER_BYTES = 50_000_000;
+const DEFAULT_MAX_MEDIA_BYTES = 49_000_000;
+const HARD_MAX_MEDIA_BYTES = 49_000_000;
+const DEFAULT_HLS_MAX_MEDIA_BYTES = 16_000_000;
+const HARD_HLS_MAX_MEDIA_BYTES = 24_000_000;
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm"]);
 const PHOTO_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avif", "gif"]);
@@ -35,6 +37,8 @@ export interface PrepareMediaOptions {
   signal?: AbortSignal;
   /** Force a Worker-owned file so it can be attached to a Telegram album. */
   forceUpload?: boolean;
+  /** Optional Twirrl token used only by the oversized X medium-quality fallback. */
+  twirrlVersionToken?: string;
 }
 
 export async function prepareMedia(
@@ -105,6 +109,18 @@ export async function prepareMedia(
     }
 
     if (direct.contentLength != null && direct.contentLength > maxMediaBytes) {
+      const mediumFallback = await tryTwitterMediumQualityFallback(
+        input,
+        direct,
+        maxMediaBytes,
+        options.signal,
+        options.twirrlVersionToken,
+      );
+
+      if (mediumFallback) {
+        return mediumFallback;
+      }
+
       throw new Error(
         `Direct media is ${direct.contentLength} bytes, above the configured upload limit of ${maxMediaBytes} bytes`,
       );
@@ -330,6 +346,73 @@ function clampMaxMediaBytes(value?: number): number {
     HARD_MAX_MEDIA_BYTES,
     Math.max(1_000_000, Math.floor(value!)),
   );
+}
+
+async function tryTwitterMediumQualityFallback(
+  input: RelayInput,
+  direct: ResolvedDirectFile,
+  maximumBytes: number,
+  signal?: AbortSignal,
+  twirrlVersionToken?: string,
+): Promise<PreparedMedia | null> {
+  if (input.provider?.toLowerCase() !== "twitter") return null;
+  if (direct.contentLength == null) return null;
+  if (direct.contentLength <= MEDIUM_QUALITY_FALLBACK_TRIGGER_BYTES) return null;
+  if (!input.sourceUrl) return null;
+  if (signal?.aborted) return null;
+
+  try {
+    const medium = await resolveTwitterMediumMedia(
+      input.sourceUrl,
+      twirrlVersionToken,
+    );
+
+    if (!medium || medium.url === direct.url) return null;
+
+    const bytes = await downloadDirectFile(
+      medium.url,
+      medium.mediaHeaders,
+      maximumBytes,
+      signal,
+    );
+
+    const videoMetadata = parseVideoDimensions(
+      bytes,
+      inferContentTypeFromUrl(medium.url),
+    );
+
+    if (!videoMetadata) {
+      throw new Error(
+        "Twirrl medium-quality fallback did not expose valid video dimensions",
+      );
+    }
+
+    return {
+      type: "upload",
+      bytes,
+      filename: filenameFromUrl(medium.url),
+      contentType: inferContentTypeFromUrl(medium.url),
+      mediaType: "video",
+      selectedBitrate: null,
+      selectedResolution:
+        medium.quality ||
+        (medium.width && medium.height
+          ? `${medium.width}x${medium.height}`
+          : null),
+      playlistDepth: 0,
+      videoMetadata,
+      sourceUrl: medium.url,
+      hls: false,
+      segmentCount: 1,
+      encrypted: false,
+      remuxed: false,
+    };
+  } catch {
+    // A lower-quality retry is an optimization. If it cannot produce a safe
+    // Worker-owned file, preserve the original error path instead of sending
+    // an unverified remote video that could reintroduce aspect-ratio issues.
+    return null;
+  }
 }
 
 async function downloadDirectFile(
