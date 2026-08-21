@@ -81,6 +81,41 @@ export interface TelegramApiResult<T = unknown> {
   requestMethod?: string;
 }
 
+
+export interface TelegramChat {
+  id?: number | string;
+  type?: string;
+  title?: string;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+}
+
+export interface TelegramForumTopicCreated {
+  name?: string;
+  icon_color?: number;
+  icon_custom_emoji_id?: string;
+}
+
+export interface TelegramUpdateMessage {
+  message_id?: number;
+  chat?: TelegramChat;
+  message_thread_id?: number;
+  forum_topic_created?: TelegramForumTopicCreated;
+  date?: number;
+}
+
+export interface TelegramUpdate {
+  update_id?: number;
+  message?: TelegramUpdateMessage;
+  edited_message?: TelegramUpdateMessage;
+  channel_post?: TelegramUpdateMessage;
+  edited_channel_post?: TelegramUpdateMessage;
+  my_chat_member?: { chat?: TelegramChat };
+  chat_member?: { chat?: TelegramChat };
+  chat_join_request?: { chat?: TelegramChat };
+}
+
 export interface TelegramMessage {
   message_id?: number;
   caption?: string;
