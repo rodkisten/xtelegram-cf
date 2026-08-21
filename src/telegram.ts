@@ -5,6 +5,7 @@ import type {
   ParseMode,
   TelegramApiResult,
   TelegramMessage,
+  TelegramUpdate,
   VideoMetadata,
 } from "./types";
 
@@ -35,6 +36,66 @@ export interface TelegramAlbumUploadItem {
   videoMetadata?: VideoMetadata | null;
   caption?: string;
   parseMode?: ParseMode | null;
+}
+
+export async function getTelegramUpdates(
+  botToken: string,
+  limit = 100,
+): Promise<TelegramApiResult<TelegramUpdate[]>> {
+  const safeLimit = Math.min(100, Math.max(1, Math.floor(limit)));
+  const endpoint = `https://api.telegram.org/bot${botToken}/getUpdates?limit=${safeLimit}&timeout=0`;
+
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    const rawResponse = await response.text();
+    let result: TelegramApiResult<TelegramUpdate[]>;
+
+    try {
+      result = rawResponse
+        ? (JSON.parse(rawResponse) as TelegramApiResult<TelegramUpdate[]>)
+        : ({ ok: response.ok } as TelegramApiResult<TelegramUpdate[]>);
+    } catch {
+      return {
+        ok: false,
+        httpStatus: response.status,
+        requestMethod: "getUpdates",
+        rawResponse,
+        description: `Telegram returned a non-JSON response for getUpdates.`,
+      };
+    }
+
+    if (!response.ok || !result.ok) {
+      return {
+        ...result,
+        ok: false,
+        httpStatus: response.status,
+        requestMethod: "getUpdates",
+        rawResponse,
+        description: [
+          result.description || "Telegram rejected getUpdates.",
+          `HTTP ${response.status}${result.error_code ? ` / Telegram error ${result.error_code}` : ""}.`,
+        ].join(" "),
+      };
+    }
+
+    return {
+      ...result,
+      httpStatus: response.status,
+      requestMethod: "getUpdates",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      requestMethod: "getUpdates",
+      description: getErrorMessage(error),
+    };
+  }
 }
 
 export async function sendTelegramUrl(
