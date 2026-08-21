@@ -183,47 +183,143 @@ async function resolveZoraaHub(sourceUrl: string) {
 }
 
 async function resolveTwirrl(sourceUrl: string, token?: string) {
+  const media = await fetchTwirrlVariants(sourceUrl, token);
+  const selected = media.map((variants) => variants[0]).filter((item): item is ResolvedSocialMedia => Boolean(item));
+
+  if (!selected.length) {
+    throw new Error("Twirrl returned no valid video variants");
+  }
+
+  return { title: "Twitter video", caption: null, media: selected };
+}
+
+/**
+ * Re-queries Twirrl only when the primary X media exceeds the Worker upload
+ * budget. The returned variants retain the source aspect hint, allowing the
+ * caller to choose a lower-quality URL without changing the video geometry.
+ *
+ * @example
+ * Input: an X status URL whose best video is too large for the Worker.
+ * Output: the closest medium-quality Twirrl variant, or null when unavailable.
+ */
+export async function resolveTwitterMediumMedia(
+  sourceUrl: string,
+  token?: string,
+): Promise<ResolvedSocialMedia | null> {
+  const variantGroups = await fetchTwirrlVariants(sourceUrl, token);
+  const candidates = variantGroups
+    .flat()
+    .filter((item) => item.type === "video");
+
+  if (!candidates.length) return null;
+
+  const explicitlyMedium = candidates
+    .filter((item) => isMediumQualityLabel(item.quality))
+    .sort((left, right) => compareTwitterVideoVariants(
+      left,
+      right,
+      twitterAspectHint(candidates[0]),
+    ));
+
+  if (explicitlyMedium[0]) return explicitlyMedium[0];
+
+  const ranked = [...candidates].sort((left, right) => {
+    const leftArea = (left.width || 0) * (left.height || 0);
+    const rightArea = (right.width || 0) * (right.height || 0);
+    return leftArea - rightArea;
+  });
+
+  if (ranked.length === 1) return ranked[0] || null;
+
+  // Prefer the middle of the available quality ladder. This is intentionally
+  // not tied to a fixed pixel height because X/Twirrl can expose portrait,
+  // landscape, and unusual source dimensions.
+  return ranked[Math.floor((ranked.length - 1) / 2)] || null;
+}
+
+async function fetchTwirrlVariants(
+  sourceUrl: string,
+  token?: string,
+): Promise<ResolvedSocialMedia[][]> {
   const body: Record<string, string> = { u: sourceUrl, o: "iOS" };
   if (token?.trim()) body.v = token.trim();
 
   const data = await fetchJson<any>("https://api.twirrl.app/video", {
     method: "POST",
-    headers: { Accept: "application/json, text/plain, */*", "Content-Type": "application/json", "User-Agent": USER_AGENT },
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+    },
     body: JSON.stringify(body),
   });
 
-  const media: ResolvedSocialMedia[] = [];
+  const groups: ResolvedSocialMedia[][] = [];
+
   for (const [mediaIndex, item] of array(data?.d?.i).entries()) {
     if (!item || typeof item !== "object") continue;
+
     const seen = new Set<string>();
     const variants: ResolvedSocialMedia[] = [];
+
     for (const value of Object.values(item as Record<string, any>)) {
       const url = normalizeProviderUrl(value?.u);
       if (!url || seen.has(url)) continue;
       seen.add(url);
+
       const resolution = resolutionFromUrl(url);
       variants.push({
         index: mediaIndex,
         url,
         type: "video",
-        quality: firstString(value?.quality, value?.resolution, resolution.label, "best"),
-        width: numberOrNull(value?.width ?? value?.w ?? value?.original_width) || resolution.width,
-        height: numberOrNull(value?.height ?? value?.h ?? value?.original_height) || resolution.height,
+        quality: firstString(
+          value?.quality,
+          value?.resolution,
+          resolution.label,
+          "best",
+        ),
+        width:
+          numberOrNull(
+            value?.width ??
+            value?.w ??
+            value?.original_width,
+          ) || resolution.width,
+        height:
+          numberOrNull(
+            value?.height ??
+            value?.h ??
+            value?.original_height,
+          ) || resolution.height,
         thumbnail: null,
         mediaHeaders: mediaHeadersForUrl(url),
       });
     }
+
     variants.sort((left, right) =>
       compareTwitterVideoVariants(
         left,
         right,
         twitterAspectHint(item),
-      ));
-    if (variants[0]) media.push(variants[0]);
-  }
-  if (!media.length) throw new Error(data?.error || data?.message || "Twirrl returned no valid video variants");
+      ),
+    );
 
-  return { title: "Twitter video", caption: null, media };
+    if (variants.length) groups.push(variants);
+  }
+
+  if (!groups.length) {
+    throw new Error(
+      data?.error ||
+      data?.message ||
+      "Twirrl returned no valid video variants",
+    );
+  }
+
+  return groups;
+}
+
+function isMediumQualityLabel(value: string | null): boolean {
+  const normalized = String(value || "").trim().toLowerCase();
+  return /^(?:medium|med|mid|480p|540p|720p)$/.test(normalized);
 }
 
 async function resolveDTwitter(sourceUrl: string) {
