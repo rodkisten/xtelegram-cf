@@ -140,6 +140,7 @@ export async function handleSingleSend(
       hlsMaxMediaBytes,
       concurrency,
       signal: request.signal,
+      twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
     });
 
     const socialPromise = resolveSocialDeliveryContent({
