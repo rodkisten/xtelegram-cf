@@ -203,6 +203,7 @@ async function prepareAlbumUploads(
       maxMediaBytes,
       concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
       hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+      twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
       forceUpload: true,
     });
     if (prepared.type !== "upload") {
@@ -311,6 +312,7 @@ async function sendAlbumItemsIndividually(
         maxMediaBytes,
         concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
         hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+      twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
         forceUpload: true,
       });
       if (candidate.type !== "upload") {

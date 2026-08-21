@@ -1,6 +1,7 @@
 import { authorizeRequest } from "../http/auth";
 import { handleOptions, json } from "../http/response";
 import { handleBatch } from "../routes/batch";
+import { handleChannels } from "../routes/channels";
 import { handleHealth } from "../routes/health";
 import { handleMediaCheck } from "../routes/media/check";
 import { handleMediaQuery } from "../routes/media/query";
@@ -23,6 +24,15 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   if (method === "GET" && url.pathname === "/health") {
     relayDebug(env, traceId, "router.health", {});
     return handleHealth();
+  }
+  if (method === "GET" && url.pathname === "/channels") {
+    relayDebug(env, traceId, "router.dispatch", { handler: "channels" });
+    const authorizationError = authorizeRequest(request, env);
+    if (authorizationError) {
+      relayDebug(env, traceId, "router.authorization-rejected", { status: authorizationError.status });
+      return authorizationError;
+    }
+    return handleChannels(request, env);
   }
 
   const authorizationError = authorizeRequest(request, env);
