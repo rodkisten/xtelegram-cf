@@ -1277,3 +1277,50 @@ Routing is additive and deduplicated: explicit `channel/channels` + destinations
 Successful deliveries persist the compact destination key in `channel_id`, the actual Telegram `chat_id`, `message_thread_id`, and message IDs. Caption reconciliation therefore selects the correct chat/topic delivery; `editMessageCaption` itself uses the persisted `chat_id + message_id`, as required by the Telegram Bot API.
 
 `POST /media/check` also accepts username routing. If no routing fields are supplied there, it preserves the existing status-check behavior and may inspect all stored deliveries for that media identity.
+
+## `GET /channels`
+
+Returns a Shortcuts-friendly unified Telegram destination registry.
+
+The endpoint is authenticated with the same relay authorization used by the
+other protected routes and combines the configured fallback, configured
+destinations, D1 delivery history, persisted Telegram API discoveries, and
+currently available `getUpdates`.
+
+Example response shape:
+
+```json
+{
+  "ok": true,
+  "channels": [
+    {
+      "key": "-1003991698263:65",
+      "channelId": "-1003991698263",
+      "messageThreadId": 65,
+      "name": "General",
+      "title": "KISTEN SAVED - IMAGES",
+      "username": null,
+      "source": "configured",
+      "sources": ["configured", "telegram_api"],
+      "firstSeenAt": null,
+      "lastSeenAt": "2026-08-21T16:00:00.000Z"
+    }
+  ],
+  "count": 1,
+  "metadata": {
+    "fallback": "-1003991698263:65"
+  }
+}
+```
+
+Forum topics are deduplicated by `channel_id:message_thread_id`. When a
+`forum_topic_created` update is available, its `name` is retained as the
+topic name.
+
+### X/Twitter large-video fallback
+
+If a resolved X/Twitter video exceeds the Worker upload budget, the relay can
+make a secondary Twirrl request and attempt a medium-quality variant. The
+fallback remains subject to the Worker size limit and the actual video
+container is parsed before upload, so a lower-quality URL can never bypass the
+aspect-ratio protection.
