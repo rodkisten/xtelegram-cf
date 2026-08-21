@@ -10,11 +10,11 @@ import type {
   ResolvedDirectFile,
 } from "./types";
 
-const TELEGRAM_REMOTE_URL_LIMIT = 20_000_000;
-const DEFAULT_MAX_MEDIA_BYTES = 49_000_000;
-const HARD_MAX_MEDIA_BYTES = 49_000_000;
-const DEFAULT_HLS_MAX_MEDIA_BYTES = 16_000_000;
-const HARD_HLS_MAX_MEDIA_BYTES = 24_000_000;
+const TELEGRAM_REMOTE_URL_LIMIT = 60_000_000; // 20
+const DEFAULT_MAX_MEDIA_BYTES = 100_000_000; //49
+const HARD_MAX_MEDIA_BYTES = 100_000_000;
+const DEFAULT_HLS_MAX_MEDIA_BYTES = 32_000_000; //12
+const HARD_HLS_MAX_MEDIA_BYTES = 96_000_000; // 24
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm"]);
 const PHOTO_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avif", "gif"]);
