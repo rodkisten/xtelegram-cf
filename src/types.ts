@@ -10,11 +10,19 @@ export interface Env {
   HLS_MAX_MEDIA_BYTES?: string;
   MULTIPART_MAX_TOTAL_BYTES?: string;
   TWIRRL_VERSION_TOKEN?: string;
+  /** Optional self-hosted Cobalt API base URL. Public api.cobalt.tools is intentionally not assumed. */
+  COBALT_API_URL?: string;
+  /** Optional API key for a protected self-hosted Cobalt instance. */
+  COBALT_API_KEY?: string;
+  /** Optional external yt-dlp JSON resolver endpoint. Cloudflare Workers cannot execute yt-dlp directly. */
+  YTDLP_API_URL?: string;
+  /** Optional bearer token for the external yt-dlp resolver endpoint. */
+  YTDLP_API_TOKEN?: string;
   DELIVERY_CLAIM_TTL_SECONDS?: string;
   SOCIAL_METADATA_TIMEOUT_MS?: string;
   /** Enables privacy-safe structured pipeline logs. Disabled unless true. */
   RELAY_DEBUG?: string;
-  /** Optional JSON map from @username keys to Telegram destinations (<chat_id> or <chat_id>:<message_thread_id>). */
+  /** Optional JSON map from @username keys to Telegram chat IDs. */
   TELEGRAM_USERNAME_CHANNEL_MAP_JSON?: string;
 }
 
@@ -30,7 +38,6 @@ export interface RelayInput {
   title: string;
   text: string;
   caption: string;
-  captionExplicit: boolean;
   parseMode: ParseMode | null;
   mediaType: MediaType | null;
   mediaHeaders: Record<string, string>;
@@ -60,7 +67,6 @@ export interface RelayAlbumInput {
   title: string;
   text: string;
   caption: string;
-  captionExplicit: boolean;
   parseMode: ParseMode | null;
   channels: string[];
   usernames: string[];
@@ -81,41 +87,6 @@ export interface TelegramApiResult<T = unknown> {
   requestMethod?: string;
 }
 
-
-export interface TelegramChat {
-  id?: number | string;
-  type?: string;
-  title?: string;
-  username?: string;
-  first_name?: string;
-  last_name?: string;
-}
-
-export interface TelegramForumTopicCreated {
-  name?: string;
-  icon_color?: number;
-  icon_custom_emoji_id?: string;
-}
-
-export interface TelegramUpdateMessage {
-  message_id?: number;
-  chat?: TelegramChat;
-  message_thread_id?: number;
-  forum_topic_created?: TelegramForumTopicCreated;
-  date?: number;
-}
-
-export interface TelegramUpdate {
-  update_id?: number;
-  message?: TelegramUpdateMessage;
-  edited_message?: TelegramUpdateMessage;
-  channel_post?: TelegramUpdateMessage;
-  edited_channel_post?: TelegramUpdateMessage;
-  my_chat_member?: { chat?: TelegramChat };
-  chat_member?: { chat?: TelegramChat };
-  chat_join_request?: { chat?: TelegramChat };
-}
-
 export interface TelegramMessage {
   message_id?: number;
   caption?: string;
@@ -123,17 +94,6 @@ export interface TelegramMessage {
     id?: number | string;
     title?: string;
   };
-}
-
-export interface VideoMetadata {
-  /** Display width in pixels after applying container rotation metadata. */
-  width: number;
-  /** Display height in pixels after applying container rotation metadata. */
-  height: number;
-  /** Duration in seconds when available from the container. */
-  durationSeconds: number | null;
-  /** Container rotation metadata normalized to a quarter-turn. */
-  rotation: 0 | 90 | 180 | 270;
 }
 
 export interface ResolvedDirectFile {
@@ -144,7 +104,6 @@ export interface ResolvedDirectFile {
   selectedBitrate: number | null;
   selectedResolution: string | null;
   playlistDepth: number;
-  videoMetadata: VideoMetadata | null;
 }
 
 export interface PreparedUpload {
@@ -156,19 +115,11 @@ export interface PreparedUpload {
   selectedBitrate: number | null;
   selectedResolution: string | null;
   playlistDepth: number;
-  videoMetadata: VideoMetadata | null;
   sourceUrl: string;
   hls: boolean;
   segmentCount: number;
   encrypted: boolean;
   remuxed: boolean;
-  /** Exact SHA-256 of the Worker-owned media bytes, when available. */
-  mediaSha256?: string | null;
-  /** Cheap robustness fingerprint used only as a near-duplicate hint. */
-  mediaFingerprint?: string | null;
-  mediaFingerprintVersion?: number | null;
-  /** Exact byte length used to contextualize content identity. */
-  mediaByteLength?: number | null;
 }
 
 export type PreparedMedia = ResolvedDirectFile | PreparedUpload;
