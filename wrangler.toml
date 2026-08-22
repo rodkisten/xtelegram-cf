@@ -27,19 +27,14 @@ MAX_MEDIA_BYTES = "32000000"
 HLS_CONCURRENCY = "4"
 DELIVERY_CLAIM_TTL_SECONDS = "1800"
 RELAY_DEBUG = "true"
-TELEGRAM_CHAT_ID = "-1003991698263:73"
-TELEGRAM_CHANNEL_ID = "-1003991698263:73"
-RELAY_TOKEN = "12345678"
-TELEGRAM_BOT_TOKEN = "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg"
-
 
 # Optional username -> Telegram chat routing. Keys are case-insensitive.
 # A comma-separated key maps every username in that key to the same chats.
 # Explicit channel/channels from a request are UNIONED with mapped chats and deduplicated.
 TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
-{  
-  "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-1003991698263:74"],
-  "@rodkisten,@therodkisten,@rodinhocosta": ["-1003991698263:3"]
+{
+  "@USERNAME": ["-1001111111111", "-1002222222222"],
+  "@username1,@username2": ["-1001111111111"]
 }
 '''
 
@@ -59,4 +54,9 @@ TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 # service that accepts POST {"url":"..."} and returns media/formats JSON.
 # YTDLP_API_URL = "https://ytdlp.example.com/resolve"
 # YTDLP_API_TOKEN = ""
+
+# Optional Piped API fallback for YouTube.
+# Public instances exist, but they can be rate-limited or disappear. Prefer a stable
+# instance you control or one you explicitly choose from the Piped instance list.
+# PIPED_API_URL = "https://pipedapi.example.com"
 
