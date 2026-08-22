@@ -727,6 +727,71 @@ async function sendAlbumBatch(
   chatId: string,
   batchIndex: number,
 ): Promise<TelegramAlbumBatchAttempt> {
+  /*
+   * A quality-variant collapse may turn an album-shaped resolver response into
+   * exactly one real media item. Telegram sendMediaGroup only accepts 2-10
+   * items, so a singleton must leave the album transport here and use the
+   * normal single-media sendPhoto/sendVideo path instead.
+   *
+   * Prefer a Worker upload because it preserves media headers/rendition bytes
+   * for providers such as X/Twitter. If preparation fails before Telegram has
+   * accepted anything, retry the same selected rendition by URL.
+   */
+  if (batch.length === 1) {
+    const uploaded = await sendAlbumItemsIndividually(
+      input,
+      batch,
+      env,
+      chatId,
+      batchIndex,
+    );
+
+    if (uploaded.result.ok) {
+      return {
+        result: uploaded.result,
+        transport: "ordered-single-upload",
+        fallbackAttempted: false,
+        orderedFallbackAttempted: true,
+        fallbackError: null,
+        hadExternalSideEffect: uploaded.hadExternalSideEffect,
+        attemptCount: uploaded.attemptCount,
+      };
+    }
+
+    if (uploaded.safeToTryUrls) {
+      const urlAttempt = await sendAlbumUrlsIndividually(
+        input,
+        batch,
+        env,
+        chatId,
+        batchIndex,
+      );
+
+      return {
+        result: urlAttempt.result,
+        transport: "ordered-single-url",
+        fallbackAttempted: true,
+        orderedFallbackAttempted: true,
+        fallbackError: urlAttempt.result.ok
+          ? null
+          : urlAttempt.result.description || "Singleton URL fallback failed",
+        hadExternalSideEffect: urlAttempt.hadExternalSideEffect,
+        attemptCount: uploaded.attemptCount + urlAttempt.attemptCount,
+      };
+    }
+
+    return {
+      result: uploaded.result,
+      transport: "ordered-single-upload",
+      fallbackAttempted: false,
+      orderedFallbackAttempted: true,
+      fallbackError:
+        uploaded.result.description || "Singleton upload delivery failed",
+      hadExternalSideEffect: uploaded.hadExternalSideEffect,
+      attemptCount: uploaded.attemptCount,
+    };
+  }
+
   let preferredUploadAttempted = false;
   let preferredUploadError: string | null = null;
 
