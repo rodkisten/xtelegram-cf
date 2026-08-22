@@ -37,7 +37,7 @@ TELEGRAM_BOT_TOKEN = "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg"
 # A comma-separated key maps every username in that key to the same chats.
 # Explicit channel/channels from a request are UNIONED with mapped chats and deduplicated.
 TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
-{  
+{
   "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-1003991698263:74"],
   "@rodkisten,@therodkisten,@rodinhocosta": ["-1003991698263:3"]
 }
@@ -59,4 +59,9 @@ TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 # service that accepts POST {"url":"..."} and returns media/formats JSON.
 # YTDLP_API_URL = "https://ytdlp.example.com/resolve"
 # YTDLP_API_TOKEN = ""
+
+# Optional Piped API fallback for YouTube.
+# Public instances exist, but they can be rate-limited or disappear. Prefer a stable
+# instance you control or one you explicitly choose from the Piped instance list.
+# PIPED_API_URL = "https://pipedapi.example.com"
 

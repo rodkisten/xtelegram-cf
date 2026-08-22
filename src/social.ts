@@ -1,6 +1,6 @@
 import type { Env, MediaType } from "./types";
 
-export type SocialProvider = "instagram" | "twitter" | "tiktok" | "reddit";
+export type SocialProvider = "instagram" | "twitter" | "tiktok" | "reddit" | "youtube";
 export type ResolvedSocialMediaType = "video" | "photo" | "audio";
 
 export interface ResolvedSocialMedia {
@@ -68,13 +68,15 @@ export function detectSocialProvider(value: string): SocialProvider | null {
   if (hostname === "tiktok.com" || hostname.endsWith(".tiktok.com")) return "tiktok";
   if (hostname === "reddit.com" || hostname.endsWith(".reddit.com") ||
       hostname === "redd.it" || hostname.endsWith(".redd.it")) return "reddit";
+  if (hostname === "youtube.com" || hostname.endsWith(".youtube.com") ||
+      hostname === "youtu.be" || hostname.endsWith(".youtu.be")) return "youtube";
   return null;
 }
 
 export async function resolveSocialMedia(sourceUrl: string, env: Env): Promise<SocialResolution> {
   const source = detectSocialProvider(sourceUrl);
   if (!source) {
-    throw new Error("Unsupported social URL. Supported: Instagram, Twitter/X, TikTok, Reddit.");
+    throw new Error("Unsupported social URL. Supported: Instagram, Twitter/X, TikTok, Reddit, YouTube.");
   }
 
   const attempts: ResolverAttempt[] = [];
@@ -154,6 +156,15 @@ function resolverRegistry(source: SocialProvider, sourceUrl: string, env: Env): 
   if (source === "reddit") {
     return [
       { id: "reddit-native", run: () => resolveRedditNative(sourceUrl) },
+      cobalt,
+      ytdlp,
+    ];
+  }
+
+  if (source === "youtube") {
+    return [
+      { id: "youtube-oembed", run: () => resolveYouTubeOEmbed(sourceUrl) },
+      { id: "piped", run: () => resolvePipedYouTube(sourceUrl, env) },
       cobalt,
       ytdlp,
     ];
@@ -434,6 +445,109 @@ async function resolveYtDlp(sourceUrl: string, env: Env): Promise<ResolverResult
   };
 }
 
+
+async function resolveYouTubeOEmbed(sourceUrl: string): Promise<ResolverResult> {
+  const endpoint =
+    `https://www.youtube.com/oembed?url=${encodeURIComponent(sourceUrl)}&format=json`;
+
+  const data = await fetchJson<any>(endpoint, {
+    headers: jsonHeaders(),
+  });
+
+  return {
+    title: firstString(data?.title),
+    caption: null,
+    authorName: firstString(data?.author_name),
+    authorUsername: null,
+    media: [],
+  };
+}
+
+async function resolvePipedYouTube(sourceUrl: string, env: Env): Promise<ResolverResult> {
+  const apiBase = env.PIPED_API_URL?.trim() || "https://pipedapi.kavin.rocks";
+
+  const videoId = extractYouTubeId(sourceUrl);
+  if (!videoId) throw new Error("Could not extract YouTube video ID.");
+
+  const data = await fetchJson<any>(
+    `${apiBase.replace(/\/+$/, "")}/streams/${encodeURIComponent(videoId)}`,
+    {
+      headers: jsonHeaders(),
+    },
+  );
+
+  const media: ResolvedSocialMedia[] = [];
+
+  for (const item of array<any>(data?.videoStreams)) {
+    /*
+     * Telegram needs a playable video, not an adaptive video-only track. Piped
+     * exposes both progressive/muxed and videoOnly streams. Keep only streams
+     * that already contain audio; if none exist, return metadata-only so the
+     * resolver registry can continue to Cobalt / yt-dlp instead of sending a
+     * silent or incomplete file.
+     */
+    if (item?.videoOnly === true) continue;
+
+    const url = normalizeProviderUrl(item?.url);
+    if (!url) continue;
+
+    media.push(
+      mediaItem(media.length, url, "video", {
+        ...item,
+        quality: firstString(item?.quality, item?.qualityLabel),
+        width: item?.width,
+        height: item?.height,
+        bitrate: item?.bitrate,
+        filesize: item?.contentLength,
+        thumbnail: firstString(data?.thumbnailUrl),
+      }),
+    );
+  }
+
+  if (!media.length) {
+    return {
+      title: firstString(data?.title),
+      caption: firstString(data?.description),
+      authorName: firstString(data?.uploader),
+      authorUsername: null,
+      media: [],
+    };
+  }
+
+  return {
+    title: firstString(data?.title),
+    caption: firstString(data?.description),
+    authorName: firstString(data?.uploader),
+    authorUsername: null,
+    media,
+  };
+}
+
+function extractYouTubeId(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+
+    if (host === "youtu.be") {
+      const id = url.pathname.split("/").filter(Boolean)[0] || "";
+      return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+    }
+
+    if (host === "youtube.com" || host.endsWith(".youtube.com")) {
+      const watch = url.searchParams.get("v");
+      if (watch && /^[A-Za-z0-9_-]{11}$/.test(watch)) return watch;
+
+      const match = url.pathname.match(
+        /^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})(?:\/|$)/i,
+      );
+
+      if (match?.[1]) return match[1];
+    }
+  } catch {}
+
+  return null;
+}
+
 async function resolveZoraaHub(sourceUrl: string): Promise<ResolverResult> {
   const data = await fetchJson<any>("https://api.zoraahub.com/fetch.php", {
     method: "POST",
@@ -656,6 +770,9 @@ function mediaHeadersForUrl(url: string): Record<string, string> {
   }
   if (hostname.endsWith(".redditmedia.com") || hostname.endsWith(".redd.it") || hostname.endsWith(".reddit.com")) {
     return { "User-Agent": USER_AGENT, Referer: "https://www.reddit.com/" };
+  }
+  if (hostname.endsWith(".googlevideo.com") || hostname.endsWith(".youtube.com")) {
+    return { "User-Agent": USER_AGENT, Referer: "https://www.youtube.com/" };
   }
   return { "User-Agent": USER_AGENT };
 }
