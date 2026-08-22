@@ -589,6 +589,211 @@ async function resolveTwirrl(sourceUrl: string, token?: string): Promise<Resolve
   return { title: null, caption: null, authorName: null, authorUsername: null, media };
 }
 
+
+/**
+ * Re-queries Twirrl when the selected Twitter/X video is above the Worker's
+ * safe media budget. The function intentionally returns a medium rung of the
+ * quality ladder while preserving the original aspect ratio as closely as
+ * possible.
+ *
+ * This export is part of the media pipeline contract: src/media.ts imports it
+ * to retry oversized Twitter videos before falling back to Shortcuts.
+ */
+export async function resolveTwitterMediumMedia(
+  sourceUrl: string,
+  token?: string,
+): Promise<ResolvedSocialMedia | null> {
+  const body: Record<string, string> = { u: sourceUrl, o: "iOS" };
+
+  if (token?.trim()) {
+    body.v = token.trim();
+  }
+
+  const data = await fetchJson<any>("https://api.twirrl.app/video", {
+    method: "POST",
+    headers: {
+      ...jsonHeaders(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const groups: ResolvedSocialMedia[][] = [];
+
+  for (const [mediaIndex, rawGroup] of array<any>(data?.d?.i).entries()) {
+    if (!rawGroup || typeof rawGroup !== "object") continue;
+
+    const seen = new Set<string>();
+    const variants: ResolvedSocialMedia[] = [];
+    const expectedAspect = twitterAspectHint(rawGroup);
+
+    for (const value of Object.values(rawGroup as Record<string, any>)) {
+      const url = normalizeProviderUrl(value?.u);
+
+      if (!url || seen.has(url)) {
+        continue;
+      }
+
+      seen.add(url);
+
+      const resolution = resolutionFromUrl(url);
+
+      variants.push({
+        ...mediaItem(mediaIndex, url, "video", {
+          ...value,
+          quality: firstString(
+            value?.quality,
+            value?.resolution,
+            resolution.label,
+            "best",
+          ),
+          width:
+            numberOrNull(
+              value?.width ??
+              value?.w ??
+              value?.original_width ??
+              value?.originalWidth,
+            ) || resolution.width,
+          height:
+            numberOrNull(
+              value?.height ??
+              value?.h ??
+              value?.original_height ??
+              value?.originalHeight,
+            ) || resolution.height,
+        }),
+        index: mediaIndex,
+      });
+    }
+
+    variants.sort((left, right) =>
+      compareTwitterVideoVariants(left, right, expectedAspect)
+    );
+
+    if (variants.length) {
+      groups.push(variants);
+    }
+  }
+
+  const candidates = groups
+    .flat()
+    .filter((item) => item.type === "video");
+
+  if (!candidates.length) {
+    return null;
+  }
+
+  /*
+   * First prefer labels explicitly indicating a medium rendition. Twirrl has
+   * used textual quality labels as well as resolution-style labels over time.
+   */
+  const explicitMedium = candidates
+    .filter((item) => isMediumQualityLabel(item.quality))
+    .sort((left, right) =>
+      compareTwitterVideoVariants(
+        left,
+        right,
+        twitterAspectHint(candidates[0]),
+      )
+    );
+
+  if (explicitMedium[0]) {
+    return explicitMedium[0];
+  }
+
+  /*
+   * Otherwise choose the middle rung by pixel area. This is deliberately not
+   * hardcoded to landscape 720p because portrait X videos must keep their
+   * geometry intact.
+   */
+  const ranked = [...candidates].sort((left, right) => {
+    const leftArea = (left.width || 0) * (left.height || 0);
+    const rightArea = (right.width || 0) * (right.height || 0);
+
+    if (leftArea !== rightArea) {
+      return leftArea - rightArea;
+    }
+
+    return (left.bitrate || 0) - (right.bitrate || 0);
+  });
+
+  if (ranked.length === 1) {
+    return ranked[0] || null;
+  }
+
+  return ranked[Math.floor((ranked.length - 1) / 2)] || null;
+}
+
+function isMediumQualityLabel(value: string | null): boolean {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  return /^(?:medium|med|mid|480p|540p|720p)$/.test(normalized);
+}
+
+function twitterAspectHint(value: any): number | null {
+  if (!value) return null;
+
+  if (
+    typeof value === "object" &&
+    "width" in value &&
+    "height" in value
+  ) {
+    const directWidth = numberOrNull(value.width);
+    const directHeight = numberOrNull(value.height);
+
+    if (directWidth && directHeight) {
+      return directWidth / directHeight;
+    }
+  }
+
+  const width = numberOrNull(
+    value?.width ??
+    value?.w ??
+    value?.original_width ??
+    value?.originalWidth,
+  );
+
+  const height = numberOrNull(
+    value?.height ??
+    value?.h ??
+    value?.original_height ??
+    value?.originalHeight,
+  );
+
+  return width && height ? width / height : null;
+}
+
+function compareTwitterVideoVariants(
+  left: ResolvedSocialMedia,
+  right: ResolvedSocialMedia,
+  expectedAspect: number | null,
+): number {
+  if (expectedAspect && expectedAspect > 0) {
+    const leftAspect =
+      left.width && left.height ? left.width / left.height : 0;
+
+    const rightAspect =
+      right.width && right.height ? right.width / right.height : 0;
+
+    const leftDistance = leftAspect
+      ? Math.abs(Math.log(leftAspect / expectedAspect))
+      : Number.POSITIVE_INFINITY;
+
+    const rightDistance = rightAspect
+      ? Math.abs(Math.log(rightAspect / expectedAspect))
+      : Number.POSITIVE_INFINITY;
+
+    if (leftDistance !== rightDistance) {
+      return leftDistance - rightDistance;
+    }
+  }
+
+  return (
+    ((right.width || 0) * (right.height || 0)) -
+    ((left.width || 0) * (left.height || 0))
+  );
+}
+
 async function resolveDTwitter(sourceUrl: string): Promise<ResolverResult> {
   const body = new FormData();
   body.set("url", sourceUrl);
@@ -673,7 +878,7 @@ function parseTwitterStatus(value: string): { handle: string | null; id: string 
     const match = url.pathname.match(/^\/([^/]+)\/status\/(\d+)/i) || url.pathname.match(/^\/i\/status\/(\d+)/i);
     if (!match) return { handle: null, id: null };
     if (match.length === 2) return { handle: null, id: match[1] || null };
-    return { handle: match[1] === "i" ? null : match[1], id: match[2] || null };
+    return { handle: match[1] === "i" ? null : (match[1] || null), id: match[2] || null };
   } catch { return { handle: null, id: null }; }
 }
 
