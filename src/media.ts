@@ -3,7 +3,7 @@ import { HlsRemuxer } from "./hls/remuxer";
 import { HlsResolver, looksLikeHlsUrl } from "./hls/resolver";
 import { parseVideoDimensions } from "./media/video-metadata";
 import { resolveTwitterMediumMedia } from "./social";
-import { MediaFingerprintAccumulator } from "./services/media-fingerprint";
+import { buildMediaFingerprint, MediaFingerprintAccumulator, type MediaContentFingerprint } from "./services/media-fingerprint";
 import { fetchPublic, getBaseContentType, getFileExtension } from "./lib/http";
 import type {
   MediaType,
@@ -211,7 +211,7 @@ export async function prepareMedia(
     );
   }
 
-  const contentIdentity = new MediaFingerprintAccumulator().update(remuxed.bytes).digest();
+  const contentIdentity = await buildMediaFingerprint(remuxed.bytes);
 
   return {
     type: "upload",
@@ -434,7 +434,7 @@ async function tryTwitterMediumQualityFallback(
 
 interface DownloadedDirectFile {
   bytes: Uint8Array;
-  contentIdentity: ReturnType<MediaFingerprintAccumulator["digest"]>;
+  contentIdentity: MediaContentFingerprint;
 }
 
 /**
@@ -477,7 +477,7 @@ async function downloadDirectFile(
         `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
       );
     }
-    const contentIdentity = new MediaFingerprintAccumulator().update(bytes).digest();
+    const contentIdentity = await buildMediaFingerprint(bytes);
     return { bytes, contentIdentity };
   }
 
@@ -501,7 +501,7 @@ async function downloadDirectFile(
       const chunk = new Uint8Array(value.byteLength);
       chunk.set(value);
       chunks.push(chunk);
-      accumulator.update(chunk);
+      await accumulator.update(chunk);
     }
   } finally {
     try { await reader.releaseLock(); } catch {}
@@ -516,7 +516,7 @@ async function downloadDirectFile(
 
   return {
     bytes,
-    contentIdentity: accumulator.digest(),
+    contentIdentity: await accumulator.digest(),
   };
 }
 
