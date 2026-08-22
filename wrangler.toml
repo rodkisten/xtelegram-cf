@@ -37,8 +37,8 @@ TELEGRAM_BOT_TOKEN = "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg"
 # Explicit channel/channels from a request are UNIONED with mapped chats and deduplicated.
 TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 {
-  "@USERNAME": ["-1001111111111", "-1002222222222"],
-  "@username1,@username2": ["-1001111111111"]
+  "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-1003991698263:74"],
+  "@rodkisten,@therodkisten,@rodinhocosta": ["-1003991698263:3"]
 }
 '''
 
