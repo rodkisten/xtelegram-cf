@@ -6,7 +6,6 @@ on:
       zip_path:
         description: "Path to a .zip file inside ./zip"
         required: true
-        #default: "zip/patch.zip"
         type: string
 
       root_mode:
@@ -140,13 +139,8 @@ jobs:
             relativeToRepo.split(path.sep).join("/"),
           );
 
-          console.log(
-            `✅ ZIP: ${relativeToRepo}`,
-          );
-
-          console.log(
-            `📁 ZIP directory: ${path.dirname(relativeToZip) || "."}`,
-          );
+          console.log(`✅ ZIP: ${relativeToRepo}`);
+          console.log(`📁 ZIP directory: ${path.dirname(relativeToZip) || "."}`);
           NODE
 
       - name: 🛡️ Validate and safely extract ZIP
@@ -1392,14 +1386,157 @@ jobs:
           );
           NODE
 
-      - name: ✨ Nothing to apply
+      - name: ✨ Nothing new to apply
         if: steps.apply.outputs.changed_count == '0'
         run: |
           echo \
-            "The ZIP contents are already synchronized with the repository."
+            "The ZIP contents were already synchronized. The ZIP itself will still be removed."
+
+      - name: 🗑️ Remove successfully applied ZIP
+        id: cleanup-zip
+        shell: bash
+        env:
+          ZIP_RELATIVE: ${{ steps.zip.outputs.zip_relative }}
+        run: |
+          node <<'NODE'
+          const childProcess = require("node:child_process");
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          function fail(message) {
+            console.error(`::error::${message}`);
+            process.exit(1);
+          }
+
+          function run(command, args, options = {}) {
+            const result = childProcess.spawnSync(
+              command,
+              args,
+              {
+                encoding: "utf8",
+                ...options,
+              },
+            );
+
+            if (result.error) {
+              fail(
+                `Failed to execute ${command}: ` +
+                  result.error.message,
+              );
+            }
+
+            if (result.status !== 0) {
+              const message = (
+                result.stderr ||
+                result.stdout ||
+                `${command} exited with code ${result.status}.`
+              ).trim();
+
+              fail(message);
+            }
+
+            return result;
+          }
+
+          function appendOutput(name, value) {
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `${name}=${value}\n`,
+            );
+          }
+
+          const repo = path.resolve(
+            process.env.GITHUB_WORKSPACE,
+          );
+
+          const relative = process.env.ZIP_RELATIVE
+            .replaceAll("\\", "/")
+            .replace(/^\.\//, "");
+
+          const zipPath = path.resolve(
+            repo,
+            ...relative.split("/"),
+          );
+
+          const zipDir = path.resolve(
+            repo,
+            "zip",
+          );
+
+          const relativeToZip = path.relative(
+            zipDir,
+            zipPath,
+          );
+
+          if (
+            relativeToZip.startsWith("..") ||
+            path.isAbsolute(relativeToZip)
+          ) {
+            fail(
+              "Refusing to remove a ZIP outside ./zip.",
+            );
+          }
+
+          if (!fs.existsSync(zipPath)) {
+            fail(
+              `ZIP disappeared before cleanup: ${relative}`,
+            );
+          }
+
+          if (!fs.statSync(zipPath).isFile()) {
+            fail(
+              `ZIP cleanup target is not a file: ${relative}`,
+            );
+          }
+
+          if (
+            path.extname(zipPath).toLowerCase() !== ".zip"
+          ) {
+            fail(
+              `Cleanup target is not a ZIP: ${relative}`,
+            );
+          }
+
+          console.log(
+            `🗑️ Removing successfully applied ZIP: ${relative}`,
+          );
+
+          run(
+            "git",
+            [
+              "rm",
+              "--",
+              relative,
+            ],
+            {
+              stdio: "inherit",
+            },
+          );
+
+          run(
+            "git",
+            [
+              "commit",
+              "-m",
+              `chore(zip): remove applied ${path.basename(relative)}`,
+            ],
+            {
+              stdio: "inherit",
+            },
+          );
+
+          appendOutput(
+            "removed",
+            "true",
+          );
+
+          console.log(
+            `✅ Removed and committed: ${relative}`,
+          );
+          NODE
 
       - name: 🚀 Push patch branch
-        if: steps.apply.outputs.changed_count != '0'
+        if: steps.cleanup-zip.outputs.removed == 'true'
         shell: bash
         env:
           BRANCH_NAME: ${{ steps.branch.outputs.branch }}
@@ -1433,7 +1570,7 @@ jobs:
           NODE
 
       - name: 📋 Prepare pull request
-        if: steps.apply.outputs.changed_count != '0'
+        if: steps.cleanup-zip.outputs.removed == 'true'
         id: pr
         shell: bash
         env:
@@ -1443,6 +1580,7 @@ jobs:
           CHANGED_COUNT: ${{ steps.apply.outputs.changed_count }}
           SKIPPED_COUNT: ${{ steps.apply.outputs.skipped_count }}
           ROOT_STRIPPED: ${{ steps.structure.outputs.stripped }}
+          ZIP_REMOVED: ${{ steps.cleanup-zip.outputs.removed }}
           IGNORED_GITHUB: >-
             ${{ steps.extract.outputs.ignored_github_count }}
           PR_TITLE_INPUT: ${{ inputs.pr_title }}
@@ -1481,6 +1619,8 @@ jobs:
                 process.env.IGNORED_GITHUB,
               "- **Root directory stripped:** " +
                 process.env.ROOT_STRIPPED,
+              "- **Source ZIP removed:** " +
+                process.env.ZIP_REMOVED,
               "- **Commit strategy:** " +
                 "one commit per changed file",
               "- **Ordering:** ascending " +
@@ -1518,7 +1658,7 @@ jobs:
           NODE
 
       - name: 🔀 Open pull request
-        if: steps.apply.outputs.changed_count != '0'
+        if: steps.cleanup-zip.outputs.removed == 'true'
         id: open-pr
         shell: bash
         env:
@@ -1582,7 +1722,7 @@ jobs:
           NODE
 
       - name: 📊 Summary
-        if: steps.apply.outputs.changed_count != '0'
+        if: steps.cleanup-zip.outputs.removed == 'true'
         shell: bash
         env:
           ZIP_PATH: ${{ steps.zip.outputs.zip_relative }}
@@ -1591,6 +1731,7 @@ jobs:
           SKIPPED_COUNT: ${{ steps.apply.outputs.skipped_count }}
           IGNORED_GITHUB: >-
             ${{ steps.extract.outputs.ignored_github_count }}
+          ZIP_REMOVED: ${{ steps.cleanup-zip.outputs.removed }}
           PR_URL: ${{ steps.open-pr.outputs.url }}
         run: |
           node <<'NODE'
@@ -1608,6 +1749,8 @@ jobs:
               process.env.SKIPPED_COUNT,
             "- **Ignored .github entries:** " +
               process.env.IGNORED_GITHUB,
+            "- **Source ZIP removed:** " +
+              process.env.ZIP_REMOVED,
             "- **Pull request:** " +
               process.env.PR_URL,
             "",
