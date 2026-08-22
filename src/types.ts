@@ -14,6 +14,8 @@ export interface Env {
   COBALT_API_URL?: string;
   /** Optional API key for a protected self-hosted Cobalt instance. */
   COBALT_API_KEY?: string;
+  /** Optional Piped API base URL, e.g. a public or self-hosted instance. */
+  PIPED_API_URL?: string;
   /** Optional external yt-dlp JSON resolver endpoint. Cloudflare Workers cannot execute yt-dlp directly. */
   YTDLP_API_URL?: string;
   /** Optional bearer token for the external yt-dlp resolver endpoint. */
