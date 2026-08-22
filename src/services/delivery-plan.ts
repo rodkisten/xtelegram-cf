@@ -98,6 +98,7 @@ export async function releasePendingDeliveryClaims(plan: DeliveryPlan): Promise<
 export function buildDeliveryConflict(plan: DeliveryPlan, subject = "Media") {
   const notSent = [...plan.skippedAlreadySent, ...plan.skippedInProgress];
   const hasInProgress = plan.skippedInProgress.length > 0;
+  const duplicateDeliveries = getAlreadySentDeliveryDetails(plan);
   return {
     ok: false,
     conflict: true,
@@ -111,6 +112,7 @@ export function buildDeliveryConflict(plan: DeliveryPlan, subject = "Media") {
       inserted: [],
       notSent,
     },
+    duplicates: duplicateDeliveries,
     hint: hasInProgress
       ? "Wait for the in-flight delivery to complete before retrying."
       : "Pass force=true to resend and increment send_count.",
@@ -119,6 +121,36 @@ export function buildDeliveryConflict(plan: DeliveryPlan, subject = "Media") {
       claimQueries: plan.claim.queryCount,
       claimedChannels: 0,
     },
+  };
+}
+
+/**
+ * Returns the persisted Telegram destination/message information for channels
+ * skipped as duplicates by the current delivery plan.
+ *
+ * @example
+ * Input: a plan that skipped channel `-1001` after finding message `42`.
+ * Output: `[{ channelId: "-1001", messageIds: [42], ... }]`.
+ */
+export function getAlreadySentDeliveryDetails(plan: DeliveryPlan) {
+  const skippedChannels = new Set(plan.skippedAlreadySent.map((entry) => entry.channelId));
+  return plan.claim.alreadySentDeliveries
+    .filter((delivery) => skippedChannels.has(delivery.channelId))
+    .map(formatDuplicateDelivery);
+}
+
+function formatDuplicateDelivery(delivery: DeliveryClaimResult["alreadySentDeliveries"][number]) {
+  return {
+    channelId: delivery.channelId,
+    telegramChatId: delivery.telegramChatId,
+    messageThreadId: delivery.messageThreadId,
+    telegramChatTitle: delivery.telegramChatTitle,
+    messageIds: delivery.lastMessageIds.length ? delivery.lastMessageIds : delivery.firstMessageIds,
+    firstMessageIds: delivery.firstMessageIds,
+    lastMessageIds: delivery.lastMessageIds,
+    sendCount: delivery.sendCount,
+    firstSentAt: delivery.firstSentAt,
+    lastSentAt: delivery.lastSentAt,
   };
 }
 
