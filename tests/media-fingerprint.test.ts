@@ -1,32 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  MediaFingerprintAccumulator,
-  StreamingSha256,
-  compareMediaFingerprints,
-} from "../src/services/media-fingerprint.ts";
+import { buildMediaFingerprint, compareMediaFingerprints } from "../src/services/media-fingerprint.ts";
 
 const encoder = new TextEncoder();
 
-test("StreamingSha256 matches the standard SHA-256 test vector", () => {
-  const hasher = new StreamingSha256();
-  hasher.update(encoder.encode("a"));
-  hasher.update(encoder.encode("bc"));
+test("native SHA-256 matches the standard test vector", async () => {
+  const result = await buildMediaFingerprint(encoder.encode("abc"));
   assert.equal(
-    hasher.digestHex(),
+    result.sha256,
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
   );
 });
 
-test("MediaFingerprintAccumulator hashes and fingerprints one pass of media bytes", () => {
-  const accumulator = new MediaFingerprintAccumulator();
-  accumulator.update(new Uint8Array([0, 1, 2, 3]));
-  accumulator.update(new Uint8Array([4, 5, 6, 7]));
-  const result = accumulator.digest();
+test("bounded fingerprint keeps constant sampling work", async () => {
+  const bytes = new Uint8Array(4 * 1024 * 1024);
+  for (let index = 0; index < bytes.length; index += 4096) bytes[index] = index & 0xff;
+  const result = await buildMediaFingerprint(bytes);
 
-  assert.equal(result.byteLength, 8);
+  assert.equal(result.byteLength, bytes.byteLength);
   assert.equal(result.sha256.length, 64);
-  assert.equal(result.fingerprintVersion, 1);
+  assert.equal(result.fingerprintVersion, 2);
   assert.equal(result.fingerprint.length, 128);
+  assert.ok(result.sampledBytes <= 8192);
   assert.equal(compareMediaFingerprints(result.fingerprint, result.fingerprint), 1);
 });
