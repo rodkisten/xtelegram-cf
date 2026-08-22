@@ -27,31 +27,31 @@ MAX_MEDIA_BYTES = "32000000"
 HLS_CONCURRENCY = "4"
 DELIVERY_CLAIM_TTL_SECONDS = "1800"
 RELAY_DEBUG = "true"
-TELEGRAM_CHAT_ID = "-1003991698263:73"
-TELEGRAM_CHANNEL_ID = "-1003991698263:73"
-RELAY_TOKEN = "12345678"
-TELEGRAM_BOT_TOKEN = "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg"
 
-
-# Optional username -> Telegram destination routing. Keys are case-insensitive.
-# Destination formats:
-#   <chat_id>                    => send to the chat itself
-#   <chat_id>:<message_thread_id> => send to a forum topic in that supergroup
-# A comma-separated key maps every username in that key to the same destinations.
-# Explicit channel/channels from a request are UNIONED with mapped destinations.
-# Deduplication is by (chat_id, message_thread_id), so different topics remain distinct.
-#
-# Topic example:
-#   "@example": ["-1003991698263:42"]
-#   "@example1,@example2": ["-1003991698263:42", "-1003991698263:87"]
+# Optional username -> Telegram chat routing. Keys are case-insensitive.
+# A comma-separated key maps every username in that key to the same chats.
+# Explicit channel/channels from a request are UNIONED with mapped chats and deduplicated.
 TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
 {
-  "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-1003991698263:74"],
-  "@rodkisten,@therodkisten,@rodinhocosta": ["-1003991698263:3"]
+  "@USERNAME": ["-1001111111111", "-1002222222222"],
+  "@username1,@username2": ["-1001111111111"]
 }
 '''
 
-# Keep credentials in Wrangler secrets, not in this file:
+# Keep TELEGRAM_BOT_TOKEN and RELAY_TOKEN in Wrangler secrets, not in this file:
 #   npx wrangler secret put TELEGRAM_BOT_TOKEN
 #   npx wrangler secret put RELAY_TOKEN
-# TELEGRAM_CHAT_ID may also be stored as a secret if preferred.
+# Optional fallback when neither channel(s) nor username routing resolves a destination:
+#   npx wrangler secret put TELEGRAM_CHAT_ID
+
+# Optional resolver fallbacks.
+# Cobalt no longer offers a public pre-hosted API for third-party integrations.
+# Point this at your own Cobalt instance. Leave empty/omitted to skip it.
+# COBALT_API_URL = "https://cobalt-api.example.com"
+# COBALT_API_KEY = ""
+
+# Cloudflare Workers cannot execute yt-dlp binaries. Point this at a tiny external
+# service that accepts POST {"url":"..."} and returns media/formats JSON.
+# YTDLP_API_URL = "https://ytdlp.example.com/resolve"
+# YTDLP_API_TOKEN = ""
+
