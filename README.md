@@ -1338,3 +1338,15 @@ make a secondary Twirrl request and attempt a medium-quality variant. The
 fallback remains subject to the Worker size limit and the actual video
 container is parsed before upload, so a lower-quality URL can never bypass the
 aspect-ratio protection.
+
+
+## Content-level media deduplication
+
+Worker-owned videos now receive two content identities while they are downloaded:
+
+- **SHA-256**: exact byte-for-byte identity, persisted in D1 and indexed.
+- **Robust fingerprint**: a cheap 64-bin normalized byte-distribution signature used conservatively to flag likely recompressed copies.
+
+The exact hash is authoritative. The robustness fingerprint is deliberately conservative and does not pretend to be a decoded frame-level perceptual hash, because the Worker does not run a heavyweight video decoder. Candidates must also satisfy compatible video dimensions and a bounded file-size ratio before they can be treated as near duplicates.
+
+When a duplicate is blocked, the response exposes `contentDuplicates` with `matchType`, `similarity`, `mediaSha256`, and the exact Telegram `channelId` / `messageIds` from the existing delivery history. `force=true` bypasses this content-level blocking just as it bypasses the existing media-key duplicate check.
