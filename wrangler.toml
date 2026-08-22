@@ -32,7 +32,6 @@ TELEGRAM_CHANNEL_ID = "-1003991698263:73"
 RELAY_TOKEN = "12345678"
 TELEGRAM_BOT_TOKEN = "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg"
 
-
 # Optional username -> Telegram chat routing. Keys are case-insensitive.
 # A comma-separated key maps every username in that key to the same chats.
 # Explicit channel/channels from a request are UNIONED with mapped chats and deduplicated.
