@@ -19,12 +19,33 @@ export interface MediaIdentity {
   legacyKeys: string[];
 }
 
+/**
+ * Delivery history captured atomically with the pre-send claim query.
+ *
+ * Keeping the Telegram identifiers in the claim result avoids a second D1 round
+ * trip when a duplicate is detected, which is especially valuable on the hot
+ * request path of the relay.
+ */
+export interface DeliveryHistoryRecord {
+  channelId: string;
+  telegramChatId: string | null;
+  messageThreadId: number | null;
+  telegramChatTitle: string | null;
+  firstMessageIds: number[];
+  lastMessageIds: number[];
+  sendCount: number;
+  firstSentAt: string;
+  lastSentAt: string;
+}
+
 export interface DeliveryClaimResult {
   requestId: string;
   requested: string[];
   acquired: string[];
   alreadySent: string[];
   inProgress: string[];
+  /** Existing Telegram delivery records for the requested channels. */
+  alreadySentDeliveries: DeliveryHistoryRecord[];
   queryCount: number;
 }
 
@@ -291,7 +312,17 @@ export async function acquireDeliveryClaims(
 ): Promise<DeliveryClaimResult> {
   const requested = [...new Set(channels.map((channel) => channel.trim()).filter(Boolean))];
   const requestId = options.requestId || crypto.randomUUID();
-  if (!requested.length) return { requestId, requested: [], acquired: [], alreadySent: [], inProgress: [], queryCount: 0 };
+  if (!requested.length) {
+    return {
+      requestId,
+      requested: [],
+      acquired: [],
+      alreadySent: [],
+      inProgress: [],
+      alreadySentDeliveries: [],
+      queryCount: 0,
+    };
+  }
 
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
@@ -315,15 +346,19 @@ export async function acquireDeliveryClaims(
          )`,
       ).bind(identity.key, requestId, now, expiresAt, JSON.stringify(requested), JSON.stringify(lookupKeys));
 
-  const deliveredLookup = options.force
-    ? db.prepare(
-        `SELECT channel_id FROM media_deliveries WHERE 0`,
-      )
-    : db.prepare(
-        `SELECT DISTINCT channel_id FROM media_deliveries
-         WHERE media_key IN (SELECT CAST(value AS TEXT) FROM json_each(?1))
-           AND channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))`,
-      ).bind(JSON.stringify(lookupKeys), JSON.stringify(requested));
+  // Always fetch the existing delivery rows. For force=true they are not used
+  // to block the send, but retaining them lets the response explain exactly
+  // which previous Telegram messages will be superseded by the forced resend.
+  const deliveredLookup = db.prepare(
+    `SELECT
+       channel_id, telegram_chat_id, message_thread_id, telegram_chat_title,
+       first_message_ids_json, last_message_ids_json, send_count,
+       first_sent_at, last_sent_at
+     FROM media_deliveries
+     WHERE media_key IN (SELECT CAST(value AS TEXT) FROM json_each(?1))
+       AND channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))
+     ORDER BY last_sent_at DESC`,
+  ).bind(JSON.stringify(lookupKeys), JSON.stringify(requested));
 
   const results = await db.batch([
     db.prepare("DELETE FROM delivery_claims WHERE expires_at <= ?1").bind(now),
@@ -337,8 +372,10 @@ export async function acquireDeliveryClaims(
   ]);
 
   const claimRows = (results[2]?.results || []) as Array<{ channel_id: string; request_id: string }>;
-  const deliveredRows = (results[3]?.results || []) as Array<{ channel_id: string }>;
-  const alreadySent = new Set(deliveredRows.map((row) => row.channel_id));
+  const deliveredRows = (results[3]?.results || []) as Array<StoredDeliveryRow>;
+  const alreadySentDeliveries = deliveredRows.map(formatDeliveryHistoryRecord);
+  const deliveredChannels = new Set(alreadySentDeliveries.map((delivery) => delivery.channelId));
+  const alreadySent = options.force ? new Set<string>() : deliveredChannels;
   const acquired = new Set(claimRows.filter((row) => row.request_id === requestId).map((row) => row.channel_id));
   const inProgress = requested.filter((channelId) => !alreadySent.has(channelId) && !acquired.has(channelId));
 
@@ -348,6 +385,7 @@ export async function acquireDeliveryClaims(
     acquired: requested.filter((channelId) => acquired.has(channelId)),
     alreadySent: requested.filter((channelId) => alreadySent.has(channelId)),
     inProgress,
+    alreadySentDeliveries,
     queryCount: 4,
   };
 }
@@ -598,6 +636,43 @@ function formatMediaRow(row: StoredMediaRow) {
     firstSeenAt: row.first_seen_at,
     updatedAt: row.updated_at,
   };
+}
+
+
+/**
+ * Converts the D1 delivery row into the stable response shape used by duplicate
+ * detection. The JSON message-id columns are deliberately parsed here so every
+ * caller receives numeric Telegram message IDs rather than raw database strings.
+ *
+ * @example
+ * Input: `{ channel_id: "-1001", last_message_ids_json: "[42]", ... }`
+ * Output: `{ channelId: "-1001", lastMessageIds: [42], ... }`
+ */
+function formatDeliveryHistoryRecord(row: StoredDeliveryRow): DeliveryHistoryRecord {
+  return {
+    channelId: row.channel_id,
+    telegramChatId: row.telegram_chat_id,
+    messageThreadId: row.message_thread_id ?? null,
+    telegramChatTitle: row.telegram_chat_title,
+    firstMessageIds: numericMessageIds(row.first_message_ids_json),
+    lastMessageIds: numericMessageIds(row.last_message_ids_json),
+    sendCount: Math.max(0, Number(row.send_count || 0)),
+    firstSentAt: row.first_sent_at || "",
+    lastSentAt: row.last_sent_at || "",
+  };
+}
+
+/** Parse a persisted Telegram message-id JSON array without allowing malformed data into the API. */
+function numericMessageIds(value: string | null | undefined): number[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is number => typeof id === "number" && Number.isFinite(id))
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 function formatDeliveryRow(row: StoredDeliveryRow) {

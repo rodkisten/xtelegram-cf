@@ -330,7 +330,21 @@ Exemplo resumido:
         "reason": "already_sent"
       }
     ]
-  }
+  },
+  "duplicates": [
+    {
+      "channelId": "-100111",
+      "telegramChatId": "-100111",
+      "messageThreadId": null,
+      "telegramChatTitle": "My Channel",
+      "messageIds": [987],
+      "firstMessageIds": [987],
+      "lastMessageIds": [987],
+      "sendCount": 1,
+      "firstSentAt": "2026-08-21T16:00:00.000Z",
+      "lastSentAt": "2026-08-21T16:00:00.000Z"
+    }
+  ]
 }
 ```
 

@@ -18,6 +18,7 @@ import {
 import {
   buildDeliveryConflict,
   createDeliveryPlan,
+  getAlreadySentDeliveryDetails,
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
@@ -374,6 +375,9 @@ export async function handleSingleSend(
         inserted: insertedChannelIds,
         notSent,
       },
+      // Duplicate details come directly from the atomic D1 claim lookup, so the
+      // client can show the exact Telegram message/channel that caused the skip.
+      duplicates: getAlreadySentDeliveryDetails(plan),
       resolution: {
         selectedBitrate: prepared.selectedBitrate,
         selectedResolution: prepared.selectedResolution,
