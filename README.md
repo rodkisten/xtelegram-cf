@@ -1350,3 +1350,12 @@ Worker-owned videos now receive two content identities while they are downloaded
 The exact hash is authoritative. The robustness fingerprint is deliberately conservative and does not pretend to be a decoded frame-level perceptual hash, because the Worker does not run a heavyweight video decoder. Candidates must also satisfy compatible video dimensions and a bounded file-size ratio before they can be treated as near duplicates.
 
 When a duplicate is blocked, the response exposes `contentDuplicates` with `matchType`, `similarity`, `mediaSha256`, and the exact Telegram `channelId` / `messageIds` from the existing delivery history. `force=true` bypasses this content-level blocking just as it bypasses the existing media-key duplicate check.
+
+## CPU-bounded content deduplication (v2.13.10)
+
+Content deduplication is designed not to consume CPU proportional to the video's size in JavaScript.
+
+- Exact SHA-256 uses Cloudflare Workers native Web Crypto. Streamed direct-media downloads use `crypto.DigestStream("SHA-256")`; media already buffered by the HLS/remux pipeline uses `crypto.subtle.digest("SHA-256", bytes)`.
+- The robustness-oriented near-duplicate signature is a bounded heuristic. It samples at most 8,192 bytes per media item and therefore does not scan every byte of a 20 MB, 50 MB, or larger video.
+- Fingerprint version 2 is intentionally incompatible with the older full-byte histogram version. D1 comparisons require matching fingerprint versions.
+- The heuristic is not a frame-decoding perceptual hash. It is intentionally conservative and cheap enough for the request hot path. Exact SHA-256 remains authoritative for byte-identical media.
