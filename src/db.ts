@@ -1,5 +1,6 @@
 import type { AlbumMediaType, Env, MediaType } from "./types";
 import { parseTelegramDestination } from "./services/channels";
+import { compareMediaFingerprints } from "./services/media-fingerprint";
 
 export interface MediaIdentityInput {
   provider?: string | null;
@@ -60,6 +61,12 @@ export interface PersistMediaInput {
   parseMode?: string | null;
   resolvedMediaUrl?: string | null;
   mediaStatus?: "pending" | "ready" | "sent";
+  mediaSha256?: string | null;
+  mediaFingerprint?: string | null;
+  mediaFingerprintVersion?: number | null;
+  mediaByteLength?: number | null;
+  mediaWidth?: number | null;
+  mediaHeight?: number | null;
   deliveries: Array<{
     requestedChatId: string;
     telegramChatId: string | number | null;
@@ -96,6 +103,12 @@ export interface StoredMediaRow {
   media_status: string;
   first_seen_at: string;
   updated_at: string;
+  media_sha256?: string | null;
+  media_fingerprint?: string | null;
+  media_fingerprint_version?: number | null;
+  media_byte_length?: number | null;
+  media_width?: number | null;
+  media_height?: number | null;
 }
 
 export function requireRelayDb(env: Env): D1Database {
@@ -420,6 +433,12 @@ export interface PersistKnownMediaInput {
   parseMode?: string | null;
   resolvedMediaUrl?: string | null;
   mediaStatus?: "pending" | "ready" | "sent";
+  mediaSha256?: string | null;
+  mediaFingerprint?: string | null;
+  mediaFingerprintVersion?: number | null;
+  mediaByteLength?: number | null;
+  mediaWidth?: number | null;
+  mediaHeight?: number | null;
 }
 
 /**
@@ -439,8 +458,10 @@ export async function persistKnownMedia(
     `INSERT INTO media (
       media_key, provider, provider_media_id, canonical_url, source_url, page_url,
       media_type, media_count, metadata_json, caption, caption_parse_mode,
-      resolved_media_url, media_status, first_seen_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      resolved_media_url, media_status, media_sha256, media_fingerprint,
+      media_fingerprint_version, media_byte_length, media_width, media_height,
+      first_seen_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(media_key) DO UPDATE SET
       canonical_url = excluded.canonical_url,
       source_url = COALESCE(excluded.source_url, media.source_url),
@@ -454,6 +475,12 @@ export async function persistKnownMedia(
         ELSE media.caption_parse_mode
       END,
       resolved_media_url = COALESCE(excluded.resolved_media_url, media.resolved_media_url),
+      media_sha256 = COALESCE(excluded.media_sha256, media.media_sha256),
+      media_fingerprint = COALESCE(excluded.media_fingerprint, media.media_fingerprint),
+      media_fingerprint_version = COALESCE(excluded.media_fingerprint_version, media.media_fingerprint_version),
+      media_byte_length = COALESCE(excluded.media_byte_length, media.media_byte_length),
+      media_width = COALESCE(excluded.media_width, media.media_width),
+      media_height = COALESCE(excluded.media_height, media.media_height),
       media_status = CASE
         WHEN media.media_status = 'sent' THEN 'sent'
         WHEN excluded.media_status = 'ready' THEN 'ready'
@@ -474,6 +501,12 @@ export async function persistKnownMedia(
     caption ? input.parseMode || null : null,
     input.resolvedMediaUrl || null,
     status,
+    input.mediaSha256 || null,
+    input.mediaFingerprint || null,
+    input.mediaFingerprintVersion ?? null,
+    input.mediaByteLength ?? null,
+    input.mediaWidth ?? null,
+    input.mediaHeight ?? null,
     now,
     now,
   ).run();
@@ -491,8 +524,10 @@ export async function persistSuccessfulDeliveries(
       `INSERT INTO media (
         media_key, provider, provider_media_id, canonical_url, source_url, page_url,
         media_type, media_count, metadata_json, caption, caption_parse_mode,
-        resolved_media_url, media_status, first_seen_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        resolved_media_url, media_status, media_sha256, media_fingerprint,
+        media_fingerprint_version, media_byte_length, media_width, media_height,
+        first_seen_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(media_key) DO UPDATE SET
         canonical_url = excluded.canonical_url,
         source_url = COALESCE(excluded.source_url, media.source_url),
@@ -506,6 +541,12 @@ export async function persistSuccessfulDeliveries(
           ELSE media.caption_parse_mode
         END,
         resolved_media_url = COALESCE(excluded.resolved_media_url, media.resolved_media_url),
+        media_sha256 = COALESCE(excluded.media_sha256, media.media_sha256),
+        media_fingerprint = COALESCE(excluded.media_fingerprint, media.media_fingerprint),
+        media_fingerprint_version = COALESCE(excluded.media_fingerprint_version, media.media_fingerprint_version),
+        media_byte_length = COALESCE(excluded.media_byte_length, media.media_byte_length),
+        media_width = COALESCE(excluded.media_width, media.media_width),
+        media_height = COALESCE(excluded.media_height, media.media_height),
         media_status = CASE
           WHEN excluded.media_status = 'sent' THEN 'sent'
           WHEN media.media_status = 'sent' THEN 'sent'
@@ -526,6 +567,12 @@ export async function persistSuccessfulDeliveries(
       input.parseMode || null,
       input.resolvedMediaUrl || null,
       input.mediaStatus || "sent",
+      input.mediaSha256 || null,
+      input.mediaFingerprint || null,
+      input.mediaFingerprintVersion ?? null,
+      input.mediaByteLength ?? null,
+      input.mediaWidth ?? null,
+      input.mediaHeight ?? null,
       now,
       now,
     ),
@@ -562,6 +609,176 @@ export async function persistSuccessfulDeliveries(
 
   await db.batch(statements);
   return input.deliveries.map((delivery) => delivery.requestedChatId);
+}
+
+
+export interface ContentDuplicateMatch {
+  matchType: "exact_hash" | "robust_fingerprint";
+  similarity: number;
+  mediaKey: string;
+  provider: string;
+  sourceUrl: string | null;
+  pageUrl: string | null;
+  mediaSha256: string | null;
+  mediaFingerprint: string | null;
+  mediaByteLength: number | null;
+  deliveries: DeliveryHistoryRecord[];
+}
+
+/**
+ * Finds previously delivered Worker-owned media by exact SHA-256 first and then
+ * by a deliberately conservative robustness fingerprint. The query is scoped
+ * to requested channels so content-level dedupe preserves the relay's existing
+ * per-destination delivery semantics.
+ *
+ * @example
+ * const matches = await findContentDuplicateMatches(db, {
+ *   mediaKey: "twitter:123",
+ *   sha256: "...",
+ *   fingerprint: "...",
+ *   fingerprintVersion: 1,
+ *   byteLength: 8_000_000,
+ *   width: 1080,
+ *   height: 1920,
+ * }, ["-1001:65"]);
+ * // Returns only previously delivered matches for that destination.
+ */
+export async function findContentDuplicateMatches(
+  db: D1Database,
+  input: {
+    mediaKey: string;
+    sha256?: string | null;
+    fingerprint?: string | null;
+    fingerprintVersion?: number | null;
+    byteLength?: number | null;
+    width?: number | null;
+    height?: number | null;
+  },
+  channels: string[],
+): Promise<ContentDuplicateMatch[]> {
+  const requestedChannels = [...new Set(channels.map((channel) => channel.trim()).filter(Boolean))];
+  if (!requestedChannels.length) return [];
+
+  const matches = new Map<string, ContentDuplicateMatch>();
+  const exactHash = String(input.sha256 || "").trim().toLowerCase();
+
+  if (exactHash) {
+    const result = await db.prepare(
+      `SELECT
+        m.media_key, m.provider, m.source_url, m.page_url,
+        m.media_sha256, m.media_fingerprint, m.media_byte_length,
+        d.channel_id, d.telegram_chat_id, d.message_thread_id, d.telegram_chat_title,
+        d.first_message_ids_json, d.last_message_ids_json, d.send_count,
+        d.first_sent_at, d.last_sent_at
+       FROM media AS m
+       INNER JOIN media_deliveries AS d ON d.media_key = m.media_key
+       WHERE m.media_sha256 = ?1
+         AND m.media_key <> ?2
+         AND d.channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
+       ORDER BY d.last_sent_at DESC
+       LIMIT 100`,
+    ).bind(exactHash, input.mediaKey, JSON.stringify(requestedChannels)).all<StoredMediaRow & Partial<StoredDeliveryRow>>();
+
+    mergeContentDuplicateRows(matches, result.results || [], "exact_hash", 1);
+  }
+
+  const fingerprint = String(input.fingerprint || "").trim().toLowerCase();
+  const version = Number(input.fingerprintVersion || 0);
+  // An exact hash is definitive. Avoid the broader candidate scan when one is
+  // already present because that scan exists only for changed/recompressed media.
+  if (!matches.size && fingerprint && version > 0) {
+    const result = await db.prepare(
+      `SELECT
+        m.media_key, m.provider, m.source_url, m.page_url,
+        m.media_sha256, m.media_fingerprint, m.media_fingerprint_version,
+        m.media_byte_length, m.media_width, m.media_height,
+        d.channel_id, d.telegram_chat_id, d.message_thread_id, d.telegram_chat_title,
+        d.first_message_ids_json, d.last_message_ids_json, d.send_count,
+        d.first_sent_at, d.last_sent_at
+       FROM media AS m
+       INNER JOIN media_deliveries AS d ON d.media_key = m.media_key
+       WHERE m.media_type = 'video'
+         AND m.media_fingerprint_version = ?1
+         AND m.media_key <> ?2
+         AND d.channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?3))
+       ORDER BY d.last_sent_at DESC
+       LIMIT 200`,
+    ).bind(version, input.mediaKey, JSON.stringify(requestedChannels)).all<StoredMediaRow & Partial<StoredDeliveryRow>>();
+
+    const inputSize = Number(input.byteLength || 0);
+    for (const row of result.results || []) {
+      const candidateFingerprint = String(row.media_fingerprint || "");
+      if (!candidateFingerprint) continue;
+      if (input.width && input.height && row.media_width && row.media_height) {
+        const sameShape =
+          input.width === row.media_width && input.height === row.media_height;
+        if (!sameShape) continue;
+      }
+      const candidateSize = Number(row.media_byte_length || 0);
+      if (inputSize > 0 && candidateSize > 0) {
+        const ratio = Math.max(inputSize, candidateSize) / Math.min(inputSize, candidateSize);
+        if (ratio > 2.8) continue;
+      }
+      const similarity = compareMediaFingerprints(fingerprint, candidateFingerprint);
+      if (similarity < 0.985) continue;
+      mergeContentDuplicateRows(matches, [row], "robust_fingerprint", similarity);
+    }
+  }
+
+  return [...matches.values()].sort((left, right) => right.similarity - left.similarity);
+}
+
+/**
+ * Merges duplicate-query rows into one media match while retaining every
+ * relevant Telegram delivery attached to the candidate media row.
+ *
+ * @example
+ * mergeContentDuplicateRows(map, rows, "exact_hash", 1);
+ * // The map contains one candidate with all matching destination history.
+ */
+function mergeContentDuplicateRows(
+  target: Map<string, ContentDuplicateMatch>,
+  rows: Array<StoredMediaRow & Partial<StoredDeliveryRow>>,
+  matchType: ContentDuplicateMatch["matchType"],
+  similarity: number,
+): void {
+  for (const row of rows) {
+    const delivery = row.channel_id
+      ? formatDeliveryHistoryRecord({
+          channel_id: row.channel_id,
+          telegram_chat_id: row.telegram_chat_id ?? null,
+          message_thread_id: row.message_thread_id ?? null,
+          telegram_chat_title: row.telegram_chat_title ?? null,
+          first_message_ids_json: row.first_message_ids_json ?? "[]",
+          last_message_ids_json: row.last_message_ids_json ?? "[]",
+          send_count: row.send_count ?? 1,
+          first_sent_at: row.first_sent_at ?? "",
+          last_sent_at: row.last_sent_at ?? "",
+        })
+      : null;
+    const existing = target.get(row.media_key);
+    if (!existing) {
+      target.set(row.media_key, {
+        matchType,
+        similarity,
+        mediaKey: row.media_key,
+        provider: row.provider,
+        sourceUrl: row.source_url ?? null,
+        pageUrl: row.page_url ?? null,
+        mediaSha256: row.media_sha256 ?? null,
+        mediaFingerprint: row.media_fingerprint ?? null,
+        mediaByteLength: row.media_byte_length ?? null,
+        deliveries: delivery ? [delivery] : [],
+      });
+      continue;
+    }
+
+    existing.matchType = existing.matchType === "exact_hash" ? "exact_hash" : matchType;
+    existing.similarity = Math.max(existing.similarity, similarity);
+    if (delivery && !existing.deliveries.some((entry) => entry.channelId === delivery.channelId)) {
+      existing.deliveries.push(delivery);
+    }
+  }
 }
 
 export async function getStoredMedia(db: D1Database, mediaKey: string) {
@@ -632,6 +849,12 @@ function formatMediaRow(row: StoredMediaRow) {
     caption: row.caption ?? null,
     parseMode: row.caption_parse_mode ?? null,
     resolvedMediaUrl: row.resolved_media_url ?? null,
+    mediaSha256: row.media_sha256 ?? null,
+    mediaFingerprint: row.media_fingerprint ?? null,
+    mediaFingerprintVersion: row.media_fingerprint_version ?? null,
+    mediaByteLength: row.media_byte_length ?? null,
+    mediaWidth: row.media_width ?? null,
+    mediaHeight: row.media_height ?? null,
     status: row.media_status || "sent",
     firstSeenAt: row.first_seen_at,
     updatedAt: row.updated_at,
