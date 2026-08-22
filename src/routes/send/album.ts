@@ -17,6 +17,7 @@ import {
 import {
   buildDeliveryConflict,
   createDeliveryPlan,
+  getAlreadySentDeliveryDetails,
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
@@ -1000,6 +1001,9 @@ export async function handleJsonAlbumSend(
         inserted: insertedChannelIds,
         notSent,
       },
+      // Duplicate details come directly from the atomic D1 claim lookup, so the
+      // client can show every previous Telegram message belonging to the album.
+      duplicates: getAlreadySentDeliveryDetails(plan),
       mediaSet: {
         count: input.items.length,
         batches: batches.length,
