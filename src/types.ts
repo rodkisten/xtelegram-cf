@@ -162,6 +162,13 @@ export interface PreparedUpload {
   segmentCount: number;
   encrypted: boolean;
   remuxed: boolean;
+  /** Exact SHA-256 of the Worker-owned media bytes, when available. */
+  mediaSha256?: string | null;
+  /** Cheap robustness fingerprint used only as a near-duplicate hint. */
+  mediaFingerprint?: string | null;
+  mediaFingerprintVersion?: number | null;
+  /** Exact byte length used to contextualize content identity. */
+  mediaByteLength?: number | null;
 }
 
 export type PreparedMedia = ResolvedDirectFile | PreparedUpload;

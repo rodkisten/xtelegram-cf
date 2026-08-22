@@ -1,4 +1,4 @@
-import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
+import { findContentDuplicateMatches, persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import {
   inferTelegramMediaType,
   prepareMedia,
@@ -19,6 +19,7 @@ import {
   buildDeliveryConflict,
   createDeliveryPlan,
   getAlreadySentDeliveryDetails,
+  applyContentDuplicateMatches,
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
@@ -244,6 +245,33 @@ export async function handleSingleSend(
       channelsToSend: plan.channelsToSend.length,
     });
 
+    if (!input.force && prepared.type === "upload" && mediaType === "video") {
+      const contentMatches = await findContentDuplicateMatches(
+        db,
+        {
+          mediaKey: plan.identity.key,
+          sha256: prepared.mediaSha256,
+          fingerprint: prepared.mediaFingerprint,
+          fingerprintVersion: prepared.mediaFingerprintVersion,
+          byteLength: prepared.mediaByteLength,
+          width: prepared.videoMetadata?.width,
+          height: prepared.videoMetadata?.height,
+        },
+        plan.channelsToSend,
+      );
+      applyContentDuplicateMatches(plan, contentMatches);
+
+      relayDebug(env, traceId, "single.content-dedup.completed", {
+        exactHash: Boolean(prepared.mediaSha256),
+        candidateCount: contentMatches.length,
+        duplicateChannels: plan.skippedContentDuplicates.map((entry) => entry.channelId),
+      });
+
+      if (!plan.channelsToSend.length) {
+        return json(buildDeliveryConflict(plan, "Media"), 409);
+      }
+    }
+
     // Persist the resolved media independently from Telegram. If delivery fails
     // after this point, a later request can resume from a durable `ready` row.
     await persistKnownMedia(db, {
@@ -257,6 +285,12 @@ export async function handleSingleSend(
       parseMode: socialContent.parseMode,
       resolvedMediaUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
       mediaStatus: "ready",
+      mediaSha256: prepared.type === "upload" ? prepared.mediaSha256 : null,
+      mediaFingerprint: prepared.type === "upload" ? prepared.mediaFingerprint : null,
+      mediaFingerprintVersion: prepared.type === "upload" ? prepared.mediaFingerprintVersion : null,
+      mediaByteLength: prepared.type === "upload" ? prepared.mediaByteLength : null,
+      mediaWidth: prepared.videoMetadata?.width ?? null,
+      mediaHeight: prepared.videoMetadata?.height ?? null,
     });
 
     relayDebug(env, traceId, "single.telegram.started", {
@@ -306,6 +340,12 @@ export async function handleSingleSend(
         parseMode: socialContent.parseMode,
         resolvedMediaUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
         mediaStatus: "sent",
+        mediaSha256: prepared.type === "upload" ? prepared.mediaSha256 : null,
+        mediaFingerprint: prepared.type === "upload" ? prepared.mediaFingerprint : null,
+        mediaFingerprintVersion: prepared.type === "upload" ? prepared.mediaFingerprintVersion : null,
+        mediaByteLength: prepared.type === "upload" ? prepared.mediaByteLength : null,
+        mediaWidth: prepared.videoMetadata?.width ?? null,
+        mediaHeight: prepared.videoMetadata?.height ?? null,
         deliveries: successfulDeliveries.map((entry) => ({
           requestedChatId: entry.requestedChatId,
           telegramChatId: entry.result.result?.chat?.id ?? null,
@@ -351,6 +391,7 @@ export async function handleSingleSend(
     }));
     const notSent = [
       ...plan.skippedAlreadySent,
+      ...plan.skippedContentDuplicates,
       ...plan.skippedInProgress,
       ...failedChannels,
     ];
@@ -358,12 +399,22 @@ export async function handleSingleSend(
     const payload = {
       ok: successfulDeliveries.length > 0,
       partial: notSent.length > 0,
-      conflict: successfulDeliveries.length === 0 && plan.skippedAlreadySent.length > 0,
+      conflict:
+        successfulDeliveries.length === 0 &&
+        (plan.skippedAlreadySent.length > 0 || plan.skippedContentDuplicates.length > 0),
       message:
         successfulDeliveries.length > 0
           ? `Media sent to ${successfulDeliveries.length} Telegram channel(s)`
           : "Media was not sent to Telegram",
       media: plan.identity,
+      contentIdentity: prepared.type === "upload" && prepared.mediaSha256
+        ? {
+            sha256: prepared.mediaSha256,
+            fingerprint: prepared.mediaFingerprint,
+            fingerprintVersion: prepared.mediaFingerprintVersion,
+            byteLength: prepared.mediaByteLength,
+          }
+        : null,
       source: {
         inputUrl: input.mediaUrl.href,
         resolvedUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
@@ -378,6 +429,28 @@ export async function handleSingleSend(
       // Duplicate details come directly from the atomic D1 claim lookup, so the
       // client can show the exact Telegram message/channel that caused the skip.
       duplicates: getAlreadySentDeliveryDetails(plan),
+      contentDuplicates: plan.contentDuplicates.map((match) => ({
+        matchType: match.matchType,
+        similarity: Number(match.similarity.toFixed(4)),
+        mediaKey: match.mediaKey,
+        provider: match.provider,
+        sourceUrl: match.sourceUrl,
+        pageUrl: match.pageUrl,
+        mediaSha256: match.mediaSha256,
+        mediaByteLength: match.mediaByteLength,
+        deliveries: match.deliveries.map((delivery) => ({
+          channelId: delivery.channelId,
+          telegramChatId: delivery.telegramChatId,
+          messageThreadId: delivery.messageThreadId,
+          telegramChatTitle: delivery.telegramChatTitle,
+          messageIds: delivery.lastMessageIds.length ? delivery.lastMessageIds : delivery.firstMessageIds,
+          firstMessageIds: delivery.firstMessageIds,
+          lastMessageIds: delivery.lastMessageIds,
+          sendCount: delivery.sendCount,
+          firstSentAt: delivery.firstSentAt,
+          lastSentAt: delivery.lastSentAt,
+        })),
+      })),
       resolution: {
         selectedBitrate: prepared.selectedBitrate,
         selectedResolution: prepared.selectedResolution,

@@ -3,6 +3,7 @@ import { HlsRemuxer } from "./hls/remuxer";
 import { HlsResolver, looksLikeHlsUrl } from "./hls/resolver";
 import { parseVideoDimensions } from "./media/video-metadata";
 import { resolveTwitterMediumMedia } from "./social";
+import { MediaFingerprintAccumulator } from "./services/media-fingerprint";
 import { fetchPublic, getBaseContentType, getFileExtension } from "./lib/http";
 import type {
   MediaType,
@@ -126,12 +127,13 @@ export async function prepareMedia(
       );
     }
 
-    const bytes = await downloadDirectFile(
+    const downloadedDirect = await downloadDirectFile(
       direct.url,
       input.mediaHeaders,
       maxMediaBytes,
       options.signal,
     );
+    const bytes = downloadedDirect.bytes;
     const mediaType =
       input.mediaType || inferTelegramMediaType(direct.url, direct.contentType);
     const videoMetadata =
@@ -160,6 +162,10 @@ export async function prepareMedia(
       segmentCount: 1,
       encrypted: false,
       remuxed: false,
+      mediaSha256: downloadedDirect.contentIdentity.sha256,
+      mediaFingerprint: downloadedDirect.contentIdentity.fingerprint,
+      mediaFingerprintVersion: downloadedDirect.contentIdentity.fingerprintVersion,
+      mediaByteLength: downloadedDirect.contentIdentity.byteLength,
     };
   }
 
@@ -205,6 +211,8 @@ export async function prepareMedia(
     );
   }
 
+  const contentIdentity = new MediaFingerprintAccumulator().update(remuxed.bytes).digest();
+
   return {
     type: "upload",
     bytes: remuxed.bytes,
@@ -227,6 +235,10 @@ export async function prepareMedia(
       downloaded.video.encrypted ||
       Boolean(downloaded.audio?.encrypted),
     remuxed: remuxed.remuxed,
+    mediaSha256: contentIdentity.sha256,
+    mediaFingerprint: contentIdentity.fingerprint,
+    mediaFingerprintVersion: contentIdentity.fingerprintVersion,
+    mediaByteLength: contentIdentity.byteLength,
   };
 }
 
@@ -369,12 +381,13 @@ async function tryTwitterMediumQualityFallback(
 
     if (!medium || medium.url === direct.url) return null;
 
-    const bytes = await downloadDirectFile(
+    const downloadedMedium = await downloadDirectFile(
       medium.url,
       medium.mediaHeaders,
       maximumBytes,
       signal,
     );
+    const bytes = downloadedMedium.bytes;
 
     const videoMetadata = parseVideoDimensions(
       bytes,
@@ -406,6 +419,10 @@ async function tryTwitterMediumQualityFallback(
       segmentCount: 1,
       encrypted: false,
       remuxed: false,
+      mediaSha256: downloadedMedium.contentIdentity.sha256,
+      mediaFingerprint: downloadedMedium.contentIdentity.fingerprint,
+      mediaFingerprintVersion: downloadedMedium.contentIdentity.fingerprintVersion,
+      mediaByteLength: downloadedMedium.contentIdentity.byteLength,
     };
   } catch {
     // A lower-quality retry is an optimization. If it cannot produce a safe
@@ -415,12 +432,26 @@ async function tryTwitterMediumQualityFallback(
   }
 }
 
+interface DownloadedDirectFile {
+  bytes: Uint8Array;
+  contentIdentity: ReturnType<MediaFingerprintAccumulator["digest"]>;
+}
+
+/**
+ * Downloads a Worker-owned media body while hashing every received chunk in the
+ * same pass. The bytes are still collected because the Telegram multipart path
+ * requires a replayable Blob, but no second full-buffer hash pass is needed.
+ *
+ * @example
+ * const downloaded = await downloadDirectFile(url, headers, 49_000_000);
+ * console.log(downloaded.contentIdentity.sha256);
+ */
 async function downloadDirectFile(
   url: string,
   headers: HeadersInit,
   maximumBytes: number,
   signal?: AbortSignal,
-): Promise<Uint8Array> {
+): Promise<DownloadedDirectFile> {
   const response = await fetchPublic(url, {
     method: "GET",
     headers,
@@ -432,22 +463,61 @@ async function downloadDirectFile(
   }
 
   const contentLength = Number(response.headers.get("content-length") || 0);
-
   if (contentLength > maximumBytes) {
     throw new Error(
       `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
     );
   }
 
-  const bytes = new Uint8Array(await response.arrayBuffer());
-
-  if (bytes.byteLength > maximumBytes) {
-    throw new Error(
-      `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
-    );
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maximumBytes) {
+      throw new Error(
+        `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
+      );
+    }
+    const contentIdentity = new MediaFingerprintAccumulator().update(bytes).digest();
+    return { bytes, contentIdentity };
   }
 
-  return bytes;
+  const accumulator = new MediaFingerprintAccumulator();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+
+      totalBytes += value.byteLength;
+      if (totalBytes > maximumBytes) {
+        throw new Error(
+          `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
+        );
+      }
+
+      const chunk = new Uint8Array(value.byteLength);
+      chunk.set(value);
+      chunks.push(chunk);
+      accumulator.update(chunk);
+    }
+  } finally {
+    try { await reader.releaseLock(); } catch {}
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return {
+    bytes,
+    contentIdentity: accumulator.digest(),
+  };
 }
 
 /**
