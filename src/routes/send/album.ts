@@ -1,7 +1,8 @@
-
 import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import { buildLimitExceededPayload, isRelayLimitExceededError, RelayLimitExceededError } from "../../lib/limit-error";
+import { mapWithConcurrency } from "../../lib/concurrency";
 import {
   debugChannelSummary,
   debugError,
@@ -17,13 +18,14 @@ import {
 import {
   buildDeliveryConflict,
   createDeliveryPlan,
+  getAlreadySentDeliveryDetails,
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
 } from "../../services/delivery-plan";
 import {
-  resolveDefaultTelegramChatId,
-  resolveTelegramChatIds,
+  parseTelegramDestination,
+  resolveTelegramChatIdsForEnv,
 } from "../../services/channels";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import { toBlobArrayBuffer } from "../../services/telegram-delivery";
@@ -41,6 +43,7 @@ import type {
   TelegramApiResult,
   TelegramMessage,
 } from "../../types";
+import { isGenericMediaLabel } from "../../validation/common";
 import { resolveMultipartMaxTotalBytes } from "./multipart-utils";
 
 type AlbumTransport =
@@ -62,6 +65,7 @@ interface TelegramAlbumBatchDelivery {
   /** A partial ordered fallback already has external side effects. */
   hadExternalSideEffect: boolean;
   attemptCount: number;
+  clientFallback?: ReturnType<typeof buildLimitExceededPayload> | null;
 }
 
 interface TelegramAlbumBatchAttempt {
@@ -72,6 +76,7 @@ interface TelegramAlbumBatchAttempt {
   fallbackError: string | null;
   hadExternalSideEffect: boolean;
   attemptCount: number;
+  clientFallback?: ReturnType<typeof buildLimitExceededPayload> | null;
 }
 
 interface PreparedAlbumUpload {
@@ -79,322 +84,7 @@ interface PreparedAlbumUpload {
   file: Blob;
   filename: string;
   contentType: string;
-}
-
-
-interface AlbumVariantProbe {
-  item: RelayAlbumInput["items"][number];
-  originalIndex: number;
-  groupKey: string | null;
-  width: number | null;
-  height: number | null;
-  qualityScore: number;
-  contentLength: number | null;
-}
-
-/**
- * Returns a stable quality-variant group only when the Worker has enough
- * evidence that multiple URLs are alternate renditions of the same media.
- *
- * This is intentionally conservative. A normal carousel must never be
- * collapsed merely because several items are videos. Explicit resolver
- * metadata wins; after that we recognize the stable asset identifiers used by
- * X/Twitter CDNs and, finally, URL paths that contain an explicit resolution
- * directory such as /1008x720/.
- */
-function resolveAlbumVariantGroupKey(
-  item: RelayAlbumInput["items"][number],
-): string | null {
-  const metadata = item.metadata || {};
-
-  for (const key of [
-    "variantGroup",
-    "variant_group",
-    "mediaSlot",
-    "media_slot",
-    "assetId",
-    "asset_id",
-    "videoId",
-    "video_id",
-    "sourceMediaId",
-    "source_media_id",
-  ]) {
-    const value = String(metadata[key] || "").trim();
-    if (value) return `metadata:${key}:${value}`;
-  }
-
-  if (item.mediaType !== "video") return null;
-
-  const url = item.mediaUrl;
-  const path = url.pathname;
-
-  const twitterAsset = path.match(
-    /\/(?:amplify_video|ext_tw_video)\/(\d+)(?:\/|$)/i,
-  );
-  if (twitterAsset?.[1]) {
-    return `twitter-video:${twitterAsset[1]}`;
-  }
-
-  const tweetVideo = path.match(/\/tweet_video\/([^/]+?)(?:\.[a-z0-9]+)?$/i);
-  if (tweetVideo?.[1]) {
-    return `twitter-tweet-video:${tweetVideo[1]}`;
-  }
-
-  const resolutionSegment = path.match(/^(.*)\/(\d{2,5}x\d{2,5})\/[^/]+$/i);
-  if (resolutionSegment?.[1]) {
-    return `resolution-path:${url.hostname.toLowerCase()}:${resolutionSegment[1]}`;
-  }
-
-  return null;
-}
-
-function resolveAlbumVariantDimensions(
-  item: RelayAlbumInput["items"][number],
-): { width: number | null; height: number | null } {
-  const metadata = item.metadata || {};
-
-  const metadataWidth = Number(metadata.width || metadata.videoWidth || 0) || null;
-  const metadataHeight = Number(metadata.height || metadata.videoHeight || 0) || null;
-
-  if (metadataWidth && metadataHeight) {
-    return { width: metadataWidth, height: metadataHeight };
-  }
-
-  const match = item.mediaUrl.href.match(/(?:^|[/_=:-])(\d{2,5})x(\d{2,5})(?:[/_.?&=-]|$)/i);
-  if (!match) return { width: null, height: null };
-
-  return {
-    width: Number(match[1]) || null,
-    height: Number(match[2]) || null,
-  };
-}
-
-function albumVariantQualityScore(
-  item: RelayAlbumInput["items"][number],
-): number {
-  const dimensions = resolveAlbumVariantDimensions(item);
-  if (dimensions.width && dimensions.height) {
-    return dimensions.width * dimensions.height;
-  }
-
-  const metadata = item.metadata || {};
-  const bitrate = Number(
-    metadata.bitrate || metadata.bitRate || metadata.videoBitrate || 0,
-  );
-  if (Number.isFinite(bitrate) && bitrate > 0) return bitrate;
-
-  const quality = String(metadata.quality || metadata.resolution || "");
-  const qualityNumber = Number(quality.match(/(\d{3,5})/)?.[1] || 0);
-  return qualityNumber > 0 ? qualityNumber : 0;
-}
-
-/**
- * Determines the remote payload size without downloading the entire video.
- * HEAD is preferred. Some signed CDNs reject HEAD, so a one-byte Range request
- * is used as a safe fallback and Content-Range is inspected for total length.
- */
-async function probeAlbumVariantContentLength(
-  item: RelayAlbumInput["items"][number],
-): Promise<number | null> {
-  const headers = new Headers(item.mediaHeaders || {});
-
-  const parseResponseLength = (response: Response): number | null => {
-    const contentRange = response.headers.get("content-range") || "";
-    const rangeMatch = contentRange.match(/\/(\d+)\s*$/);
-    if (rangeMatch?.[1]) {
-      const total = Number(rangeMatch[1]);
-      if (Number.isFinite(total) && total > 0) return total;
-    }
-
-    const contentLength = Number(response.headers.get("content-length") || 0);
-    return Number.isFinite(contentLength) && contentLength > 0
-      ? contentLength
-      : null;
-  };
-
-  try {
-    const response = await fetch(item.mediaUrl.href, {
-      method: "HEAD",
-      headers,
-      redirect: "follow",
-    });
-    if (response.ok) {
-      const length = parseResponseLength(response);
-      if (length) return length;
-    }
-  } catch {
-    // Try the bounded Range request below.
-  }
-
-  try {
-    const rangeHeaders = new Headers(headers);
-    rangeHeaders.set("Range", "bytes=0-0");
-
-    const response = await fetch(item.mediaUrl.href, {
-      method: "GET",
-      headers: rangeHeaders,
-      redirect: "follow",
-    });
-
-    try {
-      await response.body?.cancel();
-    } catch {
-      // The size headers are already available; cancelling is best effort.
-    }
-
-    if (response.ok || response.status === 206) {
-      return parseResponseLength(response);
-    }
-  } catch {
-    // Unknown remote size. Existing media preparation remains the final guard.
-  }
-
-  return null;
-}
-
-/**
- * Collapses resolver quality variants before any Telegram album planning.
- *
- * For every recognized rendition group we sort highest quality first, probe
- * the remote size, and select the first rendition that fits MAX_MEDIA_BYTES.
- * When the best quality is too large the next quality is tried automatically,
- * continuing until a fitting rendition is found. If size cannot be measured,
- * the highest-quality unknown candidate is preferred. If every measured
- * rendition exceeds the limit, the smallest rendition is retained so the
- * existing preparation/limit path can produce its normal controlled fallback.
- */
-async function selectBestAlbumQualityVariants(
-  input: RelayAlbumInput,
-  env: Env,
-  traceId: string,
-): Promise<RelayAlbumInput> {
-  if (input.items.length < 2) return input;
-
-  const groups = new Map<string, AlbumVariantProbe[]>();
-  const groupByIndex = new Map<number, string>();
-
-  input.items.forEach((item, originalIndex) => {
-    const groupKey = resolveAlbumVariantGroupKey(item);
-    if (!groupKey) return;
-
-    const dimensions = resolveAlbumVariantDimensions(item);
-    const probe: AlbumVariantProbe = {
-      item,
-      originalIndex,
-      groupKey,
-      width: dimensions.width,
-      height: dimensions.height,
-      qualityScore: albumVariantQualityScore(item),
-      contentLength: null,
-    };
-
-    const group = groups.get(groupKey) || [];
-    group.push(probe);
-    groups.set(groupKey, group);
-    groupByIndex.set(originalIndex, groupKey);
-  });
-
-  const variantGroups = [...groups.entries()].filter(([, items]) => items.length > 1);
-  if (!variantGroups.length) return input;
-
-  const maxBytes = resolveMaxMediaBytes(env);
-  const selectedByGroup = new Map<string, AlbumVariantProbe>();
-  const diagnostics: Array<Record<string, unknown>> = [];
-
-  for (const [groupKey, candidates] of variantGroups) {
-    const ordered = [...candidates].sort((left, right) => {
-      if (right.qualityScore !== left.qualityScore) {
-        return right.qualityScore - left.qualityScore;
-      }
-      return left.originalIndex - right.originalIndex;
-    });
-
-    let selected: AlbumVariantProbe | null = null;
-    let firstUnknown: AlbumVariantProbe | null = null;
-
-    for (const candidate of ordered) {
-      candidate.contentLength = await probeAlbumVariantContentLength(candidate.item);
-
-      if (candidate.contentLength === null) {
-        if (!firstUnknown) firstUnknown = candidate;
-        continue;
-      }
-
-      if (candidate.contentLength <= maxBytes) {
-        selected = candidate;
-        break;
-      }
-    }
-
-    if (!selected && firstUnknown) {
-      selected = firstUnknown;
-    }
-
-    if (!selected) {
-      selected = [...ordered].sort((left, right) => {
-        const leftBytes = left.contentLength ?? Number.POSITIVE_INFINITY;
-        const rightBytes = right.contentLength ?? Number.POSITIVE_INFINITY;
-        return leftBytes - rightBytes;
-      })[0] || ordered[ordered.length - 1]!;
-    }
-
-    selectedByGroup.set(groupKey, selected);
-
-    diagnostics.push({
-      groupKey,
-      maxBytes,
-      selectedIndex: selected.originalIndex,
-      selectedUrl: selected.item.mediaUrl.href,
-      selectedResolution:
-        selected.width && selected.height
-          ? `${selected.width}x${selected.height}`
-          : null,
-      selectedBytes: selected.contentLength,
-      variants: ordered.map((candidate) => ({
-        index: candidate.originalIndex,
-        resolution:
-          candidate.width && candidate.height
-            ? `${candidate.width}x${candidate.height}`
-            : null,
-        bytes: candidate.contentLength,
-        fits: candidate.contentLength === null
-          ? null
-          : candidate.contentLength <= maxBytes,
-      })),
-    });
-  }
-
-  const emittedGroups = new Set<string>();
-  const items: RelayAlbumInput["items"] = [];
-
-  input.items.forEach((item, index) => {
-    const groupKey = groupByIndex.get(index);
-    const selected = groupKey ? selectedByGroup.get(groupKey) : null;
-
-    if (!groupKey || !selected) {
-      items.push(item);
-      return;
-    }
-
-    if (emittedGroups.has(groupKey)) return;
-    emittedGroups.add(groupKey);
-    items.push(selected.item);
-  });
-
-  if (items.length === input.items.length) return input;
-
-  relayDebug(env, traceId, "album.quality-variants-collapsed", {
-    originalItemCount: input.items.length,
-    selectedItemCount: items.length,
-    removedVariantCount: input.items.length - items.length,
-    maxBytes,
-    groups: diagnostics,
-  });
-
-  return {
-    ...input,
-    items,
-  };
+  videoMetadata: PreparedUpload["videoMetadata"];
 }
 
 function albumItemToRelayInput(
@@ -409,10 +99,12 @@ function albumItemToRelayInput(
     title: input.title,
     text: input.text,
     caption: item.caption || input.caption,
+    captionExplicit: Boolean(item.caption && !isGenericMediaLabel(item.caption)) || input.captionExplicit,
     parseMode: item.parseMode ?? input.parseMode,
     mediaType: item.mediaType,
     mediaHeaders: item.mediaHeaders,
     channels: [],
+    usernames: input.usernames,
     metadata: item.metadata ?? input.metadata,
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
@@ -471,7 +163,7 @@ function itemCaption(
   index: number,
   batchIndex: number,
 ): string {
-  return item.caption || (index === 0 && batchIndex === 0 ? input.caption : "");
+  return item.caption || input.caption;
 }
 
 function itemParseMode(
@@ -480,8 +172,8 @@ function itemParseMode(
   index: number,
   batchIndex: number,
 ): RelayAlbumInput["parseMode"] {
-  if (item.caption) return item.parseMode ?? (batchIndex === 0 ? input.parseMode : null);
-  return index === 0 && batchIndex === 0 ? input.parseMode : null;
+  if (item.caption) return item.parseMode ?? input.parseMode;
+  return input.parseMode;
 }
 
 function appendFallbackContext<T>(
@@ -515,6 +207,7 @@ async function prepareAlbumUploads(
       maxMediaBytes,
       concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
       hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+      twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
       forceUpload: true,
     });
     if (prepared.type !== "upload") {
@@ -523,8 +216,19 @@ async function prepareAlbumUploads(
 
     totalBytes += prepared.bytes.byteLength;
     if (totalBytes > uploadBudget) {
-      throw new Error(
+      throw new RelayLimitExceededError(
         `Album upload fallback is ${totalBytes} bytes, above the safe ${uploadBudget} byte Worker forwarding budget.`,
+        {
+          kind: "album_total_bytes",
+          stage: "prepare-album",
+          limitBytes: uploadBudget,
+          actualBytes: totalBytes,
+          resolvedMediaUrl: prepared.sourceUrl || item.mediaUrl.href,
+          sourceUrl: input.sourceUrl,
+          inputUrl: item.mediaUrl.href,
+          mediaType: item.mediaType,
+          contentType: prepared.contentType,
+        },
       );
     }
 
@@ -533,6 +237,7 @@ async function prepareAlbumUploads(
       file: new Blob([toBlobArrayBuffer(prepared.bytes)], { type: prepared.contentType }),
       filename: albumUploadFilename(prepared, item, index),
       contentType: prepared.contentType,
+      videoMetadata: prepared.videoMetadata,
     });
   }
 
@@ -553,6 +258,7 @@ async function sendPreparedAlbumItemsIndividually(
   uploads: PreparedAlbumUpload[],
   env: Env,
   chatId: string,
+  messageThreadId: number | null,
   batchIndex: number,
 ): Promise<OrderedSinglesAttempt> {
   const sent: TelegramMessage[] = [];
@@ -563,9 +269,11 @@ async function sendPreparedAlbumItemsIndividually(
     const result = await sendTelegramUpload({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       file: upload.file,
       filename: upload.filename,
       contentType: upload.contentType,
+      videoMetadata: upload.videoMetadata,
       mediaType: upload.mediaType,
       caption: itemCaption(input, item, index, batchIndex),
       parseMode: itemParseMode(input, item, index, batchIndex),
@@ -579,7 +287,9 @@ async function sendPreparedAlbumItemsIndividually(
         hadExternalSideEffect: sent.length > 0,
         attemptCount: index + 1,
         safeToTryUrls:
-          sent.length === 0 && [400, 413, 415].includes(Number(result.httpStatus || 0)),
+          !batch.some((entry) => entry.mediaType === "video") &&
+          sent.length === 0 &&
+          [400, 413, 415].includes(Number(result.httpStatus || 0)),
       };
     }
     if (result.result) sent.push(result.result);
@@ -603,6 +313,7 @@ async function sendAlbumItemsIndividually(
   batch: RelayAlbumInput["items"],
   env: Env,
   chatId: string,
+  messageThreadId: number | null,
   batchIndex: number,
 ): Promise<OrderedSinglesAttempt> {
   const sent: TelegramMessage[] = [];
@@ -616,6 +327,7 @@ async function sendAlbumItemsIndividually(
         maxMediaBytes,
         concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
         hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+      twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
         forceUpload: true,
       });
       if (candidate.type !== "upload") {
@@ -631,16 +343,20 @@ async function sendAlbumItemsIndividually(
         },
         hadExternalSideEffect: sent.length > 0,
         attemptCount: index,
-        safeToTryUrls: sent.length === 0,
+        safeToTryUrls:
+          !batch.some((entry) => entry.mediaType === "video") &&
+          sent.length === 0,
       };
     }
 
     const result = await sendTelegramUpload({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       file: new Blob([toBlobArrayBuffer(prepared.bytes)], { type: prepared.contentType }),
       filename: albumUploadFilename(prepared, item, index),
       contentType: prepared.contentType,
+      videoMetadata: prepared.videoMetadata,
       mediaType: item.mediaType,
       caption: itemCaption(input, item, index, batchIndex),
       parseMode: itemParseMode(input, item, index, batchIndex),
@@ -679,6 +395,7 @@ async function sendAlbumUrlsIndividually(
   batch: RelayAlbumInput["items"],
   env: Env,
   chatId: string,
+  messageThreadId: number | null,
   batchIndex: number,
 ): Promise<OrderedSinglesAttempt> {
   const sent: TelegramMessage[] = [];
@@ -688,6 +405,7 @@ async function sendAlbumUrlsIndividually(
     const result = await sendTelegramUrl({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       mediaUrl: item.mediaUrl.href,
       mediaType: item.mediaType,
       caption: itemCaption(input, item, index, batchIndex),
@@ -724,89 +442,38 @@ async function sendAlbumBatch(
   input: RelayAlbumInput,
   batch: RelayAlbumInput["items"],
   env: Env,
-  chatId: string,
+  destinationKey: string,
   batchIndex: number,
 ): Promise<TelegramAlbumBatchAttempt> {
-  /*
-   * A quality-variant collapse may turn an album-shaped resolver response into
-   * exactly one real media item. Telegram sendMediaGroup only accepts 2-10
-   * items, so a singleton must leave the album transport here and use the
-   * normal single-media sendPhoto/sendVideo path instead.
-   *
-   * Prefer a Worker upload because it preserves media headers/rendition bytes
-   * for providers such as X/Twitter. If preparation fails before Telegram has
-   * accepted anything, retry the same selected rendition by URL.
-   */
-  if (batch.length === 1) {
-    const uploaded = await sendAlbumItemsIndividually(
-      input,
-      batch,
-      env,
-      chatId,
-      batchIndex,
-    );
-
-    if (uploaded.result.ok) {
-      return {
-        result: uploaded.result,
-        transport: "ordered-single-upload",
-        fallbackAttempted: false,
-        orderedFallbackAttempted: true,
-        fallbackError: null,
-        hadExternalSideEffect: uploaded.hadExternalSideEffect,
-        attemptCount: uploaded.attemptCount,
-      };
-    }
-
-    if (uploaded.safeToTryUrls) {
-      const urlAttempt = await sendAlbumUrlsIndividually(
-        input,
-        batch,
-        env,
-        chatId,
-        batchIndex,
-      );
-
-      return {
-        result: urlAttempt.result,
-        transport: "ordered-single-url",
-        fallbackAttempted: true,
-        orderedFallbackAttempted: true,
-        fallbackError: urlAttempt.result.ok
-          ? null
-          : urlAttempt.result.description || "Singleton URL fallback failed",
-        hadExternalSideEffect: urlAttempt.hadExternalSideEffect,
-        attemptCount: uploaded.attemptCount + urlAttempt.attemptCount,
-      };
-    }
-
+  const destination = parseTelegramDestination(destinationKey);
+  if (!destination) {
     return {
-      result: uploaded.result,
-      transport: "ordered-single-upload",
+      result: { ok: false, description: `Invalid Telegram destination: ${destinationKey}` },
+      transport: "url",
       fallbackAttempted: false,
-      orderedFallbackAttempted: true,
-      fallbackError:
-        uploaded.result.description || "Singleton upload delivery failed",
-      hadExternalSideEffect: uploaded.hadExternalSideEffect,
-      attemptCount: uploaded.attemptCount,
+      orderedFallbackAttempted: false,
+      fallbackError: null,
+      hadExternalSideEffect: false,
+      attemptCount: 0,
     };
   }
-
+  const { chatId, messageThreadId } = destination;
   let preferredUploadAttempted = false;
   let preferredUploadError: string | null = null;
 
-  // X videos are a special case: Telegram's remote fetch has no way to carry
-  // the X Referer and may rematerialize an incompatible rendition. Preserve
-  // the native album by sending the same ordered bytes as attach:// first.
+  // Videos are intentionally Worker-owned whenever possible. This gives the
+  // relay control over the exact bytes and the real width/height sent to
+  // Telegram, instead of allowing a remote fetch to choose media geometry.
   if (batchPrefersWorkerUpload(input, batch)) {
     try {
       const uploads = await prepareAlbumUploads(input, batch, env);
       const uploaded = await sendTelegramMediaGroupUpload({
         botToken: env.TELEGRAM_BOT_TOKEN,
         chatId,
+        messageThreadId,
         items: uploads,
-        caption: batchIndex === 0 ? input.caption : "",
-        parseMode: batchIndex === 0 ? input.parseMode : null,
+        caption: input.caption,
+        parseMode: input.parseMode,
       });
       preferredUploadAttempted = true;
 
@@ -822,26 +489,66 @@ async function sendAlbumBatch(
         };
       }
 
-      // Do not retry an ambiguous upload result with URL delivery; it could
-      // create a duplicate album. Definitive Bot API rejections are safe to
-      // continue through the existing URL → upload fallback tree.
+      // Do not retry an ambiguous upload result. A network/5xx response may
+      // already have reached Telegram and could create a duplicate album.
       if (!shouldRetryAlbumAsUpload(uploaded)) {
         return {
           result: uploaded,
           transport: "multipart-upload",
           fallbackAttempted: false,
           orderedFallbackAttempted: false,
-          fallbackError: uploaded.description || "Telegram rejected the preferred X upload",
+          fallbackError: uploaded.description || "Telegram rejected the video upload",
           hadExternalSideEffect: false,
           attemptCount: 1,
         };
       }
-      preferredUploadError = uploaded.description || "Telegram rejected the preferred X upload";
+      preferredUploadError = uploaded.description || "Telegram rejected the video upload";
     } catch (error) {
-      // Preparation has no Telegram side effect. Keep URL-first as the safe
-      // escape hatch for a file too large for Worker memory/upload limits.
+      if (isRelayLimitExceededError(error)) {
+        const clientFallback = buildLimitExceededPayload(error, {
+          sourceUrl: input.sourceUrl,
+          inputUrl: batch[0]?.mediaUrl.href || null,
+          mediaType: batch[0]?.mediaType || null,
+        });
+        return {
+          result: { ok: false, httpStatus: 413, description: error.message },
+          transport: "multipart-upload",
+          fallbackAttempted: true,
+          orderedFallbackAttempted: false,
+          fallbackError: error.message,
+          hadExternalSideEffect: false,
+          attemptCount: 0,
+          clientFallback,
+        };
+      }
       preferredUploadError = getErrorMessage(error);
     }
+
+    // A video must never fall back to a remote URL after the Worker has tried
+    // to establish exact media geometry. Retry only through the ordered upload
+    // path, which reuses the same metadata-aware sendVideo implementation.
+    const ordered = await sendAlbumItemsIndividually(
+      input,
+      batch,
+      env,
+      chatId,
+      messageThreadId,
+      batchIndex,
+    );
+    return {
+      result: appendFallbackContext(
+        ordered.result,
+        `Worker video upload fallback: ${preferredUploadError || "preferred album upload failed"}.`,
+      ),
+      transport: "ordered-single-upload",
+      fallbackAttempted: true,
+      orderedFallbackAttempted: true,
+      fallbackError: ordered.result.ok
+        ? null
+        : ordered.result.description || "Ordered video upload fallback failed",
+      hadExternalSideEffect: ordered.hadExternalSideEffect,
+      attemptCount: (preferredUploadAttempted ? 1 : 0) + ordered.attemptCount + 1,
+    };
   }
 
   const priorAttemptCount = preferredUploadAttempted ? 1 : 0;
@@ -850,14 +557,15 @@ async function sendAlbumBatch(
     direct = await sendTelegramMediaGroupUrl({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       items: batch.map((item) => ({
         mediaUrl: item.mediaUrl.href,
         mediaType: item.mediaType,
         caption: item.caption,
         parseMode: item.parseMode,
       })),
-      caption: batchIndex === 0 ? input.caption : "",
-      parseMode: batchIndex === 0 ? input.parseMode : null,
+      caption: input.caption,
+      parseMode: input.parseMode,
     });
   } catch (error) {
     return {
@@ -893,9 +601,10 @@ async function sendAlbumBatch(
     const uploaded = await sendTelegramMediaGroupUpload({
       botToken: env.TELEGRAM_BOT_TOKEN,
       chatId,
+      messageThreadId,
       items: uploads,
-      caption: batchIndex === 0 ? input.caption : "",
-      parseMode: batchIndex === 0 ? input.parseMode : null,
+      caption: input.caption,
+      parseMode: input.parseMode,
     });
     if (uploaded.ok) {
       return {
@@ -918,6 +627,7 @@ async function sendAlbumBatch(
         uploads,
         env,
         chatId,
+        messageThreadId,
         batchIndex,
       );
       return {
@@ -953,11 +663,28 @@ async function sendAlbumBatch(
       attemptCount: 2 + priorAttemptCount,
     };
   } catch (error) {
+    if (isRelayLimitExceededError(error)) {
+      const clientFallback = buildLimitExceededPayload(error, {
+        sourceUrl: input.sourceUrl,
+        inputUrl: batch[0]?.mediaUrl.href || null,
+        mediaType: batch[0]?.mediaType || null,
+      });
+      return {
+        result: { ok: false, httpStatus: 413, description: error.message },
+        transport: "multipart-upload",
+        fallbackAttempted: true,
+        orderedFallbackAttempted: false,
+        fallbackError: error.message,
+        hadExternalSideEffect: false,
+        attemptCount: 1 + priorAttemptCount,
+        clientFallback,
+      };
+    }
     const fallbackError = getErrorMessage(error);
     if (mixedFallback) {
-      const ordered = await sendAlbumItemsIndividually(input, batch, env, chatId, batchIndex);
+      const ordered = await sendAlbumItemsIndividually(input, batch, env, chatId, messageThreadId, batchIndex);
       const urlFallback = !ordered.result.ok && ordered.safeToTryUrls
-        ? await sendAlbumUrlsIndividually(input, batch, env, chatId, batchIndex)
+        ? await sendAlbumUrlsIndividually(input, batch, env, chatId, messageThreadId, batchIndex)
         : null;
       const finalAttempt = urlFallback || ordered;
       return {
@@ -998,19 +725,15 @@ export async function handleJsonAlbumSend(
   env: Env,
   traceId = "album",
 ): Promise<Response> {
-  input = await selectBestAlbumQualityVariants(input, env, traceId);
-
   relayDebug(env, traceId, "album.started", {
     provider: input.provider || null,
     itemCount: input.items.length,
     mediaTypes: input.items.map((item) => item.mediaType),
     requestedChannelCount: input.channels.length,
+    routingUsernames: input.usernames,
     force: input.force,
   });
-  const chatIds = resolveTelegramChatIds(
-    input.channels,
-    resolveDefaultTelegramChatId(env),
-  );
+  const chatIds = resolveTelegramChatIdsForEnv(env, input.channels, input.usernames);
 
   if (!chatIds.length) {
     relayDebug(env, traceId, "album.no-channels", {});
@@ -1018,7 +741,7 @@ export async function handleJsonAlbumSend(
       {
         ok: false,
         error:
-          "No Telegram channel was provided. Send channel/channels in the request or configure TELEGRAM_CHAT_ID as the default.",
+          "No Telegram channel was provided. Send channel/channels or username/usernames in the request, configure TELEGRAM_USERNAME_CHANNEL_MAP_JSON, or configure TELEGRAM_CHAT_ID as the default.",
       },
       400,
     );
@@ -1074,6 +797,7 @@ export async function handleJsonAlbumSend(
       sourceUrl: input.sourceUrl,
       pageUrl: input.pageUrl,
       caption: input.caption,
+      captionExplicit: input.captionExplicit,
       parseMode: input.parseMode,
       metadata: input.metadata,
     }, env);
@@ -1110,16 +834,18 @@ export async function handleJsonAlbumSend(
       metadata: socialContent.metadata,
     };
     const batches = chunkTelegramAlbum(deliveryInput.items);
-    const deliveries: TelegramAlbumBatchDelivery[] = [];
-
     relayDebug(env, traceId, "album.telegram.started", {
       channelCount: plan.channelsToSend.length,
       batchCount: batches.length,
       mixedPhotoVideo: isMixedPhotoVideoBatch(deliveryInput.items),
     });
 
-    for (const chatId of plan.channelsToSend) {
+    // Album chunks must remain ordered within a channel, but Telegram channels
+    // are independent. Process a small number of channels concurrently so a
+    // slow destination does not serialize every other destination.
+    const processAlbumChannel = async (chatId: string): Promise<TelegramAlbumBatchDelivery[]> => {
       let itemOffset = 0;
+      const channelDeliveries: TelegramAlbumBatchDelivery[] = [];
 
       for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex]!;
@@ -1142,7 +868,7 @@ export async function handleJsonAlbumSend(
           error: attempt.result.ok ? null : attempt.result.description || null,
         });
 
-        deliveries.push({
+        channelDeliveries.push({
           requestedChatId: chatId,
           batchIndex,
           itemOffset,
@@ -1154,6 +880,7 @@ export async function handleJsonAlbumSend(
           fallbackError: attempt.fallbackError,
           hadExternalSideEffect: attempt.hadExternalSideEffect,
           attemptCount: attempt.attemptCount,
+          clientFallback: attempt.clientFallback || null,
         });
         itemOffset += batch.length;
 
@@ -1161,7 +888,17 @@ export async function handleJsonAlbumSend(
         // chunks that cannot be represented as one successful channel delivery.
         if (!attempt.result.ok) break;
       }
-    }
+
+      return channelDeliveries;
+    };
+
+    const channelConcurrency = Math.min(2, plan.channelsToSend.length);
+    const deliveriesByChannel = await mapWithConcurrency(
+      plan.channelsToSend,
+      channelConcurrency,
+      processAlbumChannel,
+    );
+    const deliveries = deliveriesByChannel.flat();
 
     const formatted = deliveries.map((delivery) => ({
       requestedChatId: delivery.requestedChatId,
@@ -1313,6 +1050,9 @@ export async function handleJsonAlbumSend(
         inserted: insertedChannelIds,
         notSent,
       },
+      // Duplicate details come directly from the atomic D1 claim lookup, so the
+      // client can show every previous Telegram message belonging to the album.
+      duplicates: getAlreadySentDeliveryDetails(plan),
       mediaSet: {
         count: input.items.length,
         batches: batches.length,
@@ -1328,6 +1068,9 @@ export async function handleJsonAlbumSend(
           : "sendMediaGroup",
         deliveries: formatted,
       },
+      clientFallbacks: deliveries
+        .map((delivery) => delivery.clientFallback)
+        .filter((fallback): fallback is NonNullable<typeof fallback> => Boolean(fallback)),
       metadata: socialContent.metadata,
       socialMetadata: socialContent.social,
       metrics: {
@@ -1351,7 +1094,9 @@ export async function handleJsonAlbumSend(
       },
     };
 
-    const status = !completedChannels.length ? 502 : notSent.length ? 207 : 200;
+    const status = !completedChannels.length
+      ? payload.clientFallbacks.length ? 413 : 502
+      : notSent.length ? 207 : 200;
     relayDebug(env, traceId, "album.completed", {
       status,
       usedOrderedSingleFallback,
