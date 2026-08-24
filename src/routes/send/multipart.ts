@@ -1,6 +1,7 @@
 import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import { buildLimitExceededPayload, RelayLimitExceededError } from "../../lib/limit-error";
 import { mapWithConcurrency } from "../../lib/concurrency";
 import {
   debugChannelSummary,
@@ -206,11 +207,27 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       fileCount: oversized.length,
       maxMediaBytes,
     });
+    const largest = [...oversized].sort((a, b) => b.file.size - a.file.size)[0]!;
+    const originalUrl = payload.sourceUrl || payload.pageUrl || payload.tweetUrl || payload.postUrl ||
+      payload.storyUrl || payload.reelUrl || payload.tiktokUrl || payload.originalUrl ||
+      payload.permalink || payload.shareUrl || payload.canonicalUrl || payload.mediaUrl ||
+      payload.videoUrl || payload.photoUrl || null;
+    const limitError = new RelayLimitExceededError(
+      "One or more uploaded files exceed the configured Worker upload limit.",
+      {
+        kind: "multipart_file_bytes",
+        stage: "validate-files",
+        limitBytes: maxMediaBytes,
+        actualBytes: largest.file.size,
+        resolvedMediaUrl: originalUrl,
+        sourceUrl: originalUrl,
+        mediaType: largest.mediaType,
+        contentType: largest.file.type || null,
+      },
+    );
     return json(
       {
-        ok: false,
-        error: "One or more uploaded files exceed the configured Worker upload limit.",
-        stage: "validate-files",
+        ...buildLimitExceededPayload(limitError, { sourceUrl: originalUrl, inputUrl: originalUrl }),
         details: {
           maxMediaBytes,
           files: oversized.map(({ field, file }) => ({
@@ -235,15 +252,29 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       multipartTotalBytes,
       multipartMaxTotalBytes,
     });
+    const originalUrl = payload.sourceUrl || payload.pageUrl || payload.tweetUrl || payload.postUrl ||
+      payload.storyUrl || payload.reelUrl || payload.tiktokUrl || payload.originalUrl ||
+      payload.permalink || payload.shareUrl || payload.canonicalUrl || payload.mediaUrl ||
+      payload.videoUrl || payload.photoUrl || null;
+    const limitError = new RelayLimitExceededError(
+      "The combined multipart file size exceeds the safe per-request forwarding budget.",
+      {
+        kind: "multipart_total_bytes",
+        stage: "validate-files",
+        limitBytes: multipartMaxTotalBytes,
+        actualBytes: multipartTotalBytes,
+        resolvedMediaUrl: originalUrl,
+        sourceUrl: originalUrl,
+        mediaType: requestedMediaType,
+      },
+    );
     return json(
       {
-        ok: false,
-        error: "The combined multipart file size exceeds the safe per-request forwarding budget.",
-        stage: "validate-files",
+        ...buildLimitExceededPayload(limitError, { sourceUrl: originalUrl, inputUrl: originalUrl }),
         details: {
           multipartTotalBytes,
           multipartMaxTotalBytes,
-          recommendation: "Send one file per POST and wait for the response before sending the next file.",
+          recommendation: "Compress locally and resend the smaller media, or send one file per POST.",
           files: uploadedFiles.map(({ field, file }) => ({
             field,
             name: file.name,
@@ -339,8 +370,8 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
             contentType: uploaded.file.type || inferUploadedContentType(uploaded.file.name),
             mediaType: uploaded.mediaType,
             videoMetadata: uploaded.videoMetadata,
-            caption: fileIndex === 0 ? caption : "",
-            parseMode: fileIndex === 0 ? socialContent.parseMode : null,
+            caption,
+            parseMode: socialContent.parseMode,
           });
         } catch (error) {
           result = {
