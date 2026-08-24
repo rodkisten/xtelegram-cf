@@ -1,4 +1,5 @@
 import type { Env, MediaType } from "./types";
+import { debugError, debugUrl, relayDebug } from "./lib/debug";
 
 export type SocialProvider = "instagram" | "twitter" | "tiktok" | "reddit" | "youtube";
 export type ResolvedSocialMediaType = "video" | "photo" | "audio";
@@ -33,6 +34,13 @@ export interface SocialResolution {
   authorUsername: string | null;
   media: ResolvedSocialMedia[];
   attempts: ResolverAttempt[];
+}
+
+export interface SocialResolveOptions {
+  /** A client-captured X handle used only if public syndication is unavailable. */
+  twitterHandleHint?: string;
+  /** Correlates resolver steps with the original Worker request. */
+  traceId?: string;
 }
 
 interface ResolverResult {
@@ -73,33 +81,73 @@ export function detectSocialProvider(value: string): SocialProvider | null {
   return null;
 }
 
-export async function resolveSocialMedia(sourceUrl: string, env: Env): Promise<SocialResolution> {
+export async function resolveSocialMedia(
+  sourceUrl: string,
+  env: Env,
+  options: SocialResolveOptions = {},
+): Promise<SocialResolution> {
   const source = detectSocialProvider(sourceUrl);
   if (!source) {
     throw new Error("Unsupported social URL. Supported: Instagram, Twitter/X, TikTok, Reddit, YouTube.");
   }
 
+  const traceId = String(options.traceId || "social");
+  relayDebug(env, traceId, "social.detected", {
+    provider: source,
+    sourceUrl: debugUrl(sourceUrl),
+    hasTwitterHandleHint: Boolean(options.twitterHandleHint),
+  });
+
+  const canonicalSourceUrl = source === "twitter"
+    ? await canonicalizeTwitterUrl(sourceUrl, options.twitterHandleHint)
+    : sourceUrl;
+
+  relayDebug(env, traceId, "social.canonicalized", {
+    provider: source,
+    sourceUrl: debugUrl(sourceUrl),
+    canonicalSourceUrl: debugUrl(canonicalSourceUrl),
+    changed: canonicalSourceUrl !== sourceUrl,
+  });
+
   const attempts: ResolverAttempt[] = [];
   const metadata: Partial<ResolverResult> = {};
-  const providers = resolverRegistry(source, sourceUrl, env);
+  const providers = resolverRegistry(source, canonicalSourceUrl, env);
 
   for (const provider of providers) {
     if (provider.enabled && !provider.enabled()) continue;
     const startedAt = Date.now();
+
+    relayDebug(env, traceId, "social.resolver.started", {
+      provider: provider.id,
+      source,
+      sourceUrl: debugUrl(canonicalSourceUrl),
+    });
 
     try {
       const result = await provider.run();
       mergeMetadata(metadata, result);
 
       if (!result.media.length) {
-        attempts.push({ provider: provider.id, ok: true, durationMs: Date.now() - startedAt });
+        const durationMs = Date.now() - startedAt;
+        attempts.push({ provider: provider.id, ok: true, durationMs });
+        relayDebug(env, traceId, "social.resolver.metadata-only", {
+          provider: provider.id,
+          durationMs,
+        });
         continue;
       }
 
-      attempts.push({ provider: provider.id, ok: true, durationMs: Date.now() - startedAt });
+      const durationMs = Date.now() - startedAt;
+      attempts.push({ provider: provider.id, ok: true, durationMs });
+      relayDebug(env, traceId, "social.resolver.succeeded", {
+        provider: provider.id,
+        durationMs,
+        mediaCount: result.media.length,
+        mediaTypes: result.media.map((item) => item.type),
+      });
       return {
         source,
-        sourceUrl,
+        sourceUrl: canonicalSourceUrl,
         resolver: provider.id,
         title: result.title || metadata.title || null,
         caption: result.caption || metadata.caption || null,
@@ -109,14 +157,31 @@ export async function resolveSocialMedia(sourceUrl: string, env: Env): Promise<S
         attempts,
       };
     } catch (error) {
+      const durationMs = Date.now() - startedAt;
       attempts.push({
         provider: provider.id,
         ok: false,
-        durationMs: Date.now() - startedAt,
+        durationMs,
         error: errorMessage(error),
+      });
+      relayDebug(env, traceId, "social.resolver.failed", {
+        provider: provider.id,
+        durationMs,
+        error: debugError(error),
       });
     }
   }
+
+  relayDebug(env, traceId, "social.all-resolvers-failed", {
+    provider: source,
+    attemptCount: attempts.length,
+    attempts: attempts.map((attempt) => ({
+      provider: attempt.provider,
+      ok: attempt.ok,
+      durationMs: attempt.durationMs,
+      error: attempt.error || null,
+    })),
+  });
 
   throw new SocialResolverError(`All ${source} resolvers failed`, attempts);
 }
@@ -906,6 +971,89 @@ async function canonicalizeRedditUrl(sourceUrl: string): Promise<string> {
     const response = await fetchWithTimeout(sourceUrl, { method: "HEAD", redirect: "follow", headers: jsonHeaders() });
     return response.url || sourceUrl;
   } catch { return sourceUrl; }
+}
+
+
+async function canonicalizeTwitterUrl(sourceUrl: string, handleHint = ""): Promise<string> {
+  let parsed: URL;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch {
+    return sourceUrl;
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  if (!(host === "x.com" || host === "twitter.com" ||
+        host.endsWith(".x.com") || host.endsWith(".twitter.com"))) {
+    return sourceUrl;
+  }
+
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  const statusIndex = parts.findIndex((part) => /^(?:status|statuses)$/i.test(part));
+  const tweetId = statusIndex >= 0 ? String(parts[statusIndex + 1] || "") : "";
+  if (!/^\d{5,}$/.test(tweetId)) return sourceUrl;
+
+  const directHandle = cleanTwitterHandle(parts[statusIndex - 1] || "");
+  if (directHandle) return `https://x.com/${directHandle}/status/${tweetId}`;
+
+  const resolvedHandle = await twitterHandleFromSyndication(tweetId);
+  const hintedHandle = cleanTwitterHandle(handleHint);
+
+  return resolvedHandle
+    ? `https://x.com/${resolvedHandle}/status/${tweetId}`
+    : hintedHandle
+      ? `https://x.com/${hintedHandle}/status/${tweetId}`
+      : `https://x.com/i/status/${tweetId}`;
+}
+
+function cleanTwitterHandle(value: unknown): string {
+  const handle = String(value || "").trim().replace(/^@+/, "");
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) return "";
+
+  return ["i", "web", "intent", "share", "search", "home", "explore"].includes(
+    handle.toLowerCase(),
+  )
+    ? ""
+    : handle;
+}
+
+async function twitterHandleFromSyndication(tweetId: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort("Twitter canonicalization timeout"),
+    4_500,
+  );
+
+  try {
+    const token = Math.random().toString(36).slice(2, 14);
+    const response = await fetch(
+      `https://cdn.syndication.twimg.com/tweet-result?id=${encodeURIComponent(tweetId)}&lang=en&token=${encodeURIComponent(token)}`,
+      {
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          Referer: "https://x.com/",
+          "User-Agent": USER_AGENT,
+        },
+        redirect: "follow",
+        signal: controller.signal,
+      },
+    );
+
+    if (!response.ok) return "";
+
+    const data = await response.json() as Record<string, any>;
+    return cleanTwitterHandle(
+      firstString(
+        data?.user?.screen_name,
+        data?.user?.username,
+        data?.screen_name,
+      ),
+    );
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function canonicalizeTikTokUrl(sourceUrl: string): Promise<string> {
