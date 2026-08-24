@@ -8,8 +8,8 @@ import type {
   TelegramUpdate,
   VideoMetadata,
 } from "./types";
+import { RELAY_LIMITS } from "./config/constants";
 
-const MAX_TELEGRAM_VIDEO_DIMENSION = 65_535;
 
 interface TelegramSendBase {
   botToken: string;
@@ -104,6 +104,19 @@ export async function sendTelegramUrl(
   },
 ): Promise<TelegramApiResult<TelegramMessage>> {
   const { method, field } = getTelegramMethod(options.mediaType);
+  const metadataError = validateRequiredVideoMetadata(
+    options.mediaType,
+    options.videoMetadata,
+  );
+  if (metadataError) {
+    return {
+      ok: false,
+      httpStatus: 422,
+      requestMethod: method,
+      description: metadataError,
+    };
+  }
+
   const payload: Record<string, unknown> = {
     chat_id: options.chatId,
     [field]: options.mediaUrl,
@@ -139,6 +152,19 @@ export async function sendTelegramUpload(
   },
 ): Promise<TelegramApiResult<TelegramMessage>> {
   const { method, field } = getTelegramMethod(options.mediaType);
+  const metadataError = validateRequiredVideoMetadata(
+    options.mediaType,
+    options.videoMetadata,
+  );
+  if (metadataError) {
+    return {
+      ok: false,
+      httpStatus: 422,
+      requestMethod: method,
+      description: metadataError,
+    };
+  }
+
   const form = new FormData();
 
   form.set("chat_id", options.chatId);
@@ -176,6 +202,23 @@ export async function sendTelegramMediaGroupUrl(options: {
       ok: false,
       description: `sendMediaGroup requires 2-10 items; received ${options.items.length}.`,
       requestMethod: "sendMediaGroup",
+    };
+  }
+
+  const invalidVideoIndex = options.items.findIndex(
+    (item) =>
+      item.mediaType === "video" &&
+      Boolean(validateRequiredVideoMetadata("video", item.videoMetadata)),
+  );
+
+  if (invalidVideoIndex >= 0) {
+    return {
+      ok: false,
+      httpStatus: 422,
+      requestMethod: "sendMediaGroup",
+      description:
+        `Video item ${invalidVideoIndex + 1} is missing valid width/height metadata. ` +
+        "Refusing Telegram URL delivery to prevent aspect-ratio distortion.",
     };
   }
 
@@ -237,6 +280,23 @@ export async function sendTelegramMediaGroupUpload(options: {
       ok: false,
       description: `sendMediaGroup requires 2-10 items; received ${options.items.length}.`,
       requestMethod: "sendMediaGroup",
+    };
+  }
+
+  const invalidVideoIndex = options.items.findIndex(
+    (item) =>
+      item.mediaType === "video" &&
+      Boolean(validateRequiredVideoMetadata("video", item.videoMetadata)),
+  );
+
+  if (invalidVideoIndex >= 0) {
+    return {
+      ok: false,
+      httpStatus: 422,
+      requestMethod: "sendMediaGroup",
+      description:
+        `Video item ${invalidVideoIndex + 1} is missing valid width/height metadata. ` +
+        "Refusing Telegram multipart delivery to prevent aspect-ratio distortion.",
     };
   }
 
@@ -326,6 +386,29 @@ export function validateEnvironment(env: Env): string | null {
  *   rotation: 0,
  * });
  */
+function validateRequiredVideoMetadata(
+  mediaType: MediaType,
+  metadata: VideoMetadata | null | undefined,
+): string | null {
+  if (mediaType !== "video") return null;
+
+  if (!metadata) {
+    return (
+      "Video width/height metadata is required before calling Telegram. " +
+      "The relay refuses to send a video whose display geometry is unknown."
+    );
+  }
+
+  if (!isValidVideoDimension(metadata.width) || !isValidVideoDimension(metadata.height)) {
+    return (
+      `Invalid video display dimensions ${metadata.width}x${metadata.height}. ` +
+      "The relay refuses to send potentially distorted video."
+    );
+  }
+
+  return null;
+}
+
 function appendVideoMetadata(
   target: Record<string, unknown> | FormData,
   metadata: VideoMetadata | null | undefined,
@@ -357,7 +440,7 @@ function appendVideoMetadata(
 }
 
 function isValidVideoDimension(value: number): boolean {
-  return Number.isFinite(value) && value > 0 && value <= MAX_TELEGRAM_VIDEO_DIMENSION;
+  return Number.isFinite(value) && value > 0 && value <= RELAY_LIMITS.telegramVideoDimensionMax;
 }
 
 function getTelegramMethod(mediaType: MediaType): {

@@ -152,6 +152,10 @@ export async function handleResolve(
   const metadata = {
     ...(requestMetadata ?? {}),
     resolver: requestMetadata?.resolver || resolution.resolver,
+    ...(resolution.authorName ? { socialAuthorName: resolution.authorName } : {}),
+    ...(resolution.authorUsername ? { socialAuthorUsername: resolution.authorUsername } : {}),
+    ...(resolution.caption ? { socialResolvedCaption: resolution.caption } : {}),
+    ...(resolution.title ? { socialResolvedTitle: resolution.title } : {}),
   };
   const common = {
     sourceUrl: resolution.sourceUrl,
@@ -184,6 +188,14 @@ export async function handleResolve(
           mediaUrl: item.url,
           mediaType: toRelayMediaType(item.type),
           mediaHeaders: item.mediaHeaders,
+          metadata: {
+            ...metadata,
+            ...(item.width ? { resolvedWidth: String(item.width) } : {}),
+            ...(item.height ? { resolvedHeight: String(item.height) } : {}),
+            ...(item.quality ? { resolvedQuality: item.quality } : {}),
+            ...(item.contentLength ? { resolvedContentLength: String(item.contentLength) } : {}),
+            ...(item.bitrate ? { resolvedBitrate: String(item.bitrate) } : {}),
+          },
         })),
       }),
       env,
@@ -227,6 +239,14 @@ export async function handleResolve(
         mediaUrl: item.url,
         mediaType: toRelayMediaType(item.type),
         mediaHeaders: item.mediaHeaders,
+        metadata: {
+          ...metadata,
+          ...(item.width ? { resolvedWidth: String(item.width) } : {}),
+          ...(item.height ? { resolvedHeight: String(item.height) } : {}),
+          ...(item.quality ? { resolvedQuality: item.quality } : {}),
+          ...(item.contentLength ? { resolvedContentLength: String(item.contentLength) } : {}),
+          ...(item.bitrate ? { resolvedBitrate: String(item.bitrate) } : {}),
+        },
       }),
       env,
     );

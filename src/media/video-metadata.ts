@@ -7,15 +7,13 @@
  */
 
 import type { VideoMetadata } from "../types";
+import { RELAY_LIMITS } from "../config/constants";
 
 export type VideoDimensions = VideoMetadata;
 
 const BOX_HEADER_BYTES = 8;
 const EXTENDED_BOX_HEADER_BYTES = 16;
 const MP4_FIXED_POINT_SHIFT = 16;
-const MAX_BOX_DEPTH = 12;
-const MAX_BOX_COUNT = 10_000;
-const MAX_VIDEO_DIMENSION = 65_535;
 const EBML_ID_MAX_BYTES = 4;
 const EBML_SIZE_MAX_BYTES = 8;
 
@@ -55,10 +53,10 @@ function parseMp4Dimensions(bytes: Uint8Array): VideoDimensions | null {
   let boxCount = 0;
 
   const walk = (start: number, end: number, depth: number): VideoDimensions | null => {
-    if (depth > MAX_BOX_DEPTH) return null;
+    if (depth > RELAY_LIMITS.videoMetadataBoxDepthMax) return null;
 
     let offset = start;
-    while (offset + BOX_HEADER_BYTES <= end && boxCount < MAX_BOX_COUNT) {
+    while (offset + BOX_HEADER_BYTES <= end && boxCount < RELAY_LIMITS.videoMetadataBoxCountMax) {
       boxCount += 1;
       const box = readMp4Box(view, offset, end);
       if (!box) return null;
@@ -165,10 +163,40 @@ function readMp4Rotation(
   const c = readSignedFixed16(view, matrixStart + 12);
   const d = readSignedFixed16(view, matrixStart + 16);
 
-  if (a === 0 && b === 1 && c === -1) return 90;
-  if (a === -1 && d === -1) return 180;
-  if (a === 0 && b === -1 && c === 1) return 270;
+  if (![a, b, c, d].every(Number.isFinite)) return 0;
+
+  /*
+   * Real MP4/MOV files do not always store a mathematically perfect quarter
+   * turn. Encoders can include tiny fixed-point rounding errors or scale in
+   * the transform matrix. Exact equality therefore misses legitimate portrait
+   * rotations and makes Telegram render them as landscape.
+   */
+  const scaleX = Math.hypot(a, b);
+  const scaleY = Math.hypot(c, d);
+  if (scaleX < 0.0001 || scaleY < 0.0001) return 0;
+
+  const normalizedA = a / scaleX;
+  const normalizedB = b / scaleX;
+  const angle = normalizeDegrees(Math.atan2(normalizedB, normalizedA) * 180 / Math.PI);
+  const nearestQuarter = Math.round(angle / 90) * 90;
+  const normalizedQuarter = ((nearestQuarter % 360) + 360) % 360;
+  const delta = Math.abs(shortestAngleDelta(angle, normalizedQuarter));
+
+  if (delta > 3) return 0;
+
+  if (normalizedQuarter === 90) return 90;
+  if (normalizedQuarter === 180) return 180;
+  if (normalizedQuarter === 270) return 270;
   return 0;
+}
+
+function normalizeDegrees(value: number): number {
+  const normalized = value % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function shortestAngleDelta(left: number, right: number): number {
+  return ((left - right + 540) % 360) - 180;
 }
 
 function readSignedFixed16(view: DataView, offset: number): number {
@@ -222,11 +250,30 @@ function parseWebmDimensions(bytes: Uint8Array): VideoDimensions | null {
   const video = findEbmlElement(view, trackEntry.start, trackEntry.end, 0xe0);
   if (!video) return null;
 
-  const width = readEbmlIntegerElement(view, video.start, video.end, 0xb0);
-  const height = readEbmlIntegerElement(view, video.start, video.end, 0xba);
-  if (!width || !height) return null;
+  const pixelWidth = readEbmlIntegerElement(view, video.start, video.end, 0xb0);
+  const pixelHeight = readEbmlIntegerElement(view, video.start, video.end, 0xba);
+  if (!pixelWidth || !pixelHeight) return null;
 
-  return { width, height, durationSeconds: null, rotation: 0 };
+  /*
+   * Matroska/WebM can declare display dimensions separately from encoded pixel
+   * dimensions. Telegram needs display geometry, otherwise anamorphic media is
+   * visibly squeezed even though PixelWidth/PixelHeight are technically valid.
+   */
+  const displayWidth = readEbmlIntegerElement(view, video.start, video.end, 0x54b0);
+  const displayHeight = readEbmlIntegerElement(view, video.start, video.end, 0x54ba);
+  const displayUnit = readEbmlIntegerElementAllowZero(view, video.start, video.end, 0x54b2);
+
+  const useDisplayDimensions =
+    displayWidth &&
+    displayHeight &&
+    (displayUnit == null || displayUnit === 0);
+
+  return {
+    width: useDisplayDimensions ? displayWidth : pixelWidth,
+    height: useDisplayDimensions ? displayHeight : pixelHeight,
+    durationSeconds: null,
+    rotation: 0,
+  };
 }
 
 interface EbmlElementRange {
@@ -276,6 +323,26 @@ function readEbmlIntegerElement(
     value = value * 256 + view.getUint8(index);
   }
   return isFinitePositiveDimension(value) ? value : null;
+}
+
+function readEbmlIntegerElementAllowZero(
+  view: DataView,
+  start: number,
+  end: number,
+  targetId: number,
+): number | null {
+  const element = findEbmlElement(view, start, end, targetId);
+  if (!element) return null;
+
+  const length = element.end - element.start;
+  if (length < 1 || length > 4) return null;
+
+  let value = 0;
+  for (let index = element.start; index < element.end; index += 1) {
+    value = value * 256 + view.getUint8(index);
+  }
+
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function readEbmlId(
@@ -333,5 +400,5 @@ function readAscii(view: DataView, offset: number, length: number): string {
 }
 
 function isFinitePositiveDimension(value: number): boolean {
-  return Number.isFinite(value) && value > 0 && value <= MAX_VIDEO_DIMENSION;
+  return Number.isFinite(value) && value > 0 && value <= RELAY_LIMITS.telegramVideoDimensionMax;
 }
