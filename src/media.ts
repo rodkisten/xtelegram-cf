@@ -1,23 +1,19 @@
-import { HlsDownloader } from "./hls/downloader";
+import { HlsDownloader, HlsDownloadError } from "./hls/downloader";
 import { HlsRemuxer } from "./hls/remuxer";
 import { HlsResolver, looksLikeHlsUrl } from "./hls/resolver";
 import { parseVideoDimensions } from "./media/video-metadata";
 import { resolveTwitterMediumMedia } from "./social";
 import { buildMediaFingerprint, MediaFingerprintAccumulator, type MediaContentFingerprint } from "./services/media-fingerprint";
 import { fetchPublic, getBaseContentType, getFileExtension } from "./lib/http";
+import { RELAY_LIMITS } from "./config/constants";
+import { RelayLimitExceededError, isRelayLimitExceededError } from "./lib/limit-error";
 import type {
   MediaType,
   PreparedMedia,
   RelayInput,
   ResolvedDirectFile,
+  VideoMetadata,
 } from "./types";
-
-const TELEGRAM_REMOTE_URL_LIMIT = 20_000_000;
-const MEDIUM_QUALITY_FALLBACK_TRIGGER_BYTES = 50_000_000;
-const DEFAULT_MAX_MEDIA_BYTES = 49_000_000;
-const HARD_MAX_MEDIA_BYTES = 49_000_000;
-const DEFAULT_HLS_MAX_MEDIA_BYTES = 16_000_000;
-const HARD_HLS_MAX_MEDIA_BYTES = 24_000_000;
 
 const VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "mov", "webm"]);
 const PHOTO_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avif", "gif"]);
@@ -49,8 +45,8 @@ export async function prepareMedia(
   const maxMediaBytes = clampMaxMediaBytes(options.maxMediaBytes);
   const hlsMaxMediaBytes = clampHlsMaxMediaBytes(options.hlsMaxMediaBytes);
   const resolver = new HlsResolver({
-    maxDepth: 8,
-    maxPlaylistBytes: 2 * 1024 * 1024,
+    maxDepth: RELAY_LIMITS.hlsResolverDepth,
+    maxPlaylistBytes: RELAY_LIMITS.hlsPlaylistBytes,
     headers: input.mediaHeaders,
     preferSelfContained: true,
   });
@@ -104,7 +100,7 @@ export async function prepareMedia(
       !options.forceUpload &&
       !isVideo &&
       (direct.contentLength == null ||
-        direct.contentLength <= TELEGRAM_REMOTE_URL_LIMIT)
+        direct.contentLength <= RELAY_LIMITS.telegramRemoteUrlBytes)
     ) {
       return direct;
     }
@@ -122,8 +118,19 @@ export async function prepareMedia(
         return mediumFallback;
       }
 
-      throw new Error(
+      throw new RelayLimitExceededError(
         `Direct media is ${direct.contentLength} bytes, above the configured upload limit of ${maxMediaBytes} bytes`,
+        {
+          kind: "direct_media_bytes",
+          stage: "prepare-media",
+          limitBytes: maxMediaBytes,
+          actualBytes: direct.contentLength,
+          resolvedMediaUrl: direct.url,
+          sourceUrl: input.sourceUrl,
+          inputUrl: input.mediaUrl.href,
+          mediaType: inferredMediaType,
+          contentType: direct.contentType,
+        },
       );
     }
 
@@ -138,7 +145,10 @@ export async function prepareMedia(
       input.mediaType || inferTelegramMediaType(direct.url, direct.contentType);
     const videoMetadata =
       mediaType === "video"
-        ? parseVideoDimensions(bytes, direct.contentType)
+        ? reconcileVideoMetadata(
+            parseVideoDimensions(bytes, direct.contentType),
+            videoMetadataHintFromInput(input),
+          )
         : null;
 
     if (mediaType === "video" && !videoMetadata) {
@@ -169,40 +179,94 @@ export async function prepareMedia(
     };
   }
 
-  const resolved = await resolver.resolve(probe.url || input.mediaUrl.href, {
-    headers: input.mediaHeaders,
-    signal: options.signal,
-  });
+  let resolved;
+  try {
+    resolved = await resolver.resolve(probe.url || input.mediaUrl.href, {
+      headers: input.mediaHeaders,
+      signal: options.signal,
+    });
+  } catch (error) {
+    if (/playlist exceeds the relay size limit/i.test(String(error instanceof Error ? error.message : error))) {
+      throw new RelayLimitExceededError(
+        "HLS playlist exceeds the relay processing limit",
+        {
+          kind: "hls_playlist_bytes",
+          stage: "resolve-hls",
+          limitBytes: RELAY_LIMITS.hlsPlaylistBytes,
+          actualBytes: null,
+          resolvedMediaUrl: probe.url || input.mediaUrl.href,
+          sourceUrl: input.sourceUrl,
+          inputUrl: input.mediaUrl.href,
+          mediaType: input.mediaType || "video",
+          contentType: "application/vnd.apple.mpegurl",
+        },
+      );
+    }
+    throw error;
+  }
   const downloader = new HlsDownloader({
     headers: input.mediaHeaders,
     concurrency: options.concurrency,
     maxMediaBytes: hlsMaxMediaBytes,
   });
-  const downloaded = await downloader.download(resolved, {
-    signal: options.signal,
-  });
+  let downloaded;
+  try {
+    downloaded = await downloader.download(resolved, {
+      signal: options.signal,
+    });
+  } catch (error) {
+    if (error instanceof HlsDownloadError) {
+      const actualBytes = Number(error.details.used || 0) || null;
+      const limitBytes = Number(error.details.maximum || hlsMaxMediaBytes);
+      throw new RelayLimitExceededError(error.message, {
+        kind: "hls_media_bytes",
+        stage: "prepare-hls",
+        limitBytes,
+        actualBytes,
+        resolvedMediaUrl: resolved.mediaPlaylist.url,
+        sourceUrl: input.sourceUrl,
+        inputUrl: input.mediaUrl.href,
+        mediaType: input.mediaType || "video",
+        contentType: "application/vnd.apple.mpegurl",
+      });
+    }
+    throw error;
+  }
   const remuxer = new HlsRemuxer();
   const baseName = baseNameFromUrl(input.sourceUrl || input.mediaUrl.href);
   const remuxed = remuxer.remux(downloaded, baseName);
 
   if (remuxed.bytes.byteLength > hlsMaxMediaBytes) {
-    throw new Error(
+    throw new RelayLimitExceededError(
       `Remuxed HLS output is ${remuxed.bytes.byteLength} bytes, above the configured in-memory HLS limit of ${hlsMaxMediaBytes} bytes`,
+      {
+        kind: "hls_media_bytes",
+        stage: "prepare-hls",
+        limitBytes: hlsMaxMediaBytes,
+        actualBytes: remuxed.bytes.byteLength,
+        resolvedMediaUrl: resolved.mediaPlaylist.url,
+        sourceUrl: input.sourceUrl,
+        inputUrl: input.mediaUrl.href,
+        mediaType: input.mediaType || remuxed.mediaType,
+        contentType: remuxed.contentType,
+      },
     );
   }
 
   const variant = resolved.selectedVariant;
   const parsedVideoMetadata = parseVideoDimensions(remuxed.bytes, remuxed.contentType);
-  const videoMetadata =
+  const videoMetadata = reconcileVideoMetadata(
     parsedVideoMetadata ||
-    (variant?.resolution
-      ? {
-          width: variant.resolution.width,
-          height: variant.resolution.height,
-          durationSeconds: null,
-          rotation: 0 as const,
-        }
-      : null);
+      (variant?.resolution
+        ? {
+            width: variant.resolution.width,
+            height: variant.resolution.height,
+            durationSeconds: null,
+            rotation: 0 as const,
+          }
+        : null),
+    videoMetadataHintFromInput(input),
+  );
 
   const preparedMediaType = input.mediaType || remuxed.mediaType;
   if (preparedMediaType === "video" && !videoMetadata) {
@@ -274,10 +338,10 @@ export function resolveConcurrency(rawValue: string | undefined): number {
   const value = Number(rawValue);
 
   if (!Number.isFinite(value)) {
-    return 4;
+    return RELAY_LIMITS.hlsConcurrencyDefault;
   }
 
-  return Math.min(6, Math.max(1, Math.floor(value)));
+  return Math.min(RELAY_LIMITS.hlsConcurrencyMax, Math.max(1, Math.floor(value)));
 }
 
 export function resolveHlsMaxMediaBytes(rawValue: string | undefined): number {
@@ -340,23 +404,23 @@ export function shouldPreferWorkerUploadForTelegram(
 
 function clampHlsMaxMediaBytes(value?: number): number {
   if (!Number.isFinite(value)) {
-    return DEFAULT_HLS_MAX_MEDIA_BYTES;
+    return RELAY_LIMITS.hlsMediaDefaultBytes;
   }
 
   return Math.min(
-    HARD_HLS_MAX_MEDIA_BYTES,
-    Math.max(1_000_000, Math.floor(value!)),
+    RELAY_LIMITS.hlsMediaHardBytes,
+    Math.max(RELAY_LIMITS.mediaMinimumBytes, Math.floor(value!)),
   );
 }
 
 function clampMaxMediaBytes(value?: number): number {
   if (!Number.isFinite(value)) {
-    return DEFAULT_MAX_MEDIA_BYTES;
+    return RELAY_LIMITS.directMediaDefaultBytes;
   }
 
   return Math.min(
-    HARD_MAX_MEDIA_BYTES,
-    Math.max(1_000_000, Math.floor(value!)),
+    RELAY_LIMITS.directMediaHardBytes,
+    Math.max(RELAY_LIMITS.mediaMinimumBytes, Math.floor(value!)),
   );
 }
 
@@ -369,7 +433,7 @@ async function tryTwitterMediumQualityFallback(
 ): Promise<PreparedMedia | null> {
   if (input.provider?.toLowerCase() !== "twitter") return null;
   if (direct.contentLength == null) return null;
-  if (direct.contentLength <= MEDIUM_QUALITY_FALLBACK_TRIGGER_BYTES) return null;
+  if (direct.contentLength <= RELAY_LIMITS.twitterMediumFallbackTriggerBytes) return null;
   if (!input.sourceUrl) return null;
   if (signal?.aborted) return null;
 
@@ -389,9 +453,19 @@ async function tryTwitterMediumQualityFallback(
     );
     const bytes = downloadedMedium.bytes;
 
-    const videoMetadata = parseVideoDimensions(
-      bytes,
-      inferContentTypeFromUrl(medium.url),
+    const videoMetadata = reconcileVideoMetadata(
+      parseVideoDimensions(
+        bytes,
+        inferContentTypeFromUrl(medium.url),
+      ),
+      medium.width && medium.height
+        ? {
+            width: medium.width,
+            height: medium.height,
+            durationSeconds: null,
+            rotation: 0,
+          }
+        : videoMetadataHintFromInput(input),
     );
 
     if (!videoMetadata) {
@@ -424,12 +498,88 @@ async function tryTwitterMediumQualityFallback(
       mediaFingerprintVersion: downloadedMedium.contentIdentity.fingerprintVersion,
       mediaByteLength: downloadedMedium.contentIdentity.byteLength,
     };
-  } catch {
-    // A lower-quality retry is an optimization. If it cannot produce a safe
-    // Worker-owned file, preserve the original error path instead of sending
-    // an unverified remote video that could reintroduce aspect-ratio issues.
+  } catch (error) {
+    // If Twirrl already gave us a concrete medium-quality media URL but that URL
+    // still exceeds the Worker budget, expose that resolved URL to the client.
+    // It is a better Shortcuts fallback than sending the user back to the larger
+    // original variant.
+    if (isRelayLimitExceededError(error)) throw error;
+
+    // Other lower-quality failures are only an optimization failure. Preserve
+    // the original path rather than sending an unverified remote video.
     return null;
   }
+}
+
+
+function videoMetadataHintFromInput(input: RelayInput): VideoMetadata | null {
+  const width = Number(input.metadata?.resolvedWidth || 0);
+  const height = Number(input.metadata?.resolvedHeight || 0);
+
+  if (!isUsableVideoDimension(width) || !isUsableVideoDimension(height)) {
+    return null;
+  }
+
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+    durationSeconds: null,
+    rotation: 0,
+  };
+}
+
+/**
+ * Keeps container metadata authoritative while using resolver geometry as a
+ * guard against a missed 90/270-degree rotation. If the container parser
+ * produces the reciprocal aspect ratio of a trusted resolver hint, the display
+ * dimensions are swapped before reaching Telegram.
+ */
+function reconcileVideoMetadata(
+  actual: VideoMetadata | null,
+  hint: VideoMetadata | null,
+): VideoMetadata | null {
+  if (!actual) return hint;
+  if (!hint) return actual;
+
+  const actualAspect = actual.width / actual.height;
+  const hintAspect = hint.width / hint.height;
+
+  if (aspectRatiosClose(actualAspect, hintAspect)) {
+    return actual;
+  }
+
+  if (aspectRatiosClose(1 / actualAspect, hintAspect)) {
+    return {
+      ...actual,
+      width: actual.height,
+      height: actual.width,
+      rotation:
+        actual.rotation === 0
+          ? 90
+          : actual.rotation === 90
+            ? 0
+            : actual.rotation === 180
+              ? 270
+              : 180,
+    };
+  }
+
+  // Do not override genuinely different geometry with third-party metadata.
+  return actual;
+}
+
+function aspectRatiosClose(left: number, right: number): boolean {
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) {
+    return false;
+  }
+
+  return Math.abs(Math.log(left / right)) <= 0.035;
+}
+
+function isUsableVideoDimension(value: number): boolean {
+  return Number.isFinite(value) &&
+    value > 0 &&
+    value <= RELAY_LIMITS.telegramVideoDimensionMax;
 }
 
 interface DownloadedDirectFile {
@@ -464,8 +614,9 @@ async function downloadDirectFile(
 
   const contentLength = Number(response.headers.get("content-length") || 0);
   if (contentLength > maximumBytes) {
-    throw new Error(
+    throw new RelayLimitExceededError(
       `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
+      { kind: "direct_media_bytes", stage: "download-media", limitBytes: maximumBytes, actualBytes: contentLength, resolvedMediaUrl: response.url || url, inputUrl: url, contentType: response.headers.get("content-type") },
     );
   }
 
@@ -473,8 +624,9 @@ async function downloadDirectFile(
   if (!reader) {
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.byteLength > maximumBytes) {
-      throw new Error(
+      throw new RelayLimitExceededError(
         `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
+        { kind: "direct_media_bytes", stage: "download-media", limitBytes: maximumBytes, actualBytes: bytes.byteLength, resolvedMediaUrl: response.url || url, inputUrl: url, contentType: response.headers.get("content-type") },
       );
     }
     const contentIdentity = await buildMediaFingerprint(bytes);
@@ -493,8 +645,9 @@ async function downloadDirectFile(
 
       totalBytes += value.byteLength;
       if (totalBytes > maximumBytes) {
-        throw new Error(
+        throw new RelayLimitExceededError(
           `Direct media exceeds the configured upload limit of ${maximumBytes} bytes`,
+          { kind: "direct_media_bytes", stage: "download-media", limitBytes: maximumBytes, actualBytes: totalBytes, resolvedMediaUrl: response.url || url, inputUrl: url, contentType: response.headers.get("content-type") },
         );
       }
 
