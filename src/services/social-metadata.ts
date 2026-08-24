@@ -1,11 +1,12 @@
 import type { Env, ParseMode } from "../types";
 import { debugUrl } from "../lib/debug";
+import { RELAY_LIMITS } from "../config/constants";
 
-export type SocialPlatform = "twitter" | "instagram";
+export type SocialPlatform = "twitter" | "instagram" | "tiktok" | "reddit" | "youtube";
 
 export interface SocialPostMetadata {
   platform: SocialPlatform;
-  origin: "X" | "Instagram";
+  origin: "X" | "Instagram" | "TikTok" | "Reddit" | "YouTube";
   sourceUrl: string;
   author: string | null;
   caption: string | null;
@@ -34,11 +35,6 @@ interface SocialDeliveryInput {
 const USER_AGENT =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
   "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
-const DEFAULT_TIMEOUT_MS = 5_000;
-const MAX_TIMEOUT_MS = 12_000;
-const CACHE_TTL_MS = 10 * 60_000;
-const MAX_CACHE_ENTRIES = 256;
-const MAX_SOCIAL_CAPTION_TEXT = 820;
 
 const cache = new Map<string, { expiresAt: number; value: SocialPostMetadata }>();
 const inFlight = new Map<string, Promise<SocialPostMetadata>>();
@@ -70,9 +66,12 @@ export async function resolveSocialDeliveryContent(
 
   const target = resolveSocialTarget(input);
   if (!target) {
+    const fallbackUrl = resolveDeliveryFallbackUrl(input);
+    const caption = input.caption.trim() || fallbackUrl || "";
+
     return {
-      caption: input.caption,
-      parseMode: input.parseMode,
+      caption,
+      parseMode: input.caption.trim() ? input.parseMode : null,
       metadata: input.metadata,
       social: null,
     };
@@ -80,7 +79,9 @@ export async function resolveSocialDeliveryContent(
 
   let social: SocialPostMetadata;
   try {
-    social = await resolveSocialPostMetadata(target.platform, target.url, env);
+    social =
+      metadataHintFromInput(target.platform, target.url, input.metadata) ||
+      await resolveSocialPostMetadata(target.platform, target.url, env);
   } catch (error) {
     console.warn("[media-relay] Social metadata enrichment failed", {
       platform: target.platform,
@@ -135,9 +136,16 @@ export async function resolveSocialPostMetadata(
       return edgeCached;
     }
 
-    const value = platform === "twitter"
-      ? await resolveTwitterMetadata(sourceUrl, env)
-      : await resolveInstagramMetadata(sourceUrl, env);
+    const value =
+      platform === "twitter"
+        ? await resolveTwitterMetadata(sourceUrl, env)
+        : platform === "instagram"
+          ? await resolveInstagramMetadata(sourceUrl, env)
+          : platform === "tiktok"
+            ? await resolveTikTokMetadata(sourceUrl, env)
+            : platform === "reddit"
+              ? await resolveRedditMetadata(sourceUrl, env)
+              : await resolveYouTubeMetadata(sourceUrl, env);
     remember(key, value);
     void writeEdgeSocialCache(key, value);
     return value;
@@ -159,22 +167,57 @@ function resolveSocialTarget(input: SocialDeliveryInput): {
     try {
       const url = new URL(value);
       const host = url.hostname.toLowerCase().replace(/^www\./, "");
-      if ((host === "x.com" || host === "twitter.com" || host.endsWith(".x.com") || host.endsWith(".twitter.com")) && /\/status\/\d+/i.test(url.pathname)) {
+
+      if (
+        (host === "x.com" || host === "twitter.com" ||
+          host.endsWith(".x.com") || host.endsWith(".twitter.com")) &&
+        /\/status\/\d+/i.test(url.pathname)
+      ) {
         return { platform: "twitter", url: normalizeTwitterPostUrl(url) };
       }
-      if ((host === "instagram.com" || host.endsWith(".instagram.com")) && /\/(?:p|reel|tv)\/[^/?#]+/i.test(url.pathname)) {
+
+      if (
+        (host === "instagram.com" || host.endsWith(".instagram.com")) &&
+        /\/(?:p|reel|tv)\/[^/?#]+/i.test(url.pathname)
+      ) {
         return { platform: "instagram", url: normalizeInstagramPostUrl(url) };
+      }
+
+      if (
+        host === "tiktok.com" || host.endsWith(".tiktok.com")
+      ) {
+        return { platform: "tiktok", url: url.href };
+      }
+
+      if (
+        host === "reddit.com" || host.endsWith(".reddit.com") ||
+        host === "redd.it" || host.endsWith(".redd.it")
+      ) {
+        return { platform: "reddit", url: url.href };
+      }
+
+      if (
+        host === "youtube.com" || host.endsWith(".youtube.com") ||
+        host === "youtu.be" || host.endsWith(".youtu.be")
+      ) {
+        return { platform: "youtube", url: url.href };
       }
     } catch {}
   }
 
   const platform: SocialPlatform | null =
     provider === "twitter" || provider === "x" ? "twitter" :
-    provider === "instagram" ? "instagram" : null;
+    provider === "instagram" ? "instagram" :
+    provider === "tiktok" ? "tiktok" :
+    provider === "reddit" ? "reddit" :
+    provider === "youtube" || provider === "youtube-shorts" ? "youtube" :
+    null;
+
   if (!platform) return null;
 
   const fallback = candidates[0];
   if (!fallback) return null;
+
   try {
     const parsed = new URL(fallback);
     if (!/^https?:$/.test(parsed.protocol)) return null;
@@ -182,6 +225,54 @@ function resolveSocialTarget(input: SocialDeliveryInput): {
   } catch {
     return null;
   }
+}
+
+function resolveDeliveryFallbackUrl(input: SocialDeliveryInput): string {
+  for (const value of [input.pageUrl, input.sourceUrl]) {
+    if (typeof value !== "string" || !value.trim()) continue;
+
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        return parsed.href;
+      }
+    } catch {}
+  }
+
+  return "";
+}
+
+function metadataHintFromInput(
+  platform: SocialPlatform,
+  sourceUrl: string,
+  metadata: Record<string, string> | null,
+): SocialPostMetadata | null {
+  if (!metadata) return null;
+
+  const authorUsername = cleanUsername(
+    stringValue(metadata.socialAuthorUsername).replace(/^@/, ""),
+  );
+  const authorName = cleanCaption(stringValue(metadata.socialAuthorName));
+  const caption = cleanCaption(
+    stringValue(metadata.socialResolvedCaption) ||
+    stringValue(metadata.socialCaption),
+  );
+
+  const author = authorUsername
+    ? `@${authorUsername}`
+    : authorName || null;
+
+  if (!author && !caption) return null;
+
+  return {
+    platform,
+    origin: socialOrigin(platform),
+    sourceUrl,
+    author,
+    caption: caption || null,
+    strategy: "resolver-metadata",
+    enriched: true,
+  };
 }
 
 async function resolveTwitterMetadata(sourceUrl: string, env: Env): Promise<SocialPostMetadata> {
@@ -348,6 +439,241 @@ async function resolveInstagramMetadata(sourceUrl: string, env: Env): Promise<So
   return fallbackMetadata("instagram", normalized, "url-fallback");
 }
 
+
+async function resolveTikTokMetadata(
+  sourceUrl: string,
+  env: Env,
+): Promise<SocialPostMetadata> {
+  const timeoutMs = resolveTimeoutMs(env);
+
+  try {
+    const body = new URLSearchParams({
+      url: sourceUrl,
+      hd: "0",
+    });
+
+    const response = await fetchWithTimeout(
+      "https://www.tikwm.com/api/",
+      {
+        method: "POST",
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+          Referer: "https://www.tikwm.com/",
+          "User-Agent": USER_AGENT,
+        },
+        body: body.toString(),
+        redirect: "follow",
+      },
+      timeoutMs,
+    );
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data = await response.json() as any;
+    if (Number(data?.code) !== 0 || !data?.data) {
+      throw new Error(stringValue(data?.msg) || "TikWM metadata unavailable");
+    }
+
+    const item = data.data;
+    const username = cleanUsername(
+      stringValue(item?.author?.unique_id) ||
+      stringValue(item?.author?.uniqueId),
+    );
+    const caption = cleanCaption(stringValue(item?.title));
+
+    if (!username && !caption) {
+      throw new Error("TikWM returned no useful metadata");
+    }
+
+    return {
+      platform: "tiktok",
+      origin: "TikTok",
+      sourceUrl,
+      author: username ? `@${username}` : null,
+      caption: caption || null,
+      strategy: "tikwm",
+      enriched: true,
+    };
+  } catch (error) {
+    console.debug("[media-relay] TikTok metadata failed", {
+      sourceUrl: debugUrl(sourceUrl),
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    return fallbackMetadata("tiktok", sourceUrl, "url-fallback");
+  }
+}
+
+async function resolveRedditMetadata(
+  sourceUrl: string,
+  env: Env,
+): Promise<SocialPostMetadata> {
+  const timeoutMs = resolveTimeoutMs(env);
+
+  try {
+    const canonical = await canonicalizeRedditMetadataUrl(sourceUrl, timeoutMs);
+    const jsonUrl = `${canonical.replace(/\/+$/, "")}.json?raw_json=1`;
+    const response = await fetchWithTimeout(
+      jsonUrl,
+      {
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          "User-Agent": "xtelegram-relay/2.14 (+Cloudflare Worker)",
+        },
+        redirect: "follow",
+      },
+      timeoutMs,
+    );
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data = await response.json() as any;
+    const post = findRedditMetadataPost(data);
+
+    if (!post) throw new Error("Reddit returned no post metadata");
+
+    const username = cleanUsername(stringValue(post?.author));
+    const title = cleanCaption(stringValue(post?.title));
+    const body = cleanCaption(stringValue(post?.selftext));
+    const caption = body || title;
+
+    return {
+      platform: "reddit",
+      origin: "Reddit",
+      sourceUrl: canonical,
+      author: username ? `@${username}` : null,
+      caption: caption || null,
+      strategy: "reddit-json",
+      enriched: Boolean(username || caption),
+    };
+  } catch (error) {
+    console.debug("[media-relay] Reddit metadata failed", {
+      sourceUrl: debugUrl(sourceUrl),
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    return fallbackMetadata("reddit", sourceUrl, "url-fallback");
+  }
+}
+
+async function resolveYouTubeMetadata(
+  sourceUrl: string,
+  env: Env,
+): Promise<SocialPostMetadata> {
+  const timeoutMs = resolveTimeoutMs(env);
+
+  try {
+    const url =
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(sourceUrl)}&format=json`;
+
+    const response = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          Accept: "application/json,text/plain,*/*",
+          "User-Agent": USER_AGENT,
+        },
+        redirect: "follow",
+      },
+      timeoutMs,
+    );
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data = await response.json() as any;
+    const authorName = cleanCaption(stringValue(data?.author_name));
+    const title = cleanCaption(stringValue(data?.title));
+
+    return {
+      platform: "youtube",
+      origin: "YouTube",
+      sourceUrl,
+      author: authorName || null,
+      caption: title || null,
+      strategy: "youtube-oembed",
+      enriched: Boolean(authorName || title),
+    };
+  } catch (error) {
+    console.debug("[media-relay] YouTube metadata failed", {
+      sourceUrl: debugUrl(sourceUrl),
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    return fallbackMetadata("youtube", sourceUrl, "url-fallback");
+  }
+}
+
+async function canonicalizeRedditMetadataUrl(
+  sourceUrl: string,
+  timeoutMs: number,
+): Promise<string> {
+  try {
+    const parsed = new URL(sourceUrl);
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+    if (host !== "redd.it") {
+      return `${parsed.origin}${parsed.pathname}`;
+    }
+
+    const response = await fetchWithTimeout(
+      sourceUrl,
+      {
+        method: "HEAD",
+        redirect: "follow",
+        headers: {
+          "User-Agent": "xtelegram-relay/2.14 (+Cloudflare Worker)",
+        },
+      },
+      timeoutMs,
+    );
+
+    return response.url || sourceUrl;
+  } catch {
+    return sourceUrl;
+  }
+}
+
+function findRedditMetadataPost(value: any): any | null {
+  const queue = [value];
+  const seen = new Set<any>();
+
+  while (queue.length) {
+    const current = queue.shift();
+
+    if (!current || typeof current !== "object" || seen.has(current)) {
+      continue;
+    }
+
+    seen.add(current);
+
+    if (current?.kind === "t3" && current?.data) {
+      return current.data;
+    }
+
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+
+    if (Array.isArray(current?.data?.children)) {
+      queue.push(...current.data.children);
+    }
+  }
+
+  return null;
+}
+
+function socialOrigin(
+  platform: SocialPlatform,
+): SocialPostMetadata["origin"] {
+  if (platform === "twitter") return "X";
+  if (platform === "instagram") return "Instagram";
+  if (platform === "tiktok") return "TikTok";
+  if (platform === "reddit") return "Reddit";
+  return "YouTube";
+}
+
 function instagramCaptionFromMeta(title: string, description: string, author: string): string {
   const candidates = [description, title].map((value) => cleanCaption(value)).filter(Boolean);
   for (const candidate of candidates) {
@@ -375,7 +701,7 @@ function instagramCaptionFromMeta(title: string, description: string, author: st
 function buildRichCaption(metadata: SocialPostMetadata): string {
   const parts = [`<b>${escapeHtml(metadata.origin)}</b>`];
   if (metadata.author) parts.push(escapeHtml(metadata.author));
-  if (metadata.caption) parts.push(escapeHtml(truncate(metadata.caption, MAX_SOCIAL_CAPTION_TEXT)));
+  if (metadata.caption) parts.push(escapeHtml(truncate(metadata.caption, RELAY_LIMITS.socialCaptionTextMax)));
   parts.push(`<a href="${escapeHtmlAttribute(metadata.sourceUrl)}">Origem</a>`);
   return parts.join("\n\n");
 }
@@ -387,7 +713,7 @@ function fallbackMetadata(
 ): SocialPostMetadata {
   return {
     platform,
-    origin: platform === "twitter" ? "X" : "Instagram",
+    origin: socialOrigin(platform),
     sourceUrl,
     author: null,
     caption: null,
@@ -420,7 +746,12 @@ function normalizeInstagramPostUrl(url: URL): string {
 function canonicalLookupUrl(platform: SocialPlatform, sourceUrl: string): string {
   try {
     const parsed = new URL(sourceUrl);
-    return platform === "twitter" ? normalizeTwitterPostUrl(parsed) : normalizeInstagramPostUrl(parsed);
+
+    if (platform === "twitter") return normalizeTwitterPostUrl(parsed);
+    if (platform === "instagram") return normalizeInstagramPostUrl(parsed);
+
+    parsed.hash = "";
+    return parsed.href;
   } catch {
     return sourceUrl;
   }
@@ -484,9 +815,9 @@ async function fetchWithTimeout(
 }
 
 function resolveTimeoutMs(env: Env): number {
-  const raw = Number(env.SOCIAL_METADATA_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
-  if (!Number.isFinite(raw)) return DEFAULT_TIMEOUT_MS;
-  return Math.min(MAX_TIMEOUT_MS, Math.max(1_000, Math.floor(raw)));
+  const raw = Number(env.SOCIAL_METADATA_TIMEOUT_MS || RELAY_LIMITS.socialMetadataTimeoutDefaultMs);
+  if (!Number.isFinite(raw)) return RELAY_LIMITS.socialMetadataTimeoutDefaultMs;
+  return Math.min(RELAY_LIMITS.socialMetadataTimeoutMaxMs, Math.max(1_000, Math.floor(raw)));
 }
 
 function metaContent(html: string, key: string): string {
@@ -603,7 +934,7 @@ async function writeEdgeSocialCache(key: string, value: SocialPostMetadata): Pro
   try {
     const response = new Response(JSON.stringify(value), {
       headers: {
-        "Cache-Control": `public, max-age=${Math.floor(CACHE_TTL_MS / 1000)}`,
+        "Cache-Control": `public, max-age=${Math.floor(RELAY_LIMITS.socialMetadataCacheTtlMs / 1000)}`,
         "Content-Type": "application/json; charset=utf-8",
       },
     });
@@ -652,8 +983,20 @@ function createSocialCacheRequest(key: string): Request {
 function isValidSocialMetadata(value: unknown): value is SocialPostMetadata {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<SocialPostMetadata>;
-  return (candidate.platform === "twitter" || candidate.platform === "instagram") &&
-    (candidate.origin === "X" || candidate.origin === "Instagram") &&
+  return (
+      candidate.platform === "twitter" ||
+      candidate.platform === "instagram" ||
+      candidate.platform === "tiktok" ||
+      candidate.platform === "reddit" ||
+      candidate.platform === "youtube"
+    ) &&
+    (
+      candidate.origin === "X" ||
+      candidate.origin === "Instagram" ||
+      candidate.origin === "TikTok" ||
+      candidate.origin === "Reddit" ||
+      candidate.origin === "YouTube"
+    ) &&
     typeof candidate.sourceUrl === "string" &&
     (typeof candidate.author === "string" || candidate.author === null) &&
     (typeof candidate.caption === "string" || candidate.caption === null) &&
@@ -662,11 +1005,11 @@ function isValidSocialMetadata(value: unknown): value is SocialPostMetadata {
 }
 
 function remember(key: string, value: SocialPostMetadata): void {
-  if (cache.size >= MAX_CACHE_ENTRIES) {
+  if (cache.size >= RELAY_LIMITS.socialMetadataCacheEntriesMax) {
     const oldest = cache.keys().next().value as string | undefined;
     if (oldest) cache.delete(oldest);
   }
-  cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, value });
+  cache.set(key, { expiresAt: Date.now() + RELAY_LIMITS.socialMetadataCacheTtlMs, value });
 }
 
 function randomToken(): string {
