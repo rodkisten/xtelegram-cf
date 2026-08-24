@@ -1,5 +1,6 @@
 import type { Env, MediaType } from "./types";
 import { debugError, debugUrl, relayDebug } from "./lib/debug";
+import { RELAY_LIMITS } from "./config/constants";
 
 export type SocialProvider = "instagram" | "twitter" | "tiktok" | "reddit" | "youtube";
 export type ResolvedSocialMediaType = "video" | "photo" | "audio";
@@ -273,16 +274,15 @@ async function resolveFxTwitter(sourceUrl: string): Promise<ResolverResult> {
   for (const item of rawMedia) {
     const formats = array<any>(item?.formats);
     if (formats.length) {
-      for (const format of formats) {
+      const variants = formats.map((format) => {
         const url = normalizeProviderUrl(format?.url);
-        if (!url || String(format?.container || "").toLowerCase() === "m3u8") continue;
-        media.push(mediaItem(media.length, url, inferType(undefined, item?.type, url), {
-          ...item,
-          ...format,
-          filesize: format?.size ?? item?.filesize,
-          bitrate: format?.bitrate,
-        }));
-      }
+        if (!url || String(format?.container || "").toLowerCase() === "m3u8") return null;
+        return mediaItem(media.length, url, inferType(undefined, item?.type, url), {
+          ...item, ...format, filesize: format?.size ?? item?.filesize, bitrate: format?.bitrate,
+        });
+      }).filter(isMedia);
+      const selected = selectBestQualityVariant(variants);
+      if (selected) media.push({ ...selected, index: media.length });
       continue;
     }
 
@@ -363,17 +363,13 @@ async function resolveTikWm(sourceUrl: string): Promise<ResolverResult> {
       { url: item?.wmplay, quality: "watermark", size: item?.wm_size },
     ];
 
-    for (const variant of variants) {
+    const candidates = variants.map((variant) => {
       const url = normalizeProviderUrl(variant.url);
-      if (!url) continue;
-      media.push(mediaItem(media.length, url, "video", {
-        quality: variant.quality,
-        filesize: variant.size,
-        width: item?.width,
-        height: item?.height,
-        thumbnail: item?.cover,
-      }));
-    }
+      return url ? mediaItem(0, url, "video", { quality: variant.quality, filesize: variant.size,
+        width: item?.width, height: item?.height, thumbnail: item?.cover }) : null;
+    }).filter(isMedia);
+    const selected = selectBestQualityVariant(candidates);
+    if (selected) media.push({ ...selected, index: media.length });
   }
 
   return {
@@ -639,21 +635,28 @@ async function resolveTwirrl(sourceUrl: string, token?: string): Promise<Resolve
   const data = await fetchJson<any>("https://api.twirrl.app/video", {
     method: "POST", headers: { ...jsonHeaders(), "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
-  const seen = new Set<string>();
   const media: ResolvedSocialMedia[] = [];
-  for (const item of array<any>(data?.d?.i)) {
-    if (!item || typeof item !== "object") continue;
-    for (const value of Object.values(item as Record<string, any>)) {
+  for (const rawGroup of array<any>(data?.d?.i)) {
+    if (!rawGroup || typeof rawGroup !== "object") continue;
+    const seen = new Set<string>();
+    const variants: ResolvedSocialMedia[] = [];
+    for (const value of Object.values(rawGroup as Record<string, any>)) {
       const url = normalizeProviderUrl(value?.u);
       if (!url || seen.has(url)) continue;
       seen.add(url);
-      media.push(mediaItem(media.length, url, "video", value));
+      const resolution = resolutionFromUrl(url);
+      variants.push(mediaItem(media.length, url, "video", { ...value,
+        width: numberOrNull(value?.width ?? value?.w) || resolution.width,
+        height: numberOrNull(value?.height ?? value?.h) || resolution.height,
+        quality: firstString(value?.quality, value?.resolution, resolution.label),
+      }));
     }
+    const selected = selectBestQualityVariant(variants);
+    if (selected) media.push({ ...selected, index: media.length });
   }
   if (!media.length) throw new Error(data?.error || data?.message || "Twirrl returned no valid video variants");
   return { title: null, caption: null, authorName: null, authorUsername: null, media };
 }
-
 
 /**
  * Re-queries Twirrl when the selected Twitter/X video is above the Worker's
@@ -889,6 +892,33 @@ async function resolveDTikTok(sourceUrl: string): Promise<ResolverResult> {
   }).filter(isMedia);
   if (!media.length) throw new Error(data?.error || data?.message || "DTikTok returned no media");
   return { title: null, caption: null, authorName: null, authorUsername: null, media };
+}
+
+function selectBestQualityVariant(items: ResolvedSocialMedia[]): ResolvedSocialMedia | null {
+  if (!items.length) return null;
+  const ranked = [...items].sort(compareQualityVariants);
+  const limit = RELAY_LIMITS.directMediaHardBytes;
+  return ranked.find((item) => item.contentLength == null || item.contentLength <= limit) || ranked[ranked.length - 1] || null;
+}
+
+function compareQualityVariants(left: ResolvedSocialMedia, right: ResolvedSocialMedia): number {
+  const leftArea = (left.width || 0) * (left.height || 0);
+  const rightArea = (right.width || 0) * (right.height || 0);
+  if (leftArea !== rightArea) return rightArea - leftArea;
+  if ((left.bitrate || 0) !== (right.bitrate || 0)) return (right.bitrate || 0) - (left.bitrate || 0);
+  return qualityScore(right.quality) - qualityScore(left.quality);
+}
+
+function qualityScore(value: string | null): number {
+  const quality = String(value || "").toLowerCase();
+  if (/2160|4k|uhd/.test(quality)) return 500;
+  if (/1440|2k|qhd/.test(quality)) return 450;
+  if (/1080|full.?hd|fhd/.test(quality)) return 400;
+  if (/720|\bhd\b/.test(quality)) return 300;
+  if (/480|\bsd\b/.test(quality)) return 200;
+  if (/360/.test(quality)) return 150;
+  if (/240|watermark/.test(quality)) return 100;
+  return 0;
 }
 
 function dedupeAndRankMedia(items: ResolvedSocialMedia[]): ResolvedSocialMedia[] {
