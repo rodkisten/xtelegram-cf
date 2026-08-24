@@ -171,8 +171,8 @@ export function isGenericMediaLabel(value: string): boolean {
 
   if (!normalized) return false;
 
-  return /^(?:(?:twitter|x|instagram|tiktok)\s+)?(?:video|media|photo|foto|image|imagem|audio|post|story|reel)(?:\s+(?:video|media|photo|foto|image|imagem|audio))?$/.test(normalized) ||
-    /^(?:twitter|x|instagram|tiktok)\s+(?:video|media|photo|foto|image|imagem|audio|post|story|reel)$/.test(normalized);
+  return /^(?:(?:twitter|x|instagram|tiktok|reddit|youtube)\s+)?(?:video|media|photo|foto|image|imagem|audio|post|story|reel)(?:\s+(?:video|media|photo|foto|image|imagem|audio))?$/.test(normalized) ||
+    /^(?:twitter|x|instagram|tiktok|reddit|youtube)\s+(?:video|media|photo|foto|image|imagem|audio|post|story|reel)$/.test(normalized);
 }
 
 export function normalizeCaption(value: unknown): string {
