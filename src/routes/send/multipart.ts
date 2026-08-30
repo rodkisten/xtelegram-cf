@@ -10,7 +10,7 @@ import {
   relayTraceId,
 } from "../../lib/debug";
 import { parseVideoDimensions } from "../../media/video-metadata";
-import { resolveMaxMediaBytes } from "../../media";
+import { resolveMaxMediaBytes, resolveTelegramUploadLimitBytes } from "../../media";
 import {
   parseTelegramDestination,
   resolveTelegramChatIdsForEnv,
@@ -201,7 +201,9 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     }
   }
 
-  const oversized = uploadedFiles.filter(({ file }) => file.size > maxMediaBytes);
+  const oversized = uploadedFiles.filter(({ file, mediaType }) =>
+    file.size > resolveTelegramUploadLimitBytes(mediaType, maxMediaBytes),
+  );
   if (oversized.length) {
     relayDebug(env, traceId, "multipart.file-too-large", {
       fileCount: oversized.length,
@@ -212,12 +214,13 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       payload.storyUrl || payload.reelUrl || payload.tiktokUrl || payload.originalUrl ||
       payload.permalink || payload.shareUrl || payload.canonicalUrl || payload.mediaUrl ||
       payload.videoUrl || payload.photoUrl || null;
+    const largestLimitBytes = resolveTelegramUploadLimitBytes(largest.mediaType, maxMediaBytes);
     const limitError = new RelayLimitExceededError(
-      "One or more uploaded files exceed the configured Worker upload limit.",
+      "One or more uploaded files exceed the effective Telegram/configured upload limit.",
       {
         kind: "multipart_file_bytes",
         stage: "validate-files",
-        limitBytes: maxMediaBytes,
+        limitBytes: largestLimitBytes,
         actualBytes: largest.file.size,
         resolvedMediaUrl: originalUrl,
         sourceUrl: originalUrl,
@@ -230,11 +233,13 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
         ...buildLimitExceededPayload(limitError, { sourceUrl: originalUrl, inputUrl: originalUrl }),
         details: {
           maxMediaBytes,
-          files: oversized.map(({ field, file }) => ({
+          files: oversized.map(({ field, file, mediaType }) => ({
             field,
             name: file.name,
             type: file.type,
+            mediaType,
             size: file.size,
+            maxBytes: resolveTelegramUploadLimitBytes(mediaType, maxMediaBytes),
           })),
         },
       },

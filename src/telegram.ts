@@ -165,6 +165,16 @@ export async function sendTelegramUpload(
     };
   }
 
+  const sizeError = validateTelegramMultipartFileSize(options.mediaType, options.file.size);
+  if (sizeError) {
+    return {
+      ok: false,
+      httpStatus: 413,
+      requestMethod: method,
+      description: sizeError,
+    };
+  }
+
   const form = new FormData();
 
   form.set("chat_id", options.chatId);
@@ -300,6 +310,21 @@ export async function sendTelegramMediaGroupUpload(options: {
     };
   }
 
+  const oversizedIndex = options.items.findIndex((item) =>
+    Boolean(validateTelegramMultipartFileSize(item.mediaType, item.file.size)),
+  );
+  if (oversizedIndex >= 0) {
+    const item = options.items[oversizedIndex]!;
+    return {
+      ok: false,
+      httpStatus: 413,
+      requestMethod: "sendMediaGroup",
+      description:
+        `Album item ${oversizedIndex + 1} exceeds the hosted Telegram Bot API multipart limit: ` +
+        `${item.file.size} bytes for ${item.mediaType}.`,
+    };
+  }
+
   const form = new FormData();
   const media = options.items.map((item, index) => {
     const field = `media${index}`;
@@ -358,6 +383,19 @@ export async function editTelegramMessageCaption(options: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+function validateTelegramMultipartFileSize(
+  mediaType: MediaType,
+  fileSize: number,
+): string | null {
+  const maximum = mediaType === "photo"
+    ? RELAY_LIMITS.telegramUploadPhotoBytes
+    : RELAY_LIMITS.telegramUploadOtherBytes;
+  if (!Number.isFinite(fileSize) || fileSize < 0) return "Invalid upload file size.";
+  return fileSize <= maximum
+    ? null
+    : `Hosted Telegram Bot API multipart limit exceeded: ${fileSize} bytes > ${maximum} bytes for ${mediaType}.`;
 }
 
 export function validateEnvironment(env: Env): string | null {

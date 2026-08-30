@@ -1,12 +1,12 @@
 import type { Env, MediaType } from "./types";
 import { debugError, debugUrl, relayDebug } from "./lib/debug";
 import { RELAY_LIMITS } from "./config/constants";
+import { mapWithConcurrency } from "./lib/concurrency";
 
 export type SocialProvider = "instagram" | "twitter" | "tiktok" | "reddit" | "youtube";
 export type ResolvedSocialMediaType = "video" | "photo" | "audio";
 
-export interface ResolvedSocialMedia {
-  index: number;
+export interface ResolvedSocialMediaVariant {
   url: string;
   type: ResolvedSocialMediaType;
   quality: string | null;
@@ -16,6 +16,12 @@ export interface ResolvedSocialMedia {
   contentLength: number | null;
   bitrate: number | null;
   mediaHeaders: Record<string, string>;
+}
+
+export interface ResolvedSocialMedia extends ResolvedSocialMediaVariant {
+  index: number;
+  /** All known renditions of this same logical media, ordered best to worst. */
+  variants: ResolvedSocialMediaVariant[];
 }
 
 export interface ResolverAttempt {
@@ -154,7 +160,11 @@ export async function resolveSocialMedia(
         caption: result.caption || metadata.caption || null,
         authorName: result.authorName || metadata.authorName || null,
         authorUsername: result.authorUsername || metadata.authorUsername || null,
-        media: dedupeAndRankMedia(result.media),
+        media: await finalizeResolvedMediaQualities(
+          dedupeAndRankMedia(result.media),
+          env,
+          traceId,
+        ),
         attempts,
       };
     } catch (error) {
@@ -277,12 +287,12 @@ async function resolveFxTwitter(sourceUrl: string): Promise<ResolverResult> {
       const variants = formats.map((format) => {
         const url = normalizeProviderUrl(format?.url);
         if (!url || String(format?.container || "").toLowerCase() === "m3u8") return null;
-        return mediaItem(media.length, url, inferType(undefined, item?.type, url), {
+        return mediaVariant(url, inferType(undefined, item?.type, url), {
           ...item, ...format, filesize: format?.size ?? item?.filesize, bitrate: format?.bitrate,
         });
-      }).filter(isMedia);
-      const selected = selectBestQualityVariant(variants);
-      if (selected) media.push({ ...selected, index: media.length });
+      }).filter(isMediaVariant);
+      const logical = logicalMediaFromVariants(media.length, variants);
+      if (logical) media.push(logical);
       continue;
     }
 
@@ -365,11 +375,11 @@ async function resolveTikWm(sourceUrl: string): Promise<ResolverResult> {
 
     const candidates = variants.map((variant) => {
       const url = normalizeProviderUrl(variant.url);
-      return url ? mediaItem(0, url, "video", { quality: variant.quality, filesize: variant.size,
+      return url ? mediaVariant(url, "video", { quality: variant.quality, filesize: variant.size,
         width: item?.width, height: item?.height, thumbnail: item?.cover }) : null;
-    }).filter(isMedia);
-    const selected = selectBestQualityVariant(candidates);
-    if (selected) media.push({ ...selected, index: media.length });
+    }).filter(isMediaVariant);
+    const logical = logicalMediaFromVariants(media.length, candidates);
+    if (logical) media.push(logical);
   }
 
   return {
@@ -478,18 +488,27 @@ async function resolveYtDlp(sourceUrl: string, env: Env): Promise<ResolverResult
     body: JSON.stringify({ url: sourceUrl }),
   });
 
-  const candidates = array<any>(data?.media).length ? array<any>(data.media) :
-    array<any>(data?.formats).filter((item) => item?.url && (item?.vcodec !== "none" || item?.acodec !== "none"));
+  const media: ResolvedSocialMedia[] = [];
 
-  const media = candidates.map((item, index) => {
-    const url = normalizeProviderUrl(firstString(item?.url, item?.download_url));
-    return url ? mediaItem(index, url, inferType(undefined, item?.type, url), {
-      ...item,
-      filesize: item?.filesize ?? item?.filesize_approx,
-      bitrate: item?.tbr ? Number(item.tbr) * 1000 : item?.bitrate,
-      quality: firstString(item?.format_note, item?.format_id, item?.quality),
-    }) : null;
-  }).filter(isMedia);
+  if (array<any>(data?.media).length) {
+    for (const item of array<any>(data.media)) {
+      const nestedFormats = array<any>(item?.formats);
+      if (nestedFormats.length) {
+        const variants = ytDlpFormatsToVariants(nestedFormats);
+        const logical = logicalMediaFromVariants(media.length, variants);
+        if (logical) media.push(logical);
+        continue;
+      }
+
+      const url = normalizeProviderUrl(firstString(item?.url, item?.download_url));
+      if (url) media.push(mediaItem(media.length, url, inferType(undefined, item?.type, url), item));
+    }
+  } else {
+    // Root-level yt-dlp formats are renditions of one logical media item.
+    const variants = ytDlpFormatsToVariants(array<any>(data?.formats));
+    const logical = logicalMediaFromVariants(0, variants);
+    if (logical) media.push(logical);
+  }
 
   if (!media.length) {
     const url = normalizeProviderUrl(firstString(data?.url, data?.download_url));
@@ -506,6 +525,26 @@ async function resolveYtDlp(sourceUrl: string, env: Env): Promise<ResolverResult
   };
 }
 
+function ytDlpFormatsToVariants(formats: any[]): ResolvedSocialMediaVariant[] {
+  return formats.map((item) => {
+    const url = normalizeProviderUrl(firstString(item?.url, item?.download_url));
+    if (!url) return null;
+
+    const hasVideo = String(item?.vcodec || "none").toLowerCase() !== "none";
+    const hasAudio = String(item?.acodec || "none").toLowerCase() !== "none";
+
+    // A video-only adaptive stream is not a complete Telegram video.
+    if (hasVideo && !hasAudio) return null;
+    if (!hasVideo && !hasAudio) return null;
+
+    return mediaVariant(url, hasVideo ? "video" : "audio", {
+      ...item,
+      filesize: item?.filesize ?? item?.filesize_approx,
+      bitrate: item?.tbr ? Number(item.tbr) * 1000 : item?.bitrate,
+      quality: firstString(item?.format_note, item?.format_id, item?.quality),
+    });
+  }).filter(isMediaVariant);
+}
 
 async function resolveYouTubeOEmbed(sourceUrl: string): Promise<ResolverResult> {
   const endpoint =
@@ -532,55 +571,37 @@ async function resolvePipedYouTube(sourceUrl: string, env: Env): Promise<Resolve
 
   const data = await fetchJson<any>(
     `${apiBase.replace(/\/+$/, "")}/streams/${encodeURIComponent(videoId)}`,
-    {
-      headers: jsonHeaders(),
-    },
+    { headers: jsonHeaders() },
   );
 
-  const media: ResolvedSocialMedia[] = [];
+  const variants: ResolvedSocialMediaVariant[] = [];
 
   for (const item of array<any>(data?.videoStreams)) {
-    /*
-     * Telegram needs a playable video, not an adaptive video-only track. Piped
-     * exposes both progressive/muxed and videoOnly streams. Keep only streams
-     * that already contain audio; if none exist, return metadata-only so the
-     * resolver registry can continue to Cobalt / yt-dlp instead of sending a
-     * silent or incomplete file.
-     */
+    // Only progressive/muxed streams are directly playable by Telegram.
     if (item?.videoOnly === true) continue;
 
     const url = normalizeProviderUrl(item?.url);
     if (!url) continue;
 
-    media.push(
-      mediaItem(media.length, url, "video", {
-        ...item,
-        quality: firstString(item?.quality, item?.qualityLabel),
-        width: item?.width,
-        height: item?.height,
-        bitrate: item?.bitrate,
-        filesize: item?.contentLength,
-        thumbnail: firstString(data?.thumbnailUrl),
-      }),
-    );
+    variants.push(mediaVariant(url, "video", {
+      ...item,
+      quality: firstString(item?.quality, item?.qualityLabel),
+      width: item?.width,
+      height: item?.height,
+      bitrate: item?.bitrate,
+      filesize: item?.contentLength,
+      thumbnail: firstString(data?.thumbnailUrl),
+    }));
   }
 
-  if (!media.length) {
-    return {
-      title: firstString(data?.title),
-      caption: firstString(data?.description),
-      authorName: firstString(data?.uploader),
-      authorUsername: null,
-      media: [],
-    };
-  }
+  const logical = logicalMediaFromVariants(0, variants);
 
   return {
     title: firstString(data?.title),
     caption: firstString(data?.description),
     authorName: firstString(data?.uploader),
     authorUsername: null,
-    media,
+    media: logical ? [logical] : [],
   };
 }
 
@@ -632,29 +653,43 @@ async function resolveZoraaHub(sourceUrl: string): Promise<ResolverResult> {
 async function resolveTwirrl(sourceUrl: string, token?: string): Promise<ResolverResult> {
   const body: Record<string, string> = { u: sourceUrl, o: "iOS" };
   if (token?.trim()) body.v = token.trim();
+
   const data = await fetchJson<any>("https://api.twirrl.app/video", {
-    method: "POST", headers: { ...jsonHeaders(), "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST",
+    headers: { ...jsonHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
+
   const media: ResolvedSocialMedia[] = [];
+
   for (const rawGroup of array<any>(data?.d?.i)) {
     if (!rawGroup || typeof rawGroup !== "object") continue;
+
     const seen = new Set<string>();
-    const variants: ResolvedSocialMedia[] = [];
+    const variants: ResolvedSocialMediaVariant[] = [];
+
     for (const value of Object.values(rawGroup as Record<string, any>)) {
       const url = normalizeProviderUrl(value?.u);
       if (!url || seen.has(url)) continue;
       seen.add(url);
+
       const resolution = resolutionFromUrl(url);
-      variants.push(mediaItem(media.length, url, "video", { ...value,
+      variants.push(mediaVariant(url, "video", {
+        ...value,
         width: numberOrNull(value?.width ?? value?.w) || resolution.width,
         height: numberOrNull(value?.height ?? value?.h) || resolution.height,
         quality: firstString(value?.quality, value?.resolution, resolution.label),
       }));
     }
-    const selected = selectBestQualityVariant(variants);
-    if (selected) media.push({ ...selected, index: media.length });
+
+    const logical = logicalMediaFromVariants(media.length, variants);
+    if (logical) media.push(logical);
   }
-  if (!media.length) throw new Error(data?.error || data?.message || "Twirrl returned no valid video variants");
+
+  if (!media.length) {
+    throw new Error(data?.error || data?.message || "Twirrl returned no valid video variants");
+  }
+
   return { title: null, caption: null, authorName: null, authorUsername: null, media };
 }
 
@@ -894,23 +929,173 @@ async function resolveDTikTok(sourceUrl: string): Promise<ResolverResult> {
   return { title: null, caption: null, authorName: null, authorUsername: null, media };
 }
 
-function selectBestQualityVariant(items: ResolvedSocialMedia[]): ResolvedSocialMedia | null {
-  if (!items.length) return null;
-  const ranked = [...items].sort(compareQualityVariants);
-  const limit = RELAY_LIMITS.directMediaHardBytes;
-  return ranked.find((item) => item.contentLength == null || item.contentLength <= limit) || ranked[ranked.length - 1] || null;
+async function finalizeResolvedMediaQualities(
+  items: ResolvedSocialMedia[],
+  env: Env,
+  traceId: string,
+): Promise<ResolvedSocialMedia[]> {
+  const finalized = await mapWithConcurrency(
+    items,
+    RELAY_LIMITS.qualityProbeConcurrency,
+    async (item) => {
+      const variants = item.variants.length
+        ? item.variants
+        : [stripMediaIndex(item)];
+      const hydrated = await hydrateVariantSizes(variants);
+      const ranked = dedupeVariants(hydrated).sort(compareQualityVariants);
+      const maximumBytes = resolveSocialUploadLimitBytes(item.type, env.MAX_MEDIA_BYTES);
+      const selected = selectBestQualityVariant(ranked, maximumBytes);
+
+      if (!selected) return item;
+
+      relayDebug(env, traceId, "social.quality-selected", {
+        mediaIndex: item.index,
+        mediaType: item.type,
+        maximumBytes,
+        selectedQuality: selected.quality,
+        selectedBytes: selected.contentLength,
+        available: ranked.map((variant) => ({
+          quality: variant.quality,
+          width: variant.width,
+          height: variant.height,
+          bitrate: variant.bitrate,
+          contentLength: variant.contentLength,
+          fits: variant.contentLength == null ? null : variant.contentLength <= maximumBytes,
+          url: debugUrl(variant.url),
+        })),
+      });
+
+      return {
+        ...selected,
+        index: item.index,
+        variants: ranked,
+      };
+    },
+  );
+
+  return finalized.map((item, index) => ({ ...item, index }));
 }
 
-function compareQualityVariants(left: ResolvedSocialMedia, right: ResolvedSocialMedia): number {
+async function hydrateVariantSizes(
+  variants: ResolvedSocialMediaVariant[],
+): Promise<ResolvedSocialMediaVariant[]> {
+  return mapWithConcurrency(
+    variants,
+    RELAY_LIMITS.qualityProbeConcurrency,
+    async (variant) => {
+      if (variant.contentLength != null) return variant;
+      const contentLength = await probeVariantContentLength(variant.url, variant.mediaHeaders);
+      return contentLength == null ? variant : { ...variant, contentLength };
+    },
+  );
+}
+
+async function probeVariantContentLength(
+  url: string,
+  mediaHeaders: Record<string, string>,
+): Promise<number | null> {
+  const headers = { ...mediaHeaders, Accept: "*/*" };
+
+  try {
+    const response = await fetchWithQualityProbeTimeout(url, {
+      method: "HEAD",
+      headers,
+      redirect: "follow",
+    });
+    const value = positiveHeaderNumber(response.headers.get("content-length"));
+    if (value != null) return value;
+  } catch {}
+
+  try {
+    const response = await fetchWithQualityProbeTimeout(url, {
+      method: "GET",
+      headers: { ...headers, Range: "bytes=0-0" },
+      redirect: "follow",
+    });
+
+    const range = response.headers.get("content-range");
+    const rangeMatch = range?.match(/\/(\d+)\s*$/);
+    const rangedTotal = rangeMatch?.[1] ? Number(rangeMatch[1]) : NaN;
+    const fallbackLength = positiveHeaderNumber(response.headers.get("content-length"));
+
+    try { await response.body?.cancel(); } catch {}
+
+    if (Number.isFinite(rangedTotal) && rangedTotal > 0) return Math.floor(rangedTotal);
+    if (response.status === 200 && fallbackLength != null) return fallbackLength;
+  } catch {}
+
+  return null;
+}
+
+async function fetchWithQualityProbeTimeout(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort("quality size probe timeout"),
+    RELAY_LIMITS.qualityProbeTimeoutMs,
+  );
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function positiveHeaderNumber(value: string | null): number | null {
+  const numeric = Number(value || 0);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
+}
+
+function resolveSocialUploadLimitBytes(
+  mediaType: ResolvedSocialMediaType,
+  rawConfigured: string | undefined,
+): number {
+  const configuredRaw = Number(rawConfigured);
+  const configured = Number.isFinite(configuredRaw)
+    ? Math.min(
+        RELAY_LIMITS.directMediaHardBytes,
+        Math.max(RELAY_LIMITS.mediaMinimumBytes, Math.floor(configuredRaw)),
+      )
+    : RELAY_LIMITS.directMediaDefaultBytes;
+
+  return mediaType === "photo"
+    ? Math.min(configured, RELAY_LIMITS.telegramUploadPhotoBytes)
+    : Math.min(configured, RELAY_LIMITS.telegramUploadOtherBytes);
+}
+
+function selectBestQualityVariant(
+  items: ResolvedSocialMediaVariant[],
+  maximumBytes: number,
+): ResolvedSocialMediaVariant | null {
+  if (!items.length) return null;
+  const ranked = [...items].sort(compareQualityVariants);
+
+  // Walk the ladder from best to worst. A known oversized rendition is skipped.
+  // If a probe could not determine a size, keep that higher quality and let
+  // prepareMedia perform the authoritative byte-limited download; it has the same
+  // ladder and will continue to the next variant if the file proves too large.
+  for (const item of ranked) {
+    if (item.contentLength == null || item.contentLength <= maximumBytes) return item;
+  }
+
+  return ranked[ranked.length - 1] || null;
+}
+
+function compareQualityVariants(
+  left: ResolvedSocialMediaVariant,
+  right: ResolvedSocialMediaVariant,
+): number {
   const leftArea = (left.width || 0) * (left.height || 0);
   const rightArea = (right.width || 0) * (right.height || 0);
   if (leftArea !== rightArea) return rightArea - leftArea;
-  if ((left.bitrate || 0) !== (right.bitrate || 0)) return (right.bitrate || 0) - (left.bitrate || 0);
+  if ((left.bitrate || 0) !== (right.bitrate || 0)) {
+    return (right.bitrate || 0) - (left.bitrate || 0);
+  }
   return qualityScore(right.quality) - qualityScore(left.quality);
 }
 
 function qualityScore(value: string | null): number {
   const quality = String(value || "").toLowerCase();
+  if (/4320|8k/.test(quality)) return 600;
   if (/2160|4k|uhd/.test(quality)) return 500;
   if (/1440|2k|qhd/.test(quality)) return 450;
   if (/1080|full.?hd|fhd/.test(quality)) return 400;
@@ -921,14 +1106,44 @@ function qualityScore(value: string | null): number {
   return 0;
 }
 
+function logicalMediaFromVariants(
+  index: number,
+  variants: ResolvedSocialMediaVariant[],
+): ResolvedSocialMedia | null {
+  const ranked = dedupeVariants(variants).sort(compareQualityVariants);
+  const selected = ranked[0];
+  return selected ? { ...selected, index, variants: ranked } : null;
+}
+
+function dedupeVariants(
+  variants: ResolvedSocialMediaVariant[],
+): ResolvedSocialMediaVariant[] {
+  const map = new Map<string, ResolvedSocialMediaVariant>();
+  for (const variant of variants) {
+    const existing = map.get(variant.url);
+    if (!existing) {
+      map.set(variant.url, variant);
+      continue;
+    }
+    map.set(variant.url, {
+      ...existing,
+      ...variant,
+      contentLength: variant.contentLength ?? existing.contentLength,
+      width: variant.width ?? existing.width,
+      height: variant.height ?? existing.height,
+      bitrate: variant.bitrate ?? existing.bitrate,
+      quality: variant.quality || existing.quality,
+    });
+  }
+  return [...map.values()];
+}
+
 function dedupeAndRankMedia(items: ResolvedSocialMedia[]): ResolvedSocialMedia[] {
+  // Quality ordering belongs inside each logical media item's variants[]. Keep
+  // different media in the provider/source order so albums do not reshuffle.
   const map = new Map<string, ResolvedSocialMedia>();
   for (const item of items) if (!map.has(item.url)) map.set(item.url, item);
-  return [...map.values()].sort((a, b) => {
-    const aArea = (a.width || 0) * (a.height || 0);
-    const bArea = (b.width || 0) * (b.height || 0);
-    return bArea - aArea || (b.bitrate || 0) - (a.bitrate || 0);
-  }).map((item, index) => ({ ...item, index }));
+  return [...map.values()].map((item, index) => ({ ...item, index }));
 }
 
 function mergeMetadata(target: Partial<ResolverResult>, incoming: ResolverResult): void {
@@ -938,20 +1153,50 @@ function mergeMetadata(target: Partial<ResolverResult>, incoming: ResolverResult
   target.authorUsername ||= incoming.authorUsername;
 }
 
-function mediaItem(index: number, url: string, type: ResolvedSocialMediaType, item: any): ResolvedSocialMedia {
+function mediaVariant(
+  url: string,
+  type: ResolvedSocialMediaType,
+  item: any,
+): ResolvedSocialMediaVariant {
   const explicitWidth = numberOrNull(item?.width);
   const explicitHeight = numberOrNull(item?.height);
   const fromUrl = resolutionFromUrl(url);
   const width = explicitWidth || fromUrl.width;
   const height = explicitHeight || fromUrl.height;
   return {
-    index, url, type,
+    url,
+    type,
     quality: firstString(item?.quality, item?.resolution, width && height ? `${width}x${height}` : null),
-    width, height,
+    width,
+    height,
     thumbnail: firstString(item?.thumbnail, item?.thumbnail_url, item?.thumb, item?.poster, item?.cover),
     contentLength: numberOrNull(item?.filesize ?? item?.size ?? item?.contentLength),
     bitrate: numberOrNull(item?.bitrate),
     mediaHeaders: mediaHeadersForUrl(url),
+  };
+}
+
+function mediaItem(
+  index: number,
+  url: string,
+  type: ResolvedSocialMediaType,
+  item: any,
+): ResolvedSocialMedia {
+  const variant = mediaVariant(url, type, item);
+  return { ...variant, index, variants: [variant] };
+}
+
+function stripMediaIndex(item: ResolvedSocialMedia): ResolvedSocialMediaVariant {
+  return {
+    url: item.url,
+    type: item.type,
+    quality: item.quality,
+    width: item.width,
+    height: item.height,
+    thumbnail: item.thumbnail,
+    contentLength: item.contentLength,
+    bitrate: item.bitrate,
+    mediaHeaders: item.mediaHeaders,
   };
 }
 
@@ -1200,5 +1445,6 @@ function numberOrNull(value: unknown): number | null {
   const n = Number(value); return Number.isFinite(n) && n > 0 ? n : null;
 }
 function isMedia(value: ResolvedSocialMedia | null): value is ResolvedSocialMedia { return Boolean(value?.url); }
+function isMediaVariant(value: ResolvedSocialMediaVariant | null): value is ResolvedSocialMediaVariant { return Boolean(value?.url); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 export function toRelayMediaType(type: ResolvedSocialMediaType): MediaType { return type === "photo" ? "photo" : type; }
