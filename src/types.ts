@@ -32,6 +32,17 @@ export type ParseMode = "HTML" | "MarkdownV2";
 export type MediaType = "video" | "audio" | "document" | "photo";
 export type AlbumMediaType = "video" | "photo";
 
+
+export interface RelayMediaVariant {
+  mediaUrl: URL;
+  quality: string | null;
+  width: number | null;
+  height: number | null;
+  contentLength: number | null;
+  bitrate: number | null;
+  mediaHeaders: Record<string, string>;
+}
+
 export interface RelayInput {
   mediaUrl: URL;
   sourceUrl: string | null;
@@ -44,6 +55,7 @@ export interface RelayInput {
   parseMode: ParseMode | null;
   mediaType: MediaType | null;
   mediaHeaders: Record<string, string>;
+  mediaVariants: RelayMediaVariant[];
   channels: string[];
   usernames: string[];
   metadata: Record<string, string> | null;
@@ -59,6 +71,7 @@ export interface RelayAlbumItem {
   parseMode: ParseMode | null;
   /** Headers required by this individual CDN URL during Worker fallback. */
   mediaHeaders: Record<string, string>;
+  mediaVariants: RelayMediaVariant[];
   metadata: Record<string, string> | null;
 }
 
