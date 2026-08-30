@@ -1,5 +1,5 @@
 export const SERVICE_NAME = "generic-telegram-media-relay";
-export const SERVICE_VERSION = "2.14.2";
+export const SERVICE_VERSION = "2.15.0";
 export const SERVICE_RUNTIME =
   "typescript-hls-remux-photo-video-album-ordered-fallback-d1-atomic-claims-batch-send-social-metadata-modular";
 
@@ -12,6 +12,14 @@ export const MAX_TELEGRAM_CHANNELS_PER_REQUEST = 20;
 
 export const RELAY_LIMITS = Object.freeze({
   mediaMinimumBytes: 1 * 1024 * 1024,
+  // Official hosted Bot API "Sending Files" ceilings for the transports this relay uses.
+  // URL: 5 MB for photos, 20 MB for other content.
+  // multipart/form-data: 10 MB for photos, 50 MB for other files.
+  telegramRemotePhotoBytes: 5 * 1024 * 1024,
+  telegramRemoteOtherBytes: 20 * 1024 * 1024,
+  telegramUploadPhotoBytes: 10 * 1024 * 1024,
+  telegramUploadOtherBytes: 50 * 1024 * 1024,
+  // Backwards-compatible alias used by older callers.
   telegramRemoteUrlBytes: 20 * 1024 * 1024,
   twitterMediumFallbackTriggerBytes: 50 * 1024 * 1024,
 
@@ -35,4 +43,9 @@ export const RELAY_LIMITS = Object.freeze({
 
   videoMetadataBoxDepthMax: 12,
   videoMetadataBoxCountMax: 2_048,
+
+  // Variant probing is intentionally bounded: all quality URLs are retained, while
+  // unknown sizes are resolved with HEAD/Range requests at controlled concurrency.
+  qualityProbeConcurrency: 4,
+  qualityProbeTimeoutMs: 6_000,
 } as const);
