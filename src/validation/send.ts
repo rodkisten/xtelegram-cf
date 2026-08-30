@@ -1,5 +1,5 @@
 import { normalizeOptionalSourceUrl, normalizePublicHttpUrl } from "../lib/http";
-import type { AlbumMediaType, RelayAlbumInput, RelayInput } from "../types";
+import type { AlbumMediaType, RelayAlbumInput, RelayInput, RelayMediaVariant } from "../types";
 import {
   normalizeCaption,
   normalizeMediaHeaders,
@@ -54,6 +54,9 @@ export function validateRequestBody(body: unknown): SendValidationResult {
   const usernameValidation = normalizeRoutingUsernames(record.username, record.usernames);
   if (!usernameValidation.ok) return { ok: false, error: usernameValidation.error };
 
+  const mediaHeaders = normalizeMediaHeaders(record.mediaHeaders);
+  const mediaVariants = normalizeRelayMediaVariants(record.mediaVariants, mediaHeaders);
+
   return {
     ok: true,
     value: {
@@ -67,7 +70,8 @@ export function validateRequestBody(body: unknown): SendValidationResult {
       captionExplicit: resolveCaptionExplicitFlag(record),
       parseMode: resolveCaptionExplicitFlag(record) ? parseMode : null,
       mediaType,
-      mediaHeaders: normalizeMediaHeaders(record.mediaHeaders),
+      mediaHeaders,
+      mediaVariants,
       channels: channelValidation.value,
       usernames: usernameValidation.value,
       metadata: normalizeMetadata(record.metadata),
@@ -166,12 +170,18 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       };
     }
 
+    const normalizedItemHeaders = normalizeMediaHeaders(itemMediaHeaders);
+    const itemVariants = rawItem && typeof rawItem === "object" && !Array.isArray(rawItem)
+      ? normalizeRelayMediaVariants((rawItem as Record<string, unknown>).mediaVariants, normalizedItemHeaders)
+      : [];
+
     items.push({
       mediaUrl,
       mediaType,
       caption: itemCaption,
       parseMode: itemParseMode,
-      mediaHeaders: normalizeMediaHeaders(itemMediaHeaders),
+      mediaHeaders: normalizedItemHeaders,
+      mediaVariants: itemVariants,
       metadata: normalizeMetadata(itemMetadata),
     });
   }
@@ -204,6 +214,41 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       force: record.force === true,
     },
   };
+}
+
+function normalizeRelayMediaVariants(
+  value: unknown,
+  fallbackHeaders: Record<string, string>,
+): RelayMediaVariant[] {
+  if (!Array.isArray(value)) return [];
+
+  const variants: RelayMediaVariant[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of value.slice(0, 48)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const record = raw as Record<string, unknown>;
+    const mediaUrl = normalizePublicHttpUrl(record.mediaUrl ?? record.url);
+    if (!mediaUrl || seen.has(mediaUrl.href)) continue;
+    seen.add(mediaUrl.href);
+
+    variants.push({
+      mediaUrl,
+      quality: normalizeNullableText(record.quality, 120),
+      width: normalizePositiveInteger(record.width),
+      height: normalizePositiveInteger(record.height),
+      contentLength: normalizePositiveInteger(record.contentLength ?? record.size ?? record.filesize),
+      bitrate: normalizePositiveInteger(record.bitrate),
+      mediaHeaders: normalizeMediaHeaders(record.mediaHeaders ?? record.headers ?? fallbackHeaders),
+    });
+  }
+
+  return variants;
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : null;
 }
 
 function resolveCaptionExplicitFlag(record: Record<string, unknown>): boolean {
