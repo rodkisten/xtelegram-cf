@@ -188,6 +188,15 @@ export async function handleResolve(
           mediaUrl: item.url,
           mediaType: toRelayMediaType(item.type),
           mediaHeaders: item.mediaHeaders,
+          mediaVariants: item.variants.map((variant) => ({
+            mediaUrl: variant.url,
+            quality: variant.quality,
+            width: variant.width,
+            height: variant.height,
+            contentLength: variant.contentLength,
+            bitrate: variant.bitrate,
+            mediaHeaders: variant.mediaHeaders,
+          })),
           metadata: {
             ...metadata,
             ...(item.width ? { resolvedWidth: String(item.width) } : {}),
@@ -239,6 +248,15 @@ export async function handleResolve(
         mediaUrl: item.url,
         mediaType: toRelayMediaType(item.type),
         mediaHeaders: item.mediaHeaders,
+        mediaVariants: item.variants.map((variant) => ({
+          mediaUrl: variant.url,
+          quality: variant.quality,
+          width: variant.width,
+          height: variant.height,
+          contentLength: variant.contentLength,
+          bitrate: variant.bitrate,
+          mediaHeaders: variant.mediaHeaders,
+        })),
         metadata: {
           ...metadata,
           ...(item.width ? { resolvedWidth: String(item.width) } : {}),
