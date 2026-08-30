@@ -1089,6 +1089,38 @@ Default no `wrangler.toml`:
 32000000
 ```
 
+### Telegram Bot API + quality ladder
+
+O relay usa a Bot API hospedada (`https://api.telegram.org`) e respeita dois limites ao mesmo tempo:
+
+1. o `MAX_MEDIA_BYTES` configurado no Worker;
+2. o teto do transporte usado para enviar ao Telegram.
+
+Limites da Bot API hospedada aplicados pelo relay:
+
+| Transporte | Foto | Outros arquivos (incluindo vídeo) |
+| --- | ---: | ---: |
+| Telegram baixa uma URL HTTP | 5 MiB | 20 MiB |
+| Worker envia `multipart/form-data` | 10 MiB | 50 MiB |
+
+Vídeos são deliberadamente enviados como multipart pelo Worker para que `width` e `height` reais sejam
+inspecionados antes do `sendVideo`. Portanto, para vídeo, o limite efetivo é
+`min(MAX_MEDIA_BYTES, 50 MiB)`. Com o `wrangler.toml` atual (`32000000`), o teto efetivo é 32.000.000 bytes.
+
+Resolvers que expõem várias qualidades mantêm uma `variants[]` completa por mídia. O relay tenta determinar o
+tamanho de cada variante com metadata do provider e, quando necessário, `HEAD`/`Range`. A escolha percorre a
+escada do maior para o menor:
+
+```text
+1080p  46 MB  > 32 MB  -> pula
+720p   28 MB  <= 32 MB  -> seleciona
+480p   14 MB             -> preservada como fallback
+```
+
+A lista de variantes acompanha a resolução e também chega à etapa de preparação. Se o CDN informar um tamanho
+diferente no download real, `prepareMedia()` continua para a próxima qualidade em vez de retornar erro
+imediatamente.
+
 ### `HLS_CONCURRENCY`
 
 Default:
