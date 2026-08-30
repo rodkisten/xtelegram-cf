@@ -13,6 +13,7 @@ import {
   resolveConcurrency,
   resolveHlsMaxMediaBytes,
   resolveMaxMediaBytes,
+  resolveTelegramRemoteUrlLimitBytes,
   shouldPreferWorkerUploadForTelegram,
 } from "../../media";
 import {
@@ -103,6 +104,7 @@ function albumItemToRelayInput(
     parseMode: item.parseMode ?? input.parseMode,
     mediaType: item.mediaType,
     mediaHeaders: item.mediaHeaders,
+    mediaVariants: item.mediaVariants,
     channels: [],
     usernames: input.usernames,
     metadata: item.metadata ?? input.metadata,
@@ -149,12 +151,21 @@ function batchPrefersWorkerUpload(
   input: RelayAlbumInput,
   batch: RelayAlbumInput["items"],
 ): boolean {
-  return batch.some((item) =>
-    shouldPreferWorkerUploadForTelegram(
-      albumItemToRelayInput(input, item),
-      item.mediaUrl.href,
-    ),
-  );
+  return batch.some((item) => {
+    if (
+      shouldPreferWorkerUploadForTelegram(
+        albumItemToRelayInput(input, item),
+        item.mediaUrl.href,
+      )
+    ) {
+      return true;
+    }
+
+    const resolvedBytes = Number(item.metadata?.resolvedContentLength || 0);
+    return item.mediaType === "photo" &&
+      Number.isFinite(resolvedBytes) &&
+      resolvedBytes > resolveTelegramRemoteUrlLimitBytes("photo");
+  });
 }
 
 function itemCaption(
