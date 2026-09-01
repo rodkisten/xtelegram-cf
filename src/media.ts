@@ -218,6 +218,8 @@ export async function prepareMedia(
     }
     throw error;
   }
+  assertHlsPreflightCpuBudget(resolved, input);
+
   const downloader = new HlsDownloader({
     headers: input.mediaHeaders,
     concurrency: options.concurrency,
@@ -246,6 +248,8 @@ export async function prepareMedia(
     }
     throw error;
   }
+  assertHlsTransmuxCpuBudget(downloaded, resolved.mediaPlaylist.url, input);
+
   const remuxer = new HlsRemuxer();
   const baseName = baseNameFromUrl(input.sourceUrl || input.mediaUrl.href);
   const remuxed = remuxer.remux(downloaded, baseName);
@@ -631,6 +635,103 @@ async function tryTwitterMediumQualityFallback(
 }
 
 
+function assertHlsPreflightCpuBudget(
+  resolved: {
+    mediaPlaylist: {
+      url: string;
+      segments: Array<{ uri: string; gap: boolean; map: { uri: string } | null; keys: unknown[]; key: unknown | null }>;
+      trailingParts: Array<{ uri: string; gap: boolean }>;
+    };
+    audio: {
+      playlist: {
+        segments: Array<{ uri: string; gap: boolean; map: { uri: string } | null; keys: unknown[]; key: unknown | null }>;
+        trailingParts: Array<{ uri: string; gap: boolean }>;
+      };
+    } | null;
+  },
+  input: RelayInput,
+): void {
+  const playlists = [
+    resolved.mediaPlaylist,
+    ...(resolved.audio ? [resolved.audio.playlist] : []),
+  ];
+
+  const segmentCount = playlists.reduce((total, playlist) => {
+    const regular = playlist.segments.filter((segment) => segment.uri && !segment.gap).length;
+    const parts = regular ? 0 : playlist.trailingParts.filter((part) => part.uri && !part.gap).length;
+    return total + regular + parts;
+  }, 0);
+
+  if (segmentCount <= RELAY_LIMITS.hlsTransmuxCpuMaxSegments) return;
+
+  // EXT-X-MAP strongly indicates fragmented MP4, which only needs concatenation.
+  // The proactive guard is limited to playlists that look like MPEG-TS so a
+  // long fMP4 playlist can still pass through the cheap path.
+  const likelyTransportStream = playlists.some((playlist) =>
+    playlist.segments.some((segment) =>
+      !segment.map?.uri && /\.ts(?:$|[?#])/i.test(segment.uri)
+    )
+  );
+
+  if (!likelyTransportStream) return;
+
+  throw new RelayLimitExceededError(
+    `HLS MPEG-TS has ${segmentCount} segments, above the Worker CPU-safe transmux budget`,
+    {
+      kind: "hls_cpu_budget",
+      stage: "hls-transmux-preflight-cpu-guard",
+      limitBytes: RELAY_LIMITS.hlsTransmuxCpuMaxInputBytes,
+      actualBytes: null,
+      resolvedMediaUrl: resolved.mediaPlaylist.url,
+      sourceUrl: input.sourceUrl,
+      inputUrl: input.mediaUrl.href,
+      mediaType: input.mediaType || "video",
+      contentType: "application/vnd.apple.mpegurl",
+    },
+  );
+}
+
+function assertHlsTransmuxCpuBudget(
+  downloaded: {
+    video: { container: string; size: number; segmentCount: number };
+    audio: { container: string; size: number; segmentCount: number } | null;
+  },
+  resolvedMediaUrl: string,
+  input: RelayInput,
+): void {
+  const requiresTransmux =
+    downloaded.video.container === "mpegts" ||
+    downloaded.audio?.container === "mpegts";
+
+  if (!requiresTransmux) return;
+
+  const inputBytes = downloaded.video.size + (downloaded.audio?.size || 0);
+  const segmentCount =
+    downloaded.video.segmentCount + (downloaded.audio?.segmentCount || 0);
+
+  if (
+    inputBytes <= RELAY_LIMITS.hlsTransmuxCpuMaxInputBytes &&
+    segmentCount <= RELAY_LIMITS.hlsTransmuxCpuMaxSegments
+  ) {
+    return;
+  }
+
+  throw new RelayLimitExceededError(
+    `HLS MPEG-TS requires CPU-heavy transmuxing beyond the Worker safe budget (${inputBytes} bytes / ${segmentCount} segments)`,
+    {
+      kind: "hls_cpu_budget",
+      stage: "hls-transmux-cpu-guard",
+      limitBytes: RELAY_LIMITS.hlsTransmuxCpuMaxInputBytes,
+      actualBytes: inputBytes,
+      resolvedMediaUrl,
+      sourceUrl: input.sourceUrl,
+      inputUrl: input.mediaUrl.href,
+      mediaType: input.mediaType || "video",
+      contentType: "application/vnd.apple.mpegurl",
+    },
+  );
+}
+
 function videoMetadataHintFromInput(input: RelayInput): VideoMetadata | null {
   const width = Number(input.metadata?.resolvedWidth || 0);
   const height = Number(input.metadata?.resolvedHeight || 0);
@@ -752,7 +853,12 @@ async function downloadDirectFile(
     return { bytes, contentIdentity };
   }
 
-  const accumulator = new MediaFingerprintAccumulator();
+  // Unknown-size and large bodies deliberately skip exact SHA-256. Provider/media
+  // identity remains authoritative and the fixed-budget fingerprint still gives
+  // content-level duplicate protection without hashing tens of megabytes.
+  const shouldComputeExactHash =
+    contentLength > 0 && contentLength <= RELAY_LIMITS.exactContentHashMaxBytes;
+  const accumulator = new MediaFingerprintAccumulator(shouldComputeExactHash);
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
 
@@ -770,10 +876,10 @@ async function downloadDirectFile(
         );
       }
 
-      const chunk = new Uint8Array(value.byteLength);
-      chunk.set(value);
-      chunks.push(chunk);
-      await accumulator.update(chunk);
+      // ReadableStream already gives us an owned Uint8Array. Keeping that chunk
+      // directly avoids one full extra memcpy before the final contiguous buffer.
+      chunks.push(value);
+      await accumulator.update(value);
     }
   } finally {
     try { await reader.releaseLock(); } catch {}
