@@ -1,3 +1,5 @@
+import { RELAY_LIMITS } from "../config/constants";
+
 /**
  * CPU-bounded media content identity primitives for Cloudflare Workers.
  *
@@ -14,7 +16,7 @@ const MAX_FINGERPRINT_SAMPLES = 8_192;
 const MAX_SAMPLES_PER_CHUNK = 128;
 
 export interface MediaContentFingerprint {
-  sha256: string;
+  sha256: string | null;
   fingerprint: string;
   fingerprintVersion: number;
   byteLength: number;
@@ -27,11 +29,22 @@ export interface MediaContentFingerprint {
  * JavaScript for the robustness hint.
  */
 export class MediaFingerprintAccumulator {
-  private readonly digestStream = new (crypto as Crypto & { DigestStream: typeof DigestStream }).DigestStream("SHA-256");
-  private readonly writer = this.digestStream.getWriter();
+  private readonly digestStream: DigestStream | null;
+  private readonly writer: WritableStreamDefaultWriter<BufferSource> | null;
   private readonly sampler = new BoundedFingerprintSampler();
   private byteLength = 0;
   private finalized: Promise<MediaContentFingerprint> | null = null;
+
+  constructor(computeExactHash = true) {
+    if (computeExactHash) {
+      const DigestStreamCtor = (crypto as Crypto & { DigestStream: typeof DigestStream }).DigestStream;
+      this.digestStream = new DigestStreamCtor("SHA-256");
+      this.writer = this.digestStream.getWriter();
+    } else {
+      this.digestStream = null;
+      this.writer = null;
+    }
+  }
 
   async update(chunk: Uint8Array): Promise<this> {
     if (this.finalized) throw new Error("MediaFingerprintAccumulator is already finalized.");
@@ -39,17 +52,21 @@ export class MediaFingerprintAccumulator {
 
     this.byteLength += chunk.byteLength;
     this.sampler.update(chunk);
-    await this.writer.write(chunk);
+    if (this.writer) await this.writer.write(chunk);
     return this;
   }
 
   digest(): Promise<MediaContentFingerprint> {
     if (!this.finalized) {
       this.finalized = (async () => {
-        await this.writer.close();
-        const digest = await this.digestStream.digest;
+        let sha256: string | null = null;
+        if (this.writer && this.digestStream) {
+          await this.writer.close();
+          const digest = await this.digestStream.digest;
+          sha256 = bytesToHex(new Uint8Array(digest));
+        }
         return {
-          sha256: bytesToHex(new Uint8Array(digest)),
+          sha256,
           fingerprint: this.sampler.digest(),
           fingerprintVersion: FINGERPRINT_VERSION,
           byteLength: this.byteLength,
@@ -69,9 +86,10 @@ export class MediaFingerprintAccumulator {
 export async function buildMediaFingerprint(bytes: Uint8Array): Promise<MediaContentFingerprint> {
   const sampler = new BoundedFingerprintSampler();
   sampler.update(bytes);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const shouldHash = bytes.byteLength <= RELAY_LIMITS.exactContentHashMaxBytes;
+  const digest = shouldHash ? await crypto.subtle.digest("SHA-256", bytes) : null;
   return {
-    sha256: bytesToHex(new Uint8Array(digest)),
+    sha256: digest ? bytesToHex(new Uint8Array(digest)) : null,
     fingerprint: sampler.digest(),
     fingerprintVersion: FINGERPRINT_VERSION,
     byteLength: bytes.byteLength,
