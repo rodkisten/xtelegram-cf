@@ -78,7 +78,7 @@ export async function sendPreparedMediaToChats(options: {
   // URL deliveries are cheap because Telegram fetches the remote media itself,
   // so parallelize them aggressively. Worker-owned uploads are intentionally
   // capped lower to keep memory/network pressure predictable for large files.
-  const concurrency = options.prepared.type === "file" ? 4 : 2;
+  const concurrency = options.prepared.type === "file" ? 4 : 1;
   return mapWithConcurrency(options.chatIds, concurrency, sendOne);
 }
 
