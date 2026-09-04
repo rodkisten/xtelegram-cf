@@ -1,5 +1,3 @@
-import { RELAY_LIMITS } from "../config/constants";
-
 /**
  * CPU-bounded media content identity primitives for Cloudflare Workers.
  *
@@ -83,11 +81,13 @@ export class MediaFingerprintAccumulator {
  * runtime's native SubtleCrypto implementation avoids a second JavaScript pass
  * over every byte.
  */
-export async function buildMediaFingerprint(bytes: Uint8Array): Promise<MediaContentFingerprint> {
+export async function buildMediaFingerprint(
+  bytes: Uint8Array,
+  computeExactHash = true,
+): Promise<MediaContentFingerprint> {
   const sampler = new BoundedFingerprintSampler();
   sampler.update(bytes);
-  const shouldHash = bytes.byteLength <= RELAY_LIMITS.exactContentHashMaxBytes;
-  const digest = shouldHash ? await crypto.subtle.digest("SHA-256", bytes) : null;
+  const digest = computeExactHash ? await crypto.subtle.digest("SHA-256", bytes) : null;
   return {
     sha256: digest ? bytesToHex(new Uint8Array(digest)) : null,
     fingerprint: sampler.digest(),
