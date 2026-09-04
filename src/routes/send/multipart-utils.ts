@@ -32,6 +32,8 @@ export interface MultipartPayload {
   mediaId?: string;
   mediaKey?: string;
   force?: boolean;
+  force_cpu?: boolean | string | number;
+  forceCpu?: boolean | string | number;
 }
 
 export interface UploadedFileRecord {

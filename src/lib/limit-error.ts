@@ -3,6 +3,7 @@ export type RelayLimitKind =
   | "hls_media_bytes"
   | "hls_playlist_bytes"
   | "hls_cpu_budget"
+  | "cpu_heavy_disabled"
   | "worker_resource_budget"
   | "multipart_file_bytes"
   | "multipart_total_bytes"
@@ -62,13 +63,22 @@ export function buildLimitExceededPayload(
       maxBytes: error.details.limitBytes,
       actualBytes: error.details.actualBytes ?? null,
     },
-    clientFallback: {
-      available: Boolean(resolvedMediaUrl),
-      action: "download_compress_and_resend",
-      url: resolvedMediaUrl,
-      hint: resolvedMediaUrl
-        ? "Download the resolved media URL in Shortcuts, compress it, then resend it to /send as multipart/form-data."
-        : "The relay exceeded a processing limit before a downloadable resolved URL was available.",
-    },
+    forceCpuRequired: error.details.kind === "cpu_heavy_disabled",
+    forceCpuParameter: error.details.kind === "cpu_heavy_disabled" ? "force_cpu=true" : null,
+    clientFallback: error.details.kind === "cpu_heavy_disabled"
+      ? {
+          available: true,
+          action: "retry_with_force_cpu",
+          url: resolvedMediaUrl,
+          hint: "Retry the same relay request with force_cpu=true to enable CPU-heavy processing for this request only.",
+        }
+      : {
+          available: Boolean(resolvedMediaUrl),
+          action: "download_compress_and_resend",
+          url: resolvedMediaUrl,
+          hint: resolvedMediaUrl
+            ? "Download the resolved media URL in Shortcuts, compress it, then resend it to /send as multipart/form-data."
+            : "The relay exceeded a processing limit before a downloadable resolved URL was available.",
+        },
   };
 }

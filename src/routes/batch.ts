@@ -13,6 +13,7 @@ import { cloneAuthorizedJsonRequest } from "../http/internal-request";
 import { json } from "../http/response";
 import { mapWithConcurrency } from "../lib/concurrency";
 import { getErrorMessage } from "../lib/errors";
+import { resolveCpuHeavyEnabled } from "../lib/cpu-policy";
 import { debugError, relayDebug, relayTraceId } from "../lib/debug";
 import {
   resolveTelegramChatIdsForEnv,
@@ -32,6 +33,8 @@ interface BatchBody {
   username?: unknown;
   usernames?: unknown;
   force?: unknown;
+  force_cpu?: unknown;
+  forceCpu?: unknown;
   caption?: unknown;
   parseMode?: unknown;
   metadata?: unknown;
@@ -65,6 +68,8 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     relayDebug(env, traceId, "batch.invalid-json", {});
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
+
+  const batchForceCpu = resolveCpuHeavyEnabled(env, request, body.force_cpu ?? body.forceCpu);
 
   const rawItems = Array.isArray(body.items)
     ? body.items
@@ -121,6 +126,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     sharedChannelCount: sharedChannels.length,
     requestedConcurrency: body.concurrency ?? null,
     force: body.force === true,
+    forceCpu: batchForceCpu,
   });
 
   const invalidResults = new Map<number, Record<string, unknown>>();
@@ -190,10 +196,16 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
       }
 
       const force = item.force === true || (item.force === undefined && body.force === true);
+      const forceCpu = resolveCpuHeavyEnabled(
+        env,
+        request,
+        item.force_cpu ?? item.forceCpu ?? body.force_cpu ?? body.forceCpu,
+      );
       const payload: Record<string, unknown> = {
         ...item,
         channels,
         force,
+        force_cpu: forceCpu,
         caption: item.caption ?? body.caption,
         parseMode: item.parseMode ?? body.parseMode,
         metadata: item.metadata ?? body.metadata,

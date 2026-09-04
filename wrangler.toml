@@ -28,10 +28,15 @@ HLS_CONCURRENCY = "3"
 DELIVERY_CLAIM_TTL_SECONDS = "1800"
 RELAY_DEBUG = "false"
 
+# CPU-heavy processing is globally OFF by default. Set true only if you want
+# every request to permit expensive parsing/remux/hashing. Prefer force_cpu=true
+# per request when you need the slow path occasionally.
+ENABLE_CPU_HEAVY = "false"
+
 # Resource safety defaults for Cloudflare's 128 MB isolate.
 WORKER_BUFFERED_MEDIA_BYTES = "16777216"
 WORKER_HLS_BUFFERED_MEDIA_BYTES = "8388608"
-ALLOW_WORKER_HLS_TRANSMUX = "false"
+ALLOW_WORKER_HLS_TRANSMUX = "false" # legacy; ENABLE_CPU_HEAVY/force_cpu controls heavy processing
 RELAY_DEBUG_SAMPLE_RATE = "0.05"
 TELEGRAM_CHAT_ID = "-1003991698263:73"
 TELEGRAM_CHANNEL_ID = "-1003991698263:73"

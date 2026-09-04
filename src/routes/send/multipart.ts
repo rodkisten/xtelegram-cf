@@ -2,6 +2,7 @@ import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { RELAY_LIMITS } from "../../config/constants";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import { resolveCpuHeavyEnabled } from "../../lib/cpu-policy";
 import { buildLimitExceededPayload, RelayLimitExceededError } from "../../lib/limit-error";
 import { mapWithConcurrency } from "../../lib/concurrency";
 import {
@@ -129,6 +130,13 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     return payloadResult.response;
   }
   const payload = payloadResult.payload;
+  const forceCpu = resolveCpuHeavyEnabled(
+    env,
+    request,
+    payload.force_cpu ?? payload.forceCpu ?? form.get("force_cpu") ?? form.get("forceCpu"),
+  );
+
+  relayDebug(env, traceId, "multipart.cpu-policy", { forceCpu });
 
   const channelValidation = normalizeTelegramChannels(payload.channel, payload.channels);
   if (!channelValidation.ok) {
@@ -292,10 +300,37 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     // Reuse that metadata instead of copying and scanning the entire uploaded file.
     if (payloadVideoMetadata && videoUploads.length === 1) {
       uploaded.videoMetadata = payloadVideoMetadata;
-    } else {
+    } else if (forceCpu) {
       uploaded.videoMetadata = await parseVideoDimensionsFromBlob(
         uploaded.file,
         uploaded.file.type,
+      );
+    } else {
+      const originalUrl = payload.sourceUrl || payload.pageUrl || payload.tweetUrl || payload.postUrl ||
+        payload.storyUrl || payload.reelUrl || payload.tiktokUrl || payload.originalUrl ||
+        payload.permalink || payload.shareUrl || payload.canonicalUrl || payload.mediaUrl ||
+        payload.videoUrl || payload.photoUrl || null;
+      const cpuError = new RelayLimitExceededError(
+        "Uploaded video dimensions were not supplied, and container parsing is disabled in fast mode.",
+        {
+          kind: "cpu_heavy_disabled",
+          stage: "multipart-video-metadata",
+          limitBytes: 0,
+          actualBytes: null,
+          resolvedMediaUrl: originalUrl,
+          sourceUrl: originalUrl,
+          inputUrl: originalUrl,
+          mediaType: "video",
+          contentType: uploaded.file.type || null,
+        },
+      );
+      return json(
+        {
+          ...buildLimitExceededPayload(cpuError, { sourceUrl: originalUrl, inputUrl: originalUrl, mediaType: "video" }),
+          forceCpu,
+          hint: "Include metadata.resolvedWidth/resolvedHeight or retry with force_cpu=true.",
+        },
+        422,
       );
     }
 

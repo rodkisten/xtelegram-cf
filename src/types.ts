@@ -12,7 +12,9 @@ export interface Env {
   WORKER_BUFFERED_MEDIA_BYTES?: string;
   /** Max combined bytes the Worker may hold while assembling HLS/fMP4 media. */
   WORKER_HLS_BUFFERED_MEDIA_BYTES?: string;
-  /** Opt-in only: allow CPU-heavy MPEG-TS -> MP4 transmuxing inside the Worker. */
+  /** Global opt-in for CPU-heavy media processing. Defaults to false. */
+  ENABLE_CPU_HEAVY?: string;
+  /** @deprecated Use ENABLE_CPU_HEAVY or per-request force_cpu=true. */
   ALLOW_WORKER_HLS_TRANSMUX?: string;
   MULTIPART_MAX_TOTAL_BYTES?: string;
   TWIRRL_VERSION_TOKEN?: string;
@@ -70,6 +72,8 @@ export interface RelayInput {
   mediaId: string | null;
   mediaKey: string | null;
   force: boolean;
+  /** Enables CPU-heavy processing for this request only. */
+  forceCpu: boolean;
 }
 
 export interface RelayAlbumItem {
@@ -99,6 +103,8 @@ export interface RelayAlbumInput {
   mediaId: string | null;
   mediaKey: string | null;
   force: boolean;
+  /** Enables CPU-heavy processing for this request only. */
+  forceCpu: boolean;
 }
 
 export interface TelegramApiResult<T = unknown> {

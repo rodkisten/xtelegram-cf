@@ -7,10 +7,10 @@ import {
   resolveMaxMediaBytes,
   resolveWorkerBufferedMediaBytes,
   resolveWorkerHlsBufferedMediaBytes,
-  resolveWorkerHlsTransmuxEnabled,
 } from "../../media";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
+import { buildLimitExceededPayload, isRelayLimitExceededError } from "../../lib/limit-error";
 import {
   debugChannelSummary,
   debugError,
@@ -53,6 +53,7 @@ export async function handleSingleSend(
     requestedChannelCount: input.channels.length,
     routingUsernames: input.usernames,
     force: input.force,
+    forceCpu: input.forceCpu,
     hasMediaHeaders: Object.keys(input.mediaHeaders || {}).length > 0,
   });
   const chatIds = resolveTelegramChatIdsForEnv(env, input.channels, input.usernames);
@@ -153,7 +154,7 @@ export async function handleSingleSend(
       concurrency,
       signal: request.signal,
       twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
-      allowWorkerHlsTransmux: resolveWorkerHlsTransmuxEnabled(env.ALLOW_WORKER_HLS_TRANSMUX),
+      allowCpuHeavy: input.forceCpu,
     });
 
     const socialPromise = resolveSocialDeliveryContent({
@@ -192,6 +193,22 @@ export async function handleSingleSend(
           durationMs: Date.now() - prepareStartedAt,
           error: debugError(prepareResult.reason),
         });
+
+        if (isRelayLimitExceededError(prepareResult.reason)) {
+          return json(
+            {
+              ...buildLimitExceededPayload(prepareResult.reason, {
+                sourceUrl: input.sourceUrl,
+                inputUrl: input.mediaUrl.href,
+                mediaType: input.mediaType,
+              }),
+              forceCpu: input.forceCpu,
+              channels: chatIds,
+              metadata: input.metadata,
+            },
+            prepareResult.reason.details.kind === "cpu_heavy_disabled" ? 422 : 413,
+          );
+        }
 
         return json(
           {
@@ -256,7 +273,13 @@ export async function handleSingleSend(
       channelsToSend: plan.channelsToSend.length,
     });
 
-    if (!input.force && prepared.type === "upload" && mediaType === "video") {
+    if (
+      !input.force &&
+      input.forceCpu &&
+      prepared.type === "upload" &&
+      mediaType === "video" &&
+      Boolean(prepared.mediaSha256 || prepared.mediaFingerprint)
+    ) {
       const contentMatches = await findContentDuplicateMatches(
         db,
         {
