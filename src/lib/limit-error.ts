@@ -3,6 +3,7 @@ export type RelayLimitKind =
   | "hls_media_bytes"
   | "hls_playlist_bytes"
   | "hls_cpu_budget"
+  | "worker_resource_budget"
   | "multipart_file_bytes"
   | "multipart_total_bytes"
   | "album_total_bytes";
