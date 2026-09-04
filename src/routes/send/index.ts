@@ -6,6 +6,7 @@ import { handleJsonAlbumSend } from "./album";
 import { handleMultipartSend } from "./multipart";
 import { handleSingleSend } from "./single";
 import { relayDebug, relayTraceId } from "../../lib/debug";
+import { cpuHeavyRequestValue, resolveCpuHeavyEnabled } from "../../lib/cpu-policy";
 
 export async function handleSend(request: Request, env: Env): Promise<Response> {
   const traceId = relayTraceId(request);
@@ -31,17 +32,24 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     return json({ ok: false, error: "Invalid JSON body" }, 400);
   }
 
+  const bodyRecord = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : {};
+  const cpuHeavyEnabled = resolveCpuHeavyEnabled(env, request, cpuHeavyRequestValue(bodyRecord));
+
   const albumValidation = validateAlbumRequestBody(body);
   if (albumValidation.kind === "invalid") {
     relayDebug(env, traceId, "send.album-invalid", { error: albumValidation.error });
     return json({ ok: false, error: albumValidation.error }, 400);
   }
   if (albumValidation.kind === "valid") {
+    albumValidation.value.forceCpu = albumValidation.value.forceCpu || cpuHeavyEnabled;
     relayDebug(env, traceId, "send.album-validated", {
       itemCount: albumValidation.value.items.length,
       provider: albumValidation.value.provider || null,
       channelCount: albumValidation.value.channels.length,
       force: albumValidation.value.force,
+      forceCpu: albumValidation.value.forceCpu,
     });
     const response = await handleJsonAlbumSend(albumValidation.value, env, traceId);
     relayDebug(env, traceId, "send.album-completed", { status: response.status });
@@ -53,6 +61,8 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     return json({ ok: false, error: validation.error }, 400);
   }
 
+  validation.value.forceCpu = validation.value.forceCpu || cpuHeavyEnabled;
+
   relayDebug(env, traceId, "send.single-validated", {
     provider: validation.value.provider || null,
     mediaType: validation.value.mediaType || null,
@@ -60,6 +70,7 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     sourceUrl: validation.value.sourceUrl || null,
     channelCount: validation.value.channels.length,
     force: validation.value.force,
+    forceCpu: validation.value.forceCpu,
   });
   const response = await handleSingleSend(request, validation.value, env);
   relayDebug(env, traceId, "send.single-completed", { status: response.status });
