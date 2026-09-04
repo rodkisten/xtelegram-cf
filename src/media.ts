@@ -37,7 +37,9 @@ export interface PrepareMediaOptions {
   forceUpload?: boolean;
   /** Optional Twirrl token used only by the oversized X medium-quality fallback. */
   twirrlVersionToken?: string;
-  /** Explicit opt-in for CPU-heavy MPEG-TS transmuxing. Defaults to false. */
+  /** Enables CPU-heavy processing for this request only. Defaults to false. */
+  allowCpuHeavy?: boolean;
+  /** @deprecated Kept for source compatibility. Use allowCpuHeavy. */
   allowWorkerHlsTransmux?: boolean;
 }
 
@@ -47,6 +49,7 @@ export async function prepareMedia(
 ): Promise<PreparedMedia> {
   const maxMediaBytes = clampMaxMediaBytes(options.maxMediaBytes);
   const hlsMaxMediaBytes = clampHlsMaxMediaBytes(options.hlsMaxMediaBytes);
+  const allowCpuHeavy = Boolean(options.allowCpuHeavy || options.allowWorkerHlsTransmux);
   const resolver = new HlsResolver({
     maxDepth: RELAY_LIMITS.hlsResolverDepth,
     maxPlaylistBytes: RELAY_LIMITS.hlsPlaylistBytes,
@@ -91,6 +94,26 @@ export async function prepareMedia(
     const isVideo = inferredMediaType === "video";
     const uploadLimitBytes = resolveTelegramUploadLimitBytes(inferredMediaType, maxMediaBytes);
     const remoteLimitBytes = resolveTelegramRemoteUrlLimitBytes(inferredMediaType);
+    const directMetadataHint = isVideo ? videoMetadataHintFromInput(input) : null;
+
+    if (isVideo && !directMetadataHint && !allowCpuHeavy) {
+      const metadataSafeFallback = await tryKnownQualityFallback(
+        input,
+        direct,
+        inferredMediaType,
+        uploadLimitBytes,
+        options.signal,
+        false,
+      );
+      if (metadataSafeFallback) return metadataSafeFallback;
+
+      throwCpuHeavyDisabled(
+        input,
+        direct.url,
+        "video-metadata",
+        "Video dimensions are not available from the resolver, and container parsing is disabled in fast mode.",
+      );
+    }
 
     // The hosted Telegram Bot API has different URL and multipart ceilings.
     // Resolve the real size before deciding the transport whenever the resolver
@@ -120,6 +143,7 @@ export async function prepareMedia(
         inferredMediaType,
         uploadLimitBytes,
         options.signal,
+        allowCpuHeavy,
       );
       if (qualityFallback) return qualityFallback;
 
@@ -131,6 +155,7 @@ export async function prepareMedia(
         uploadLimitBytes,
         options.signal,
         options.twirrlVersionToken,
+        allowCpuHeavy,
       );
       if (mediumFallback) return mediumFallback;
 
@@ -157,6 +182,7 @@ export async function prepareMedia(
         input.mediaHeaders,
         uploadLimitBytes,
         options.signal,
+        allowCpuHeavy,
       );
     } catch (error) {
       if (isRelayLimitExceededError(error)) {
@@ -170,6 +196,7 @@ export async function prepareMedia(
           inferredMediaType,
           uploadLimitBytes,
           options.signal,
+          allowCpuHeavy,
         );
         if (qualityFallback) return qualityFallback;
 
@@ -179,6 +206,7 @@ export async function prepareMedia(
           uploadLimitBytes,
           options.signal,
           options.twirrlVersionToken,
+          allowCpuHeavy,
         );
         if (mediumFallback) return mediumFallback;
       }
@@ -187,11 +215,12 @@ export async function prepareMedia(
     const bytes = downloadedDirect.bytes;
     const mediaType =
       input.mediaType || inferTelegramMediaType(direct.url, direct.contentType);
-    const directMetadataHint = videoMetadataHintFromInput(input);
     const videoMetadata =
       mediaType === "video"
         ? reconcileVideoMetadata(
-            directMetadataHint ? null : parseVideoDimensionsBounded(bytes, direct.contentType),
+            directMetadataHint || !allowCpuHeavy
+              ? null
+              : parseVideoDimensionsBounded(bytes, direct.contentType),
             directMetadataHint,
           )
         : null;
@@ -224,6 +253,15 @@ export async function prepareMedia(
     };
   }
 
+  if (!allowCpuHeavy) {
+    throwCpuHeavyDisabled(
+      input,
+      probe.url || input.mediaUrl.href,
+      "hls-processing",
+      "Worker-side HLS download/remux is disabled in fast mode.",
+    );
+  }
+
   let resolved;
   try {
     resolved = await resolver.resolve(probe.url || input.mediaUrl.href, {
@@ -249,7 +287,7 @@ export async function prepareMedia(
     }
     throw error;
   }
-  assertHlsPreflightCpuBudget(resolved, input, Boolean(options.allowWorkerHlsTransmux));
+  assertHlsPreflightCpuBudget(resolved, input, allowCpuHeavy);
 
   const downloader = new HlsDownloader({
     headers: input.mediaHeaders,
@@ -279,7 +317,7 @@ export async function prepareMedia(
     }
     throw error;
   }
-  assertHlsTransmuxCpuBudget(downloaded, resolved.mediaPlaylist.url, input, Boolean(options.allowWorkerHlsTransmux));
+  assertHlsTransmuxCpuBudget(downloaded, resolved.mediaPlaylist.url, input, allowCpuHeavy);
 
   const remuxer = new HlsRemuxer();
   const baseName = baseNameFromUrl(input.sourceUrl || input.mediaUrl.href);
@@ -521,6 +559,7 @@ async function tryKnownQualityFallback(
   mediaType: MediaType,
   maximumBytes: number,
   signal?: AbortSignal,
+  allowCpuHeavy = false,
 ): Promise<PreparedMedia | null> {
   if (!input.mediaVariants.length || signal?.aborted) return null;
 
@@ -538,13 +577,6 @@ async function tryKnownQualityFallback(
     if (variant.contentLength != null && variant.contentLength > maximumBytes) continue;
 
     try {
-      const downloaded = await downloadDirectFile(
-        variant.mediaUrl.href,
-        variant.mediaHeaders,
-        maximumBytes,
-        signal,
-      );
-      const bytes = downloaded.bytes;
       const contentType = inferContentTypeFromUrl(variant.mediaUrl.href);
       const variantMetadataHint = variant.width && variant.height
         ? {
@@ -554,9 +586,22 @@ async function tryKnownQualityFallback(
             rotation: 0 as const,
           }
         : videoMetadataHintFromInput(input);
+
+      if (mediaType === "video" && !variantMetadataHint && !allowCpuHeavy) continue;
+
+      const downloaded = await downloadDirectFile(
+        variant.mediaUrl.href,
+        variant.mediaHeaders,
+        maximumBytes,
+        signal,
+        allowCpuHeavy,
+      );
+      const bytes = downloaded.bytes;
       const videoMetadata = mediaType === "video"
         ? reconcileVideoMetadata(
-            variantMetadataHint ? null : parseVideoDimensionsBounded(bytes, contentType),
+            variantMetadataHint || !allowCpuHeavy
+              ? null
+              : parseVideoDimensionsBounded(bytes, contentType),
             variantMetadataHint,
           )
         : null;
@@ -611,6 +656,7 @@ async function tryTwitterMediumQualityFallback(
   maximumBytes: number,
   signal?: AbortSignal,
   twirrlVersionToken?: string,
+  allowCpuHeavy = false,
 ): Promise<PreparedMedia | null> {
   if (input.provider?.toLowerCase() !== "twitter") return null;
   if (direct.contentLength == null) return null;
@@ -626,15 +672,7 @@ async function tryTwitterMediumQualityFallback(
 
     if (!medium || medium.url === direct.url) return null;
 
-    const downloadedMedium = await downloadDirectFile(
-      medium.url,
-      medium.mediaHeaders,
-      maximumBytes,
-      signal,
-    );
-    const bytes = downloadedMedium.bytes;
-
-    const mediumMetadataHint = medium.width && medium.height
+    const preflightMetadataHint = medium.width && medium.height
       ? {
           width: medium.width,
           height: medium.height,
@@ -642,8 +680,20 @@ async function tryTwitterMediumQualityFallback(
           rotation: 0 as const,
         }
       : videoMetadataHintFromInput(input);
+    if (!preflightMetadataHint && !allowCpuHeavy) return null;
+
+    const downloadedMedium = await downloadDirectFile(
+      medium.url,
+      medium.mediaHeaders,
+      maximumBytes,
+      signal,
+      allowCpuHeavy,
+    );
+    const bytes = downloadedMedium.bytes;
+
+    const mediumMetadataHint = preflightMetadataHint;
     const videoMetadata = reconcileVideoMetadata(
-      mediumMetadataHint
+      mediumMetadataHint || !allowCpuHeavy
         ? null
         : parseVideoDimensionsBounded(
             bytes,
@@ -733,8 +783,7 @@ function assertHlsPreflightCpuBudget(
     )
   );
 
-  if (!likelyTransportStream) return;
-  if (allowWorkerHlsTransmux && segmentCount <= RELAY_LIMITS.hlsTransmuxCpuMaxSegments) return;
+  if (!likelyTransportStream || allowWorkerHlsTransmux) return;
 
   throw new RelayLimitExceededError(
     allowWorkerHlsTransmux
@@ -773,13 +822,7 @@ function assertHlsTransmuxCpuBudget(
   const segmentCount =
     downloaded.video.segmentCount + (downloaded.audio?.segmentCount || 0);
 
-  if (
-    allowWorkerHlsTransmux &&
-    inputBytes <= RELAY_LIMITS.hlsTransmuxCpuMaxInputBytes &&
-    segmentCount <= RELAY_LIMITS.hlsTransmuxCpuMaxSegments
-  ) {
-    return;
-  }
+  if (allowWorkerHlsTransmux) return;
 
   throw new RelayLimitExceededError(
     allowWorkerHlsTransmux
@@ -800,8 +843,17 @@ function assertHlsTransmuxCpuBudget(
 }
 
 function videoMetadataHintFromInput(input: RelayInput): VideoMetadata | null {
-  const width = Number(input.metadata?.resolvedWidth || 0);
-  const height = Number(input.metadata?.resolvedHeight || 0);
+  let width = Number(input.metadata?.resolvedWidth || 0);
+  let height = Number(input.metadata?.resolvedHeight || 0);
+
+  if (!isUsableVideoDimension(width) || !isUsableVideoDimension(height)) {
+    const currentVariant = input.mediaVariants.find((variant) =>
+      variant.mediaUrl.href === input.mediaUrl.href &&
+      variant.width != null && variant.height != null,
+    );
+    width = Number(currentVariant?.width || 0);
+    height = Number(currentVariant?.height || 0);
+  }
 
   if (!isUsableVideoDimension(width) || !isUsableVideoDimension(height)) {
     return null;
@@ -888,6 +940,7 @@ async function downloadDirectFile(
   headers: HeadersInit,
   maximumBytes: number,
   signal?: AbortSignal,
+  computeContentIdentity = false,
 ): Promise<DownloadedDirectFile> {
   const response = await fetchPublic(url, {
     method: "GET",
@@ -916,16 +969,19 @@ async function downloadDirectFile(
         { kind: "direct_media_bytes", stage: "download-media", limitBytes: maximumBytes, actualBytes: bytes.byteLength, resolvedMediaUrl: response.url || url, inputUrl: url, contentType: response.headers.get("content-type") },
       );
     }
-    const contentIdentity = await buildMediaFingerprint(bytes);
+    const contentIdentity = computeContentIdentity
+      ? await buildMediaFingerprint(bytes)
+      : emptyContentIdentity(bytes.byteLength);
     return { bytes, contentIdentity };
   }
 
   // Unknown-size and large bodies deliberately skip exact SHA-256. Provider/media
   // identity remains authoritative and the fixed-budget fingerprint still gives
   // content-level duplicate protection without hashing tens of megabytes.
-  const shouldComputeExactHash =
-    contentLength > 0 && contentLength <= RELAY_LIMITS.exactContentHashMaxBytes;
-  const accumulator = new MediaFingerprintAccumulator(shouldComputeExactHash);
+  const shouldComputeExactHash = computeContentIdentity;
+  const accumulator = computeContentIdentity
+    ? new MediaFingerprintAccumulator(shouldComputeExactHash)
+    : null;
   const chunks: Uint8Array[] = [];
   let totalBytes = 0;
 
@@ -946,7 +1002,7 @@ async function downloadDirectFile(
       // ReadableStream already gives us an owned Uint8Array. Keeping that chunk
       // directly avoids one full extra memcpy before the final contiguous buffer.
       chunks.push(value);
-      await accumulator.update(value);
+      if (accumulator) await accumulator.update(value);
     }
   } finally {
     try { await reader.releaseLock(); } catch {}
@@ -961,8 +1017,39 @@ async function downloadDirectFile(
 
   return {
     bytes,
-    contentIdentity: await accumulator.digest(),
+    contentIdentity: accumulator
+      ? await accumulator.digest()
+      : emptyContentIdentity(totalBytes),
   };
+}
+
+function emptyContentIdentity(byteLength: number): MediaContentFingerprint {
+  return {
+    sha256: null,
+    fingerprint: "",
+    fingerprintVersion: 0,
+    byteLength,
+    sampledBytes: 0,
+  };
+}
+
+function throwCpuHeavyDisabled(
+  input: RelayInput,
+  resolvedMediaUrl: string,
+  stage: string,
+  message: string,
+): never {
+  throw new RelayLimitExceededError(message, {
+    kind: "cpu_heavy_disabled",
+    stage,
+    limitBytes: 0,
+    actualBytes: null,
+    resolvedMediaUrl,
+    sourceUrl: input.sourceUrl,
+    inputUrl: input.mediaUrl.href,
+    mediaType: input.mediaType || "video",
+    contentType: null,
+  });
 }
 
 /**
