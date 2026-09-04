@@ -943,7 +943,11 @@ async function finalizeResolvedMediaQualities(
         : [stripMediaIndex(item)];
       const hydrated = await hydrateVariantSizes(variants);
       const ranked = dedupeVariants(hydrated).sort(compareQualityVariants);
-      const maximumBytes = resolveSocialUploadLimitBytes(item.type, env.MAX_MEDIA_BYTES);
+      const maximumBytes = resolveSocialUploadLimitBytes(
+        item.type,
+        env.MAX_MEDIA_BYTES,
+        env.WORKER_BUFFERED_MEDIA_BYTES,
+      );
       const selected = selectBestQualityVariant(ranked, maximumBytes);
 
       if (!selected) return item;
@@ -1048,6 +1052,7 @@ function positiveHeaderNumber(value: string | null): number | null {
 function resolveSocialUploadLimitBytes(
   mediaType: ResolvedSocialMediaType,
   rawConfigured: string | undefined,
+  rawWorkerBuffered: string | undefined,
 ): number {
   const configuredRaw = Number(rawConfigured);
   const configured = Number.isFinite(configuredRaw)
@@ -1057,9 +1062,17 @@ function resolveSocialUploadLimitBytes(
       )
     : RELAY_LIMITS.directMediaDefaultBytes;
 
+  const workerRaw = Number(rawWorkerBuffered);
+  const workerBuffered = Number.isFinite(workerRaw)
+    ? Math.min(
+        RELAY_LIMITS.workerBufferedMediaHardBytes,
+        Math.max(RELAY_LIMITS.mediaMinimumBytes, Math.floor(workerRaw)),
+      )
+    : RELAY_LIMITS.workerBufferedMediaDefaultBytes;
+
   return mediaType === "photo"
-    ? Math.min(configured, RELAY_LIMITS.telegramUploadPhotoBytes)
-    : Math.min(configured, RELAY_LIMITS.telegramUploadOtherBytes);
+    ? Math.min(configured, RELAY_LIMITS.telegramUploadPhotoBytes, workerBuffered)
+    : Math.min(configured, RELAY_LIMITS.telegramUploadOtherBytes, workerBuffered);
 }
 
 function selectBestQualityVariant(

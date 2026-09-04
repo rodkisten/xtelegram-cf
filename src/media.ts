@@ -1,7 +1,7 @@
 import { HlsDownloader, HlsDownloadError } from "./hls/downloader";
 import { HlsRemuxer } from "./hls/remuxer";
 import { HlsResolver, looksLikeHlsUrl } from "./hls/resolver";
-import { parseVideoDimensions } from "./media/video-metadata";
+import { parseVideoDimensionsBounded } from "./media/video-metadata";
 import { resolveTwitterMediumMedia } from "./social";
 import { buildMediaFingerprint, MediaFingerprintAccumulator, type MediaContentFingerprint } from "./services/media-fingerprint";
 import { fetchPublic, getBaseContentType, getFileExtension } from "./lib/http";
@@ -37,6 +37,8 @@ export interface PrepareMediaOptions {
   forceUpload?: boolean;
   /** Optional Twirrl token used only by the oversized X medium-quality fallback. */
   twirrlVersionToken?: string;
+  /** Explicit opt-in for CPU-heavy MPEG-TS transmuxing. Defaults to false. */
+  allowWorkerHlsTransmux?: boolean;
 }
 
 export async function prepareMedia(
@@ -148,20 +150,49 @@ export async function prepareMedia(
       );
     }
 
-    const downloadedDirect = await downloadDirectFile(
-      direct.url,
-      input.mediaHeaders,
-      uploadLimitBytes,
-      options.signal,
-    );
+    let downloadedDirect: DownloadedDirectFile;
+    try {
+      downloadedDirect = await downloadDirectFile(
+        direct.url,
+        input.mediaHeaders,
+        uploadLimitBytes,
+        options.signal,
+      );
+    } catch (error) {
+      if (isRelayLimitExceededError(error)) {
+        // The resolver may have been unable to determine Content-Length during
+        // its HEAD/Range probes. If the authoritative download discovers that
+        // the selected quality is too large, keep walking the already-known
+        // quality ladder instead of returning 413 immediately.
+        const qualityFallback = await tryKnownQualityFallback(
+          input,
+          direct,
+          inferredMediaType,
+          uploadLimitBytes,
+          options.signal,
+        );
+        if (qualityFallback) return qualityFallback;
+
+        const mediumFallback = await tryTwitterMediumQualityFallback(
+          input,
+          direct,
+          uploadLimitBytes,
+          options.signal,
+          options.twirrlVersionToken,
+        );
+        if (mediumFallback) return mediumFallback;
+      }
+      throw error;
+    }
     const bytes = downloadedDirect.bytes;
     const mediaType =
       input.mediaType || inferTelegramMediaType(direct.url, direct.contentType);
+    const directMetadataHint = videoMetadataHintFromInput(input);
     const videoMetadata =
       mediaType === "video"
         ? reconcileVideoMetadata(
-            parseVideoDimensions(bytes, direct.contentType),
-            videoMetadataHintFromInput(input),
+            directMetadataHint ? null : parseVideoDimensionsBounded(bytes, direct.contentType),
+            directMetadataHint,
           )
         : null;
 
@@ -218,7 +249,7 @@ export async function prepareMedia(
     }
     throw error;
   }
-  assertHlsPreflightCpuBudget(resolved, input);
+  assertHlsPreflightCpuBudget(resolved, input, Boolean(options.allowWorkerHlsTransmux));
 
   const downloader = new HlsDownloader({
     headers: input.mediaHeaders,
@@ -248,7 +279,7 @@ export async function prepareMedia(
     }
     throw error;
   }
-  assertHlsTransmuxCpuBudget(downloaded, resolved.mediaPlaylist.url, input);
+  assertHlsTransmuxCpuBudget(downloaded, resolved.mediaPlaylist.url, input, Boolean(options.allowWorkerHlsTransmux));
 
   const remuxer = new HlsRemuxer();
   const baseName = baseNameFromUrl(input.sourceUrl || input.mediaUrl.href);
@@ -272,18 +303,22 @@ export async function prepareMedia(
   }
 
   const variant = resolved.selectedVariant;
-  const parsedVideoMetadata = parseVideoDimensions(remuxed.bytes, remuxed.contentType);
+  const inputMetadataHint = videoMetadataHintFromInput(input);
+  const variantMetadataHint = variant?.resolution
+    ? {
+        width: variant.resolution.width,
+        height: variant.resolution.height,
+        durationSeconds: null,
+        rotation: 0 as const,
+      }
+    : null;
+  const metadataHint = inputMetadataHint || variantMetadataHint;
+  const parsedVideoMetadata = metadataHint
+    ? null
+    : parseVideoDimensionsBounded(remuxed.bytes, remuxed.contentType);
   const videoMetadata = reconcileVideoMetadata(
-    parsedVideoMetadata ||
-      (variant?.resolution
-        ? {
-            width: variant.resolution.width,
-            height: variant.resolution.height,
-            durationSeconds: null,
-            rotation: 0 as const,
-          }
-        : null),
-    videoMetadataHintFromInput(input),
+    parsedVideoMetadata || variantMetadataHint,
+    inputMetadataHint,
   );
 
   const preparedMediaType = input.mediaType || remuxed.mediaType;
@@ -436,6 +471,28 @@ export function shouldPreferWorkerUploadForTelegram(
   return input.mediaType === "video";
 }
 
+export function resolveWorkerBufferedMediaBytes(rawValue?: string | number): number {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) return RELAY_LIMITS.workerBufferedMediaDefaultBytes;
+  return Math.min(
+    RELAY_LIMITS.workerBufferedMediaHardBytes,
+    Math.max(RELAY_LIMITS.mediaMinimumBytes, Math.floor(value)),
+  );
+}
+
+export function resolveWorkerHlsBufferedMediaBytes(rawValue?: string | number): number {
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) return RELAY_LIMITS.workerHlsBufferedMediaDefaultBytes;
+  return Math.min(
+    RELAY_LIMITS.workerHlsBufferedMediaHardBytes,
+    Math.max(RELAY_LIMITS.mediaMinimumBytes, Math.floor(value)),
+  );
+}
+
+export function resolveWorkerHlsTransmuxEnabled(rawValue?: string | boolean): boolean {
+  return ["1", "true", "yes", "on"].includes(String(rawValue ?? "").trim().toLowerCase());
+}
+
 function clampHlsMaxMediaBytes(value?: number): number {
   if (!Number.isFinite(value)) {
     return RELAY_LIMITS.hlsMediaDefaultBytes;
@@ -489,17 +546,18 @@ async function tryKnownQualityFallback(
       );
       const bytes = downloaded.bytes;
       const contentType = inferContentTypeFromUrl(variant.mediaUrl.href);
+      const variantMetadataHint = variant.width && variant.height
+        ? {
+            width: variant.width,
+            height: variant.height,
+            durationSeconds: null,
+            rotation: 0 as const,
+          }
+        : videoMetadataHintFromInput(input);
       const videoMetadata = mediaType === "video"
         ? reconcileVideoMetadata(
-            parseVideoDimensions(bytes, contentType),
-            variant.width && variant.height
-              ? {
-                  width: variant.width,
-                  height: variant.height,
-                  durationSeconds: null,
-                  rotation: 0,
-                }
-              : videoMetadataHintFromInput(input),
+            variantMetadataHint ? null : parseVideoDimensionsBounded(bytes, contentType),
+            variantMetadataHint,
           )
         : null;
 
@@ -576,19 +634,22 @@ async function tryTwitterMediumQualityFallback(
     );
     const bytes = downloadedMedium.bytes;
 
+    const mediumMetadataHint = medium.width && medium.height
+      ? {
+          width: medium.width,
+          height: medium.height,
+          durationSeconds: null,
+          rotation: 0 as const,
+        }
+      : videoMetadataHintFromInput(input);
     const videoMetadata = reconcileVideoMetadata(
-      parseVideoDimensions(
-        bytes,
-        inferContentTypeFromUrl(medium.url),
-      ),
-      medium.width && medium.height
-        ? {
-            width: medium.width,
-            height: medium.height,
-            durationSeconds: null,
-            rotation: 0,
-          }
-        : videoMetadataHintFromInput(input),
+      mediumMetadataHint
+        ? null
+        : parseVideoDimensionsBounded(
+            bytes,
+            inferContentTypeFromUrl(medium.url),
+          ),
+      mediumMetadataHint,
     );
 
     if (!videoMetadata) {
@@ -650,6 +711,7 @@ function assertHlsPreflightCpuBudget(
     } | null;
   },
   input: RelayInput,
+  allowWorkerHlsTransmux: boolean,
 ): void {
   const playlists = [
     resolved.mediaPlaylist,
@@ -662,11 +724,9 @@ function assertHlsPreflightCpuBudget(
     return total + regular + parts;
   }, 0);
 
-  if (segmentCount <= RELAY_LIMITS.hlsTransmuxCpuMaxSegments) return;
-
   // EXT-X-MAP strongly indicates fragmented MP4, which only needs concatenation.
-  // The proactive guard is limited to playlists that look like MPEG-TS so a
-  // long fMP4 playlist can still pass through the cheap path.
+  // MPEG-TS requires mux.js-style parsing/rewrite and is disabled by default
+  // because it is the dominant CPU-1102 path on Cloudflare Workers.
   const likelyTransportStream = playlists.some((playlist) =>
     playlist.segments.some((segment) =>
       !segment.map?.uri && /\.ts(?:$|[?#])/i.test(segment.uri)
@@ -674,9 +734,12 @@ function assertHlsPreflightCpuBudget(
   );
 
   if (!likelyTransportStream) return;
+  if (allowWorkerHlsTransmux && segmentCount <= RELAY_LIMITS.hlsTransmuxCpuMaxSegments) return;
 
   throw new RelayLimitExceededError(
-    `HLS MPEG-TS has ${segmentCount} segments, above the Worker CPU-safe transmux budget`,
+    allowWorkerHlsTransmux
+      ? `HLS MPEG-TS has ${segmentCount} segments, above the Worker CPU-safe transmux budget`
+      : "Worker-side MPEG-TS transmuxing is disabled to prevent Cloudflare Error 1102",
     {
       kind: "hls_cpu_budget",
       stage: "hls-transmux-preflight-cpu-guard",
@@ -698,6 +761,7 @@ function assertHlsTransmuxCpuBudget(
   },
   resolvedMediaUrl: string,
   input: RelayInput,
+  allowWorkerHlsTransmux: boolean,
 ): void {
   const requiresTransmux =
     downloaded.video.container === "mpegts" ||
@@ -710,6 +774,7 @@ function assertHlsTransmuxCpuBudget(
     downloaded.video.segmentCount + (downloaded.audio?.segmentCount || 0);
 
   if (
+    allowWorkerHlsTransmux &&
     inputBytes <= RELAY_LIMITS.hlsTransmuxCpuMaxInputBytes &&
     segmentCount <= RELAY_LIMITS.hlsTransmuxCpuMaxSegments
   ) {
@@ -717,7 +782,9 @@ function assertHlsTransmuxCpuBudget(
   }
 
   throw new RelayLimitExceededError(
-    `HLS MPEG-TS requires CPU-heavy transmuxing beyond the Worker safe budget (${inputBytes} bytes / ${segmentCount} segments)`,
+    allowWorkerHlsTransmux
+      ? `HLS MPEG-TS requires CPU-heavy transmuxing beyond the Worker safe budget (${inputBytes} bytes / ${segmentCount} segments)`
+      : "Worker-side MPEG-TS transmuxing is disabled to prevent Cloudflare Error 1102",
     {
       kind: "hls_cpu_budget",
       stage: "hls-transmux-cpu-guard",

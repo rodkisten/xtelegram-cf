@@ -12,8 +12,8 @@ import { RELAY_LIMITS } from "../config/constants";
 const HEX = "0123456789abcdef";
 const FINGERPRINT_VERSION = 2;
 const HISTOGRAM_BINS = 64;
-const MAX_FINGERPRINT_SAMPLES = 8_192;
-const MAX_SAMPLES_PER_CHUNK = 128;
+const MAX_FINGERPRINT_SAMPLES = 2_048;
+const MAX_SAMPLES_PER_CHUNK = 32;
 
 export interface MediaContentFingerprint {
   sha256: string | null;

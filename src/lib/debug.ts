@@ -47,6 +47,8 @@ export function withRelayTraceResponse(response: Response, traceId: string): Res
   });
 }
 
+const IMPORTANT_DEBUG_STEP = /(?:failed|error|exception|limit|oversize|resource|rejected|conflict)/i;
+
 export function relayDebug(
   env: Env,
   traceId: string,
@@ -54,17 +56,35 @@ export function relayDebug(
   details: Record<string, unknown> = {},
 ): void {
   if (!relayDebugEnabled(env)) return;
+  if (!IMPORTANT_DEBUG_STEP.test(step) && !sampleDebugTrace(env, traceId)) return;
   try {
     const safeDetails = sanitizeDebugValue(details) as Record<string, unknown>;
     console.log({
-        at: new Date().toISOString(),
-        traceId,
-        step,
-        ...safeDetails,
-      });
+      at: new Date().toISOString(),
+      traceId,
+      step,
+      ...safeDetails,
+    });
   } catch {
     // Logging must never alter a delivery outcome.
   }
+}
+
+function sampleDebugTrace(env: Env, traceId: string): boolean {
+  const raw = Number(env.RELAY_DEBUG_SAMPLE_RATE);
+  const rate = Number.isFinite(raw)
+    ? Math.min(1, Math.max(0, raw))
+    : 0.05;
+  if (rate <= 0) return false;
+  if (rate >= 1) return true;
+
+  // Deterministic per trace: all normal steps from a sampled request remain visible.
+  let hash = 2166136261;
+  for (let index = 0; index < traceId.length; index += 1) {
+    hash ^= traceId.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return ((hash >>> 0) / 0x1_0000_0000) < rate;
 }
 
 export function debugUrl(value: unknown): string | null {

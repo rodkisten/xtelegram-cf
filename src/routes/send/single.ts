@@ -5,6 +5,9 @@ import {
   resolveConcurrency,
   resolveHlsMaxMediaBytes,
   resolveMaxMediaBytes,
+  resolveWorkerBufferedMediaBytes,
+  resolveWorkerHlsBufferedMediaBytes,
+  resolveWorkerHlsTransmuxEnabled,
 } from "../../media";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
@@ -115,9 +118,16 @@ export async function handleSingleSend(
   }
 
   try {
-    const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+    const configuredMaxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+    const maxMediaBytes = Math.min(
+      configuredMaxMediaBytes,
+      resolveWorkerBufferedMediaBytes(env.WORKER_BUFFERED_MEDIA_BYTES),
+    );
     const concurrency = resolveConcurrency(env.HLS_CONCURRENCY);
-    const hlsMaxMediaBytes = resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES);
+    const hlsMaxMediaBytes = Math.min(
+      resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+      resolveWorkerHlsBufferedMediaBytes(env.WORKER_HLS_BUFFERED_MEDIA_BYTES),
+    );
     let prepared: PreparedMedia;
 
     const prepareStartedAt = Date.now();
@@ -143,6 +153,7 @@ export async function handleSingleSend(
       concurrency,
       signal: request.signal,
       twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
+      allowWorkerHlsTransmux: resolveWorkerHlsTransmuxEnabled(env.ALLOW_WORKER_HLS_TRANSMUX),
     });
 
     const socialPromise = resolveSocialDeliveryContent({

@@ -1,4 +1,5 @@
 import type { MediaIdentityInput } from "../../db";
+import { RELAY_LIMITS } from "../../config/constants";
 import type { MediaType, VideoMetadata } from "../../types";
 
 export interface MultipartPayload {
@@ -152,9 +153,15 @@ export function resolveMultipartMaxTotalBytes(
   perFileMaximum: number,
 ): number {
   const configured = Number(rawValue);
-  const fallback = Math.min(64_000_000, perFileMaximum * 2);
+  const fallback = Math.min(
+    RELAY_LIMITS.workerMultipartTotalDefaultBytes,
+    perFileMaximum * 2,
+  );
   if (!Number.isFinite(configured)) return fallback;
-  return Math.min(80_000_000, Math.max(perFileMaximum, Math.floor(configured)));
+  return Math.min(
+    RELAY_LIMITS.workerMultipartTotalHardBytes,
+    Math.max(perFileMaximum, Math.floor(configured)),
+  );
 }
 
 export function collectFormFieldNames(form: FormData): string[] {

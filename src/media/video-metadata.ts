@@ -48,6 +48,107 @@ export function parseVideoDimensions(
     : parseWebmDimensions(bytes);
 }
 
+
+/**
+ * CPU/memory-bounded metadata probe for large videos. Most streamable MP4s keep
+ * `moov` near the beginning; non-faststart files usually keep it near the end.
+ * Avoid scanning a 10-20 MiB body when at most a small head/tail window is needed.
+ */
+export function parseVideoDimensionsBounded(
+  bytes: Uint8Array,
+  contentType = "",
+): VideoDimensions | null {
+  const headBytes = RELAY_LIMITS.videoMetadataProbeHeadBytes;
+  const tailBytes = RELAY_LIMITS.videoMetadataProbeTailBytes;
+
+  if (bytes.byteLength <= headBytes + tailBytes) {
+    return parseVideoDimensions(bytes, contentType);
+  }
+
+  const head = bytes.subarray(0, Math.min(bytes.byteLength, headBytes));
+  const fromHead = parseVideoDimensions(head, contentType);
+  if (fromHead) return fromHead;
+
+  const normalizedType = String(contentType).toLowerCase();
+  if (normalizedType.includes("webm") || normalizedType.includes("matroska")) {
+    return null;
+  }
+
+  const tailStart = Math.max(0, bytes.byteLength - tailBytes);
+  return parseMp4MoovWindow(bytes.subarray(tailStart));
+}
+
+/**
+ * Blob variant used by multipart uploads. It never materializes the complete
+ * File into a second ArrayBuffer, which materially lowers isolate memory.
+ */
+export async function parseVideoDimensionsFromBlob(
+  blob: Blob,
+  contentType = "",
+): Promise<VideoDimensions | null> {
+  const headSize = Math.min(blob.size, RELAY_LIMITS.videoMetadataProbeHeadBytes);
+  const head = new Uint8Array(await blob.slice(0, headSize).arrayBuffer());
+  const fromHead = parseVideoDimensions(head, contentType);
+  if (fromHead) return fromHead;
+
+  const normalizedType = String(contentType).toLowerCase();
+  if (
+    blob.size <= headSize ||
+    normalizedType.includes("webm") ||
+    normalizedType.includes("matroska")
+  ) {
+    return null;
+  }
+
+  const tailStart = Math.max(0, blob.size - RELAY_LIMITS.videoMetadataProbeTailBytes);
+  const tail = new Uint8Array(await blob.slice(tailStart).arrayBuffer());
+  return parseMp4MoovWindow(tail);
+}
+
+function parseMp4MoovWindow(windowBytes: Uint8Array): VideoDimensions | null {
+  if (windowBytes.byteLength < BOX_HEADER_BYTES) return null;
+
+  // TextDecoder performs the scan in native code and is substantially cheaper
+  // than a JavaScript byte-by-byte search across several megabytes.
+  const text = new TextDecoder("latin1").decode(windowBytes);
+  let typeOffset = text.lastIndexOf("moov");
+
+  while (typeOffset >= 4) {
+    const boxStart = typeOffset - 4;
+    const view = new DataView(
+      windowBytes.buffer,
+      windowBytes.byteOffset + boxStart,
+      windowBytes.byteLength - boxStart,
+    );
+    const size32 = view.getUint32(0);
+    let headerBytes = BOX_HEADER_BYTES;
+    let boxSize = size32;
+
+    if (size32 === 1 && view.byteLength >= EXTENDED_BOX_HEADER_BYTES) {
+      const high = view.getUint32(8);
+      const low = view.getUint32(12);
+      boxSize = high * 2 ** 32 + low;
+      headerBytes = EXTENDED_BOX_HEADER_BYTES;
+    } else if (size32 === 0) {
+      boxSize = view.byteLength;
+    }
+
+    if (
+      Number.isFinite(boxSize) &&
+      boxSize >= headerBytes &&
+      boxSize <= view.byteLength
+    ) {
+      const candidate = windowBytes.subarray(boxStart, boxStart + boxSize);
+      const parsed = parseVideoDimensions(candidate, "video/mp4");
+      if (parsed) return parsed;
+    }
+
+    typeOffset = text.lastIndexOf("moov", typeOffset - 1);
+  }
+
+  return null;
+}
+
 function parseMp4Dimensions(bytes: Uint8Array): VideoDimensions | null {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let boxCount = 0;

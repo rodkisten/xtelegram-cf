@@ -13,6 +13,9 @@ import {
   resolveConcurrency,
   resolveHlsMaxMediaBytes,
   resolveMaxMediaBytes,
+  resolveWorkerBufferedMediaBytes,
+  resolveWorkerHlsBufferedMediaBytes,
+  resolveWorkerHlsTransmuxEnabled,
   resolveTelegramRemoteUrlLimitBytes,
   shouldPreferWorkerUploadForTelegram,
 } from "../../media";
@@ -203,7 +206,10 @@ async function prepareAlbumUploads(
   batch: RelayAlbumInput["items"],
   env: Env,
 ): Promise<PreparedAlbumUpload[]> {
-  const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+  const maxMediaBytes = Math.min(
+    resolveMaxMediaBytes(env.MAX_MEDIA_BYTES),
+    resolveWorkerBufferedMediaBytes(env.WORKER_BUFFERED_MEDIA_BYTES),
+  );
   const uploadBudget = resolveMultipartMaxTotalBytes(
     env.MULTIPART_MAX_TOTAL_BYTES,
     maxMediaBytes,
@@ -217,8 +223,12 @@ async function prepareAlbumUploads(
     const prepared = await prepareMedia(albumItemToRelayInput(input, item), {
       maxMediaBytes,
       concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
-      hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+      hlsMaxMediaBytes: Math.min(
+        resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+        resolveWorkerHlsBufferedMediaBytes(env.WORKER_HLS_BUFFERED_MEDIA_BYTES),
+      ),
       twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
+      allowWorkerHlsTransmux: resolveWorkerHlsTransmuxEnabled(env.ALLOW_WORKER_HLS_TRANSMUX),
       forceUpload: true,
     });
     if (prepared.type !== "upload") {
@@ -328,7 +338,10 @@ async function sendAlbumItemsIndividually(
   batchIndex: number,
 ): Promise<OrderedSinglesAttempt> {
   const sent: TelegramMessage[] = [];
-  const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+  const maxMediaBytes = Math.min(
+    resolveMaxMediaBytes(env.MAX_MEDIA_BYTES),
+    resolveWorkerBufferedMediaBytes(env.WORKER_BUFFERED_MEDIA_BYTES),
+  );
 
   for (let index = 0; index < batch.length; index += 1) {
     const item = batch[index]!;
@@ -337,8 +350,12 @@ async function sendAlbumItemsIndividually(
       const candidate = await prepareMedia(albumItemToRelayInput(input, item), {
         maxMediaBytes,
         concurrency: resolveConcurrency(env.HLS_CONCURRENCY),
-        hlsMaxMediaBytes: resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+        hlsMaxMediaBytes: Math.min(
+        resolveHlsMaxMediaBytes(env.HLS_MAX_MEDIA_BYTES),
+        resolveWorkerHlsBufferedMediaBytes(env.WORKER_HLS_BUFFERED_MEDIA_BYTES),
+      ),
       twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
+      allowWorkerHlsTransmux: resolveWorkerHlsTransmuxEnabled(env.ALLOW_WORKER_HLS_TRANSMUX),
         forceUpload: true,
       });
       if (candidate.type !== "upload") {
@@ -903,7 +920,7 @@ export async function handleJsonAlbumSend(
       return channelDeliveries;
     };
 
-    const channelConcurrency = Math.min(2, plan.channelsToSend.length);
+    const channelConcurrency = Math.min(1, plan.channelsToSend.length);
     const deliveriesByChannel = await mapWithConcurrency(
       plan.channelsToSend,
       channelConcurrency,

@@ -1,4 +1,5 @@
 import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
+import { RELAY_LIMITS } from "../../config/constants";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import { buildLimitExceededPayload, RelayLimitExceededError } from "../../lib/limit-error";
@@ -9,8 +10,12 @@ import {
   relayDebug,
   relayTraceId,
 } from "../../lib/debug";
-import { parseVideoDimensions } from "../../media/video-metadata";
-import { resolveMaxMediaBytes, resolveTelegramUploadLimitBytes } from "../../media";
+import { parseVideoDimensionsFromBlob } from "../../media/video-metadata";
+import {
+  resolveMaxMediaBytes,
+  resolveTelegramUploadLimitBytes,
+  resolveWorkerBufferedMediaBytes,
+} from "../../media";
 import {
   parseTelegramDestination,
   resolveTelegramChatIdsForEnv,
@@ -64,6 +69,35 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   relayDebug(env, traceId, "multipart.started", {
     contentType: request.headers.get("Content-Type") || null,
   });
+
+  const declaredRequestBytes = Number(request.headers.get("content-length") || 0);
+  if (
+    Number.isFinite(declaredRequestBytes) &&
+    declaredRequestBytes > RELAY_LIMITS.workerMultipartRequestHardBytes
+  ) {
+    return json(
+      {
+        ok: false,
+        limitExceeded: true,
+        error: "Multipart request exceeds the Worker resource-safe request budget.",
+        stage: "multipart-resource-preflight",
+        reason: "worker_resource_budget",
+        limit: {
+          kind: "worker_resource_budget",
+          maxBytes: RELAY_LIMITS.workerMultipartRequestHardBytes,
+          actualBytes: declaredRequestBytes,
+        },
+        clientFallback: {
+          available: false,
+          action: "compress_and_resend",
+          url: null,
+          hint: "Compress or split the media before POSTing multipart to the Worker.",
+        },
+      },
+      413,
+    );
+  }
+
   let form: FormData;
   try {
     form = await request.formData();
@@ -181,26 +215,14 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     );
   }
 
-  const maxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
-  for (const uploaded of uploadedFiles) {
-    uploaded.videoMetadata = null;
-    if (uploaded.mediaType !== "video") continue;
+  const maxMediaBytes = Math.min(
+    resolveMaxMediaBytes(env.MAX_MEDIA_BYTES),
+    resolveWorkerBufferedMediaBytes(env.WORKER_BUFFERED_MEDIA_BYTES),
+  );
 
-    const bytes = new Uint8Array(await uploaded.file.arrayBuffer());
-    uploaded.videoMetadata = parseVideoDimensions(bytes, uploaded.file.type);
-    if (!uploaded.videoMetadata) {
-      return json(
-        {
-          ok: false,
-          error:
-            `Unable to determine the real dimensions of uploaded video ${uploaded.file.name || uploaded.field}. Refusing to send it without width/height metadata to prevent Telegram aspect-ratio distortion.`,
-          stage: "video-metadata",
-        },
-        422,
-      );
-    }
-  }
-
+  // Reject resource-unsafe files before calling File.arrayBuffer(). The old order
+  // created a second full-file allocation for videos that were going to be
+  // rejected anyway, which is a direct path to Cloudflare's 128 MB isolate cap.
   const oversized = uploadedFiles.filter(({ file, mediaType }) =>
     file.size > resolveTelegramUploadLimitBytes(mediaType, maxMediaBytes),
   );
@@ -216,10 +238,10 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       payload.videoUrl || payload.photoUrl || null;
     const largestLimitBytes = resolveTelegramUploadLimitBytes(largest.mediaType, maxMediaBytes);
     const limitError = new RelayLimitExceededError(
-      "One or more uploaded files exceed the effective Telegram/configured upload limit.",
+      "One or more uploaded files exceed the Worker resource-safe upload limit.",
       {
-        kind: "multipart_file_bytes",
-        stage: "validate-files",
+        kind: "worker_resource_budget",
+        stage: "multipart-resource-budget",
         limitBytes: largestLimitBytes,
         actualBytes: largest.file.size,
         resolvedMediaUrl: originalUrl,
@@ -245,6 +267,49 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       },
       413,
     );
+  }
+
+  const videoUploads = uploadedFiles.filter((entry) => entry.mediaType === "video");
+  const payloadWidth = Number(payload.metadata?.resolvedWidth ?? payload.metadata?.width ?? 0);
+  const payloadHeight = Number(payload.metadata?.resolvedHeight ?? payload.metadata?.height ?? 0);
+  const payloadVideoMetadata =
+    videoUploads.length === 1 &&
+    Number.isFinite(payloadWidth) && payloadWidth > 0 &&
+    Number.isFinite(payloadHeight) && payloadHeight > 0
+      ? {
+          width: Math.round(payloadWidth),
+          height: Math.round(payloadHeight),
+          durationSeconds: null,
+          rotation: 0 as const,
+        }
+      : null;
+
+  for (const uploaded of uploadedFiles) {
+    uploaded.videoMetadata = null;
+    if (uploaded.mediaType !== "video") continue;
+
+    // Source resolvers already know the display geometry in most fallback flows.
+    // Reuse that metadata instead of copying and scanning the entire uploaded file.
+    if (payloadVideoMetadata && videoUploads.length === 1) {
+      uploaded.videoMetadata = payloadVideoMetadata;
+    } else {
+      uploaded.videoMetadata = await parseVideoDimensionsFromBlob(
+        uploaded.file,
+        uploaded.file.type,
+      );
+    }
+
+    if (!uploaded.videoMetadata) {
+      return json(
+        {
+          ok: false,
+          error:
+            `Unable to determine the real dimensions of uploaded video ${uploaded.file.name || uploaded.field}. Refusing to send it without width/height metadata to prevent Telegram aspect-ratio distortion.`,
+          stage: "video-metadata",
+        },
+        422,
+      );
+    }
   }
 
   const multipartTotalBytes = uploadedFiles.reduce((sum, entry) => sum + entry.file.size, 0);
@@ -411,7 +476,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       return channelDeliveries;
     };
 
-    const channelConcurrency = Math.min(2, plan.channelsToSend.length);
+    const channelConcurrency = Math.min(1, plan.channelsToSend.length);
     const deliveriesByChannel = await mapWithConcurrency(
       plan.channelsToSend,
       channelConcurrency,
