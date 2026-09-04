@@ -15,7 +15,6 @@ import {
   resolveMaxMediaBytes,
   resolveWorkerBufferedMediaBytes,
   resolveWorkerHlsBufferedMediaBytes,
-  resolveWorkerHlsTransmuxEnabled,
   resolveTelegramRemoteUrlLimitBytes,
   shouldPreferWorkerUploadForTelegram,
 } from "../../media";
@@ -114,6 +113,7 @@ function albumItemToRelayInput(
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
     force: input.force,
+    forceCpu: input.forceCpu,
   };
 }
 
@@ -228,7 +228,7 @@ async function prepareAlbumUploads(
         resolveWorkerHlsBufferedMediaBytes(env.WORKER_HLS_BUFFERED_MEDIA_BYTES),
       ),
       twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
-      allowWorkerHlsTransmux: resolveWorkerHlsTransmuxEnabled(env.ALLOW_WORKER_HLS_TRANSMUX),
+      allowCpuHeavy: input.forceCpu,
       forceUpload: true,
     });
     if (prepared.type !== "upload") {
@@ -355,7 +355,7 @@ async function sendAlbumItemsIndividually(
         resolveWorkerHlsBufferedMediaBytes(env.WORKER_HLS_BUFFERED_MEDIA_BYTES),
       ),
       twirrlVersionToken: env.TWIRRL_VERSION_TOKEN,
-      allowWorkerHlsTransmux: resolveWorkerHlsTransmuxEnabled(env.ALLOW_WORKER_HLS_TRANSMUX),
+      allowCpuHeavy: input.forceCpu,
         forceUpload: true,
       });
       if (candidate.type !== "upload") {
