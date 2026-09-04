@@ -2,6 +2,7 @@ import { resolveMediaIdentity } from "../db";
 import { cloneAuthorizedJsonRequest } from "../http/internal-request";
 import { json } from "../http/response";
 import { getErrorMessage } from "../lib/errors";
+import { resolveCpuHeavyEnabled } from "../lib/cpu-policy";
 import {
   debugChannelSummary,
   debugError,
@@ -38,6 +39,8 @@ interface ResolveRequestBody {
   mediaId?: unknown;
   mediaKey?: unknown;
   force?: unknown;
+  force_cpu?: unknown;
+  forceCpu?: unknown;
 }
 
 export async function handleResolve(
@@ -60,6 +63,7 @@ export async function handleResolve(
       : typeof body.sourceUrl === "string"
         ? body.sourceUrl.trim()
         : "";
+  const forceCpu = resolveCpuHeavyEnabled(env, request, body.force_cpu ?? body.forceCpu);
   const normalized = normalizePublicHttpUrl(sourceUrl);
   if (!normalized) {
     relayDebug(env, traceId, "resolve.invalid-source-url", {
@@ -81,6 +85,7 @@ export async function handleResolve(
     requestedChannelCount: Array.isArray(body.channels) ? body.channels.length : body.channel ? 1 : 0,
     metadataKeys: Object.keys(requestMetadata || {}).slice(0, 24),
     hasTwitterHandleHint: Boolean(twitterHandleHint),
+    forceCpu,
   });
 
   let resolution: SocialResolution;
@@ -169,6 +174,7 @@ export async function handleResolve(
     mediaId: explicitMediaId || undefined,
     mediaKey: explicitMediaKey || undefined,
     force: body.force === true,
+    force_cpu: forceCpu,
     metadata,
   };
 
