@@ -1391,3 +1391,54 @@ Content deduplication is designed not to consume CPU proportional to the video's
 - The robustness-oriented near-duplicate signature is a bounded heuristic. It samples at most 8,192 bytes per media item and therefore does not scan every byte of a 20 MB, 50 MB, or larger video.
 - Fingerprint version 2 is intentionally incompatible with the older full-byte histogram version. D1 comparisons require matching fingerprint versions.
 - The heuristic is not a frame-decoding perceptual hash. It is intentionally conservative and cheap enough for the request hot path. Exact SHA-256 remains authoritative for byte-identical media.
+
+## CPU modes · v2.15.3
+
+CPU-heavy media processing is disabled by default. This is the recommended Cloudflare Worker mode.
+
+```toml
+ENABLE_CPU_HEAVY = "false"
+```
+
+Fast mode keeps social resolution, quality selection, size probing, D1 identity/channel dedupe and Telegram delivery, but skips optional CPU-expensive work:
+
+- MPEG-TS/HLS Worker remux/transmux
+- video-container dimension parsing when resolver width/height is unavailable
+- exact media SHA-256
+- robustness content fingerprinting
+- content-level near-duplicate scanning
+
+Enable the slow path only for one request with any of these equivalent forms:
+
+```json
+{ "force_cpu": true }
+```
+
+```text
+POST /resolve-and-send?force_cpu=true
+POST /send?force_cpu=true
+POST /batch?force_cpu=true
+```
+
+For multipart requests, `force_cpu` can be sent inside the JSON `payload`, as a standalone form field, or in the query string.
+
+To enable CPU-heavy processing globally:
+
+```toml
+ENABLE_CPU_HEAVY = "true"
+```
+
+When fast mode cannot safely continue, for example an HLS URL or a video with no trusted width/height, the relay returns a controlled response with:
+
+```json
+{
+  "reason": "cpu_heavy_disabled",
+  "forceCpuRequired": true,
+  "forceCpuParameter": "force_cpu=true",
+  "clientFallback": {
+    "action": "retry_with_force_cpu"
+  }
+}
+```
+
+`force_cpu=true` does not bypass Worker memory or Telegram file-size safety limits.
