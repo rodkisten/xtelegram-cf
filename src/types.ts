@@ -8,6 +8,12 @@ export interface Env {
   MAX_MEDIA_BYTES?: string;
   HLS_CONCURRENCY?: string;
   HLS_MAX_MEDIA_BYTES?: string;
+  /** Max bytes the Worker may buffer for one direct media upload before client fallback. */
+  WORKER_BUFFERED_MEDIA_BYTES?: string;
+  /** Max combined bytes the Worker may hold while assembling HLS/fMP4 media. */
+  WORKER_HLS_BUFFERED_MEDIA_BYTES?: string;
+  /** Opt-in only: allow CPU-heavy MPEG-TS -> MP4 transmuxing inside the Worker. */
+  ALLOW_WORKER_HLS_TRANSMUX?: string;
   MULTIPART_MAX_TOTAL_BYTES?: string;
   TWIRRL_VERSION_TOKEN?: string;
   /** Optional self-hosted Cobalt API base URL. */
@@ -24,6 +30,8 @@ export interface Env {
   SOCIAL_METADATA_TIMEOUT_MS?: string;
   /** Enables privacy-safe structured pipeline logs. Disabled unless true. */
   RELAY_DEBUG?: string;
+  /** Sample rate for non-error debug steps when RELAY_DEBUG is enabled. */
+  RELAY_DEBUG_SAMPLE_RATE?: string;
   /** Optional JSON map from @username keys to Telegram destinations (<chat_id> or <chat_id>:<message_thread_id>). */
   TELEGRAM_USERNAME_CHANNEL_MAP_JSON?: string;
 }
