@@ -78,6 +78,7 @@ export function validateRequestBody(body: unknown): SendValidationResult {
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),
       force: record.force === true,
+      forceCpu: record.force_cpu === true || record.forceCpu === true,
     },
   };
 }
@@ -212,6 +213,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),
       force: record.force === true,
+      forceCpu: record.force_cpu === true || record.forceCpu === true,
     },
   };
 }
