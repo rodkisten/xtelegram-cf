@@ -1,5 +1,5 @@
 export const SERVICE_NAME = "generic-telegram-media-relay";
-export const SERVICE_VERSION = "2.15.3";
+export const SERVICE_VERSION = "2.16.0";
 export const SERVICE_RUNTIME =
   "typescript-hls-remux-photo-video-album-ordered-fallback-d1-atomic-claims-batch-send-social-metadata-modular";
 
@@ -51,7 +51,7 @@ export const RELAY_LIMITS = Object.freeze({
   socialMetadataTimeoutDefaultMs: 4_000,
   socialMetadataTimeoutMaxMs: 10_000,
   socialMetadataCacheTtlMs: 15 * 60 * 1000,
-  socialMetadataCacheEntriesMax: 500,
+  socialMetadataCacheEntriesMax: 128,
 
   videoMetadataBoxDepthMax: 8,
   videoMetadataBoxCountMax: 768,

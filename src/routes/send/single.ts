@@ -120,9 +120,9 @@ export async function handleSingleSend(
 
   try {
     const configuredMaxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
-    const maxMediaBytes = Math.min(
-      configuredMaxMediaBytes,
-      resolveWorkerBufferedMediaBytes(env.WORKER_BUFFERED_MEDIA_BYTES),
+    const maxMediaBytes = configuredMaxMediaBytes;
+    const workerBufferedMaxBytes = resolveWorkerBufferedMediaBytes(
+      env.WORKER_BUFFERED_MEDIA_BYTES,
     );
     const concurrency = resolveConcurrency(env.HLS_CONCURRENCY);
     const hlsMaxMediaBytes = Math.min(
@@ -140,6 +140,7 @@ export async function handleSingleSend(
     relayDebug(env, traceId, "single.prepare-media.started", {
       mediaUrl: debugUrl(input.mediaUrl.href),
       maxMediaBytes,
+      workerBufferedMaxBytes,
       hlsMaxMediaBytes,
       concurrency,
     });
@@ -150,6 +151,7 @@ export async function handleSingleSend(
 
     const preparePromise = prepareMedia(input, {
       maxMediaBytes,
+      workerBufferedMaxBytes,
       hlsMaxMediaBytes,
       concurrency,
       signal: request.signal,
@@ -253,7 +255,9 @@ export async function handleSingleSend(
       (prepared.type === "file"
         ? inferTelegramMediaType(prepared.url, prepared.contentType)
         : prepared.mediaType);
-    const delivery = prepared.type === "file" ? "telegram-url" : "multipart-upload";
+    const delivery = prepared.type === "file"
+      ? prepared.deliveryMode || "telegram-url"
+      : "multipart-upload";
 
     relayDebug(env, traceId, "single.prepare-media.succeeded", {
       inputUrl: debugUrl(input.mediaUrl.href),

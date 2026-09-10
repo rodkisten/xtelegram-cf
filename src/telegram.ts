@@ -9,6 +9,7 @@ import type {
   VideoMetadata,
 } from "./types";
 import { RELAY_LIMITS } from "./config/constants";
+import { fetchPublic, getBaseContentType } from "./lib/http";
 
 
 interface TelegramSendBase {
@@ -197,6 +198,322 @@ export async function sendTelegramUpload(
   return requestTelegram(options.botToken, method, {
     body: form,
   });
+}
+
+/**
+ * Proxies a remote media body into Telegram multipart/form-data without ever
+ * materializing the complete file in the Worker isolate. This is the default
+ * transport for files above Telegram's 20 MB remote-URL ceiling but below the
+ * normal multipart ceiling.
+ */
+export async function sendTelegramStreamUpload(
+  options: TelegramSendBase & {
+    mediaUrl: string;
+    mediaHeaders: Record<string, string>;
+    filename: string;
+    contentType: string;
+    maximumBytes: number;
+    expectedContentLength?: number | null;
+  },
+): Promise<TelegramApiResult<TelegramMessage>> {
+  const { method, field } = getTelegramMethod(options.mediaType);
+  const metadataError = validateRequiredVideoMetadata(
+    options.mediaType,
+    options.videoMetadata,
+  );
+  if (metadataError) {
+    return {
+      ok: false,
+      httpStatus: 422,
+      requestMethod: method,
+      description: metadataError,
+    };
+  }
+
+  const telegramMaximum = options.mediaType === "photo"
+    ? RELAY_LIMITS.telegramUploadPhotoBytes
+    : RELAY_LIMITS.telegramUploadOtherBytes;
+  const maximumBytes = Math.min(
+    telegramMaximum,
+    Math.max(1, Math.floor(options.maximumBytes || telegramMaximum)),
+  );
+
+  if (
+    options.expectedContentLength != null &&
+    options.expectedContentLength > maximumBytes
+  ) {
+    return {
+      ok: false,
+      httpStatus: 413,
+      requestMethod: method,
+      description:
+        `Streaming upload exceeds the effective limit: ` +
+        `${options.expectedContentLength} bytes > ${maximumBytes} bytes.`,
+    };
+  }
+
+  const sourceHeaders = new Headers(options.mediaHeaders);
+  sourceHeaders.delete("content-length");
+  sourceHeaders.delete("range");
+  if (!sourceHeaders.has("accept")) sourceHeaders.set("accept", "*/*");
+  if (!sourceHeaders.has("accept-encoding")) sourceHeaders.set("accept-encoding", "identity");
+
+  let source: Response;
+  try {
+    source = await fetchPublic(options.mediaUrl, {
+      method: "GET",
+      headers: sourceHeaders,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      httpStatus: 502,
+      requestMethod: method,
+      description: `Unable to open media source for streaming: ${getErrorMessage(error)}`,
+    };
+  }
+
+  if (!source.ok || !source.body) {
+    try { await source.body?.cancel(); } catch {}
+    return {
+      ok: false,
+      httpStatus: 502,
+      requestMethod: method,
+      description:
+        `Media source rejected streaming download with HTTP ${source.status}.`,
+    };
+  }
+
+  const sourceLengthHeader = Number(source.headers.get("content-length") || 0);
+  const sourceLength = Number.isFinite(sourceLengthHeader) && sourceLengthHeader > 0
+    ? sourceLengthHeader
+    : options.expectedContentLength ?? null;
+
+  if (sourceLength != null && sourceLength > maximumBytes) {
+    try { await source.body.cancel(); } catch {}
+    return {
+      ok: false,
+      httpStatus: 413,
+      requestMethod: method,
+      description:
+        `Streaming source is ${sourceLength} bytes, above the effective ` +
+        `Telegram/configured limit of ${maximumBytes} bytes.`,
+    };
+  }
+
+  const boundary = `----xtelegram-${crypto.randomUUID().replace(/-/g, "")}`;
+  const encoder = new TextEncoder();
+  const safeContentType =
+    getBaseContentType(source.headers.get("content-type")) ||
+    getBaseContentType(options.contentType) ||
+    "application/octet-stream";
+  const prefix = encoder.encode(
+    buildStreamingMultipartPrefix({
+      boundary,
+      field,
+      chatId: options.chatId,
+      messageThreadId: options.messageThreadId,
+      filename: options.filename,
+      contentType: safeContentType,
+      mediaType: options.mediaType,
+      caption: options.caption,
+      parseMode: options.parseMode,
+      videoMetadata: options.videoMetadata,
+    }),
+  );
+  const suffix = encoder.encode(`\r\n--${boundary}--\r\n`);
+  const state: { bytesRead: number; failure: string | null } = {
+    bytesRead: 0,
+    failure: null,
+  };
+  const composed = createMultipartProxyStream(
+    source.body,
+    prefix,
+    suffix,
+    maximumBytes,
+    state,
+  );
+
+  let requestBody: ReadableStream<Uint8Array> = composed;
+  let pipePromise: Promise<void> | null = null;
+
+  // FixedLengthStream lets workerd emit Content-Length while preserving
+  // streaming semantics. Fall back to a normal streaming request when the
+  // origin does not expose a reliable size.
+  if (sourceLength != null) {
+    const fixed = new FixedLengthStream(
+      prefix.byteLength + sourceLength + suffix.byteLength,
+    );
+    requestBody = fixed.readable;
+    pipePromise = composed.pipeTo(fixed.writable);
+  }
+
+  const telegramPromise = requestTelegram<TelegramMessage>(
+    options.botToken,
+    method,
+    {
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      body: requestBody,
+    },
+  );
+
+  if (!pipePromise) {
+    const result = await telegramPromise;
+    if (state.failure) {
+      return {
+        ok: false,
+        httpStatus: 413,
+        requestMethod: method,
+        description: state.failure,
+      };
+    }
+    return result;
+  }
+
+  const [telegramResult, pipeResult] = await Promise.allSettled([
+    telegramPromise,
+    pipePromise,
+  ]);
+
+  if (pipeResult.status === "rejected") {
+    return {
+      ok: false,
+      httpStatus: state.failure ? 413 : 502,
+      requestMethod: method,
+      description:
+        state.failure ||
+        `Streaming multipart pipeline failed: ${getErrorMessage(pipeResult.reason)}`,
+    };
+  }
+
+  if (telegramResult.status === "rejected") {
+    return {
+      ok: false,
+      httpStatus: 502,
+      requestMethod: method,
+      description: `Telegram streaming request failed: ${getErrorMessage(telegramResult.reason)}`,
+    };
+  }
+
+  return telegramResult.value;
+}
+
+function createMultipartProxyStream(
+  source: ReadableStream<Uint8Array>,
+  prefix: Uint8Array,
+  suffix: Uint8Array,
+  maximumBytes: number,
+  state: { bytesRead: number; failure: string | null },
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let phase: "prefix" | "source" | "suffix" | "done" = "prefix";
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        if (phase === "prefix") {
+          phase = "source";
+          controller.enqueue(prefix);
+          return;
+        }
+
+        if (phase === "source") {
+          const { done, value } = await reader.read();
+          if (!done) {
+            if (!value?.byteLength) return;
+            state.bytesRead += value.byteLength;
+            if (state.bytesRead > maximumBytes) {
+              state.failure =
+                `Streaming source exceeded the effective limit while reading: ` +
+                `${state.bytesRead} bytes > ${maximumBytes} bytes.`;
+              try { await reader.cancel(state.failure); } catch {}
+              controller.error(new Error(state.failure));
+              return;
+            }
+            controller.enqueue(value);
+            return;
+          }
+          phase = "suffix";
+        }
+
+        if (phase === "suffix") {
+          phase = "done";
+          controller.enqueue(suffix);
+          return;
+        }
+
+        controller.close();
+      } catch (error) {
+        try { await reader.cancel(error); } catch {}
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try { await reader.cancel(reason); } catch {}
+    },
+  });
+}
+
+function buildStreamingMultipartPrefix(options: {
+  boundary: string;
+  field: "video" | "audio" | "document" | "photo";
+  chatId: string;
+  messageThreadId?: number | null;
+  filename: string;
+  contentType: string;
+  mediaType: MediaType;
+  caption: string;
+  parseMode: ParseMode | null;
+  videoMetadata?: VideoMetadata | null;
+}): string {
+  const fields: Array<[string, string]> = [["chat_id", options.chatId]];
+
+  if (options.messageThreadId != null) {
+    fields.push(["message_thread_id", String(options.messageThreadId)]);
+  }
+  if (options.mediaType === "video") {
+    fields.push(["supports_streaming", "true"]);
+    if (options.videoMetadata) {
+      fields.push(["width", String(Math.round(options.videoMetadata.width))]);
+      fields.push(["height", String(Math.round(options.videoMetadata.height))]);
+      if (
+        options.videoMetadata.durationSeconds != null &&
+        Number.isFinite(options.videoMetadata.durationSeconds)
+      ) {
+        fields.push([
+          "duration",
+          String(Math.max(0, Math.round(options.videoMetadata.durationSeconds))),
+        ]);
+      }
+    }
+  }
+  if (options.caption) fields.push(["caption", options.caption]);
+  if (options.parseMode) fields.push(["parse_mode", options.parseMode]);
+
+  let output = "";
+  for (const [name, value] of fields) {
+    output +=
+      `--${options.boundary}\r\n` +
+      `Content-Disposition: form-data; name="${escapeMultipartToken(name)}"\r\n\r\n` +
+      `${value}\r\n`;
+  }
+
+  output +=
+    `--${options.boundary}\r\n` +
+    `Content-Disposition: form-data; name="${escapeMultipartToken(options.field)}"; ` +
+    `filename="${escapeMultipartToken(options.filename)}"\r\n` +
+    `Content-Type: ${options.contentType}\r\n\r\n`;
+
+  return output;
+}
+
+function escapeMultipartToken(value: string): string {
+  return String(value)
+    .replace(/[\r\n]/g, " ")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
 }
 
 export async function sendTelegramMediaGroupUrl(options: {
