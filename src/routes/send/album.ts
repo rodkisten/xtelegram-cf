@@ -154,11 +154,14 @@ function batchPrefersWorkerUpload(
   input: RelayAlbumInput,
   batch: RelayAlbumInput["items"],
 ): boolean {
+  if (!input.forceCpu) return false;
+
   return batch.some((item) => {
     if (
       shouldPreferWorkerUploadForTelegram(
         albumItemToRelayInput(input, item),
         item.mediaUrl.href,
+        true,
       )
     ) {
       return true;
@@ -169,6 +172,25 @@ function batchPrefersWorkerUpload(
       Number.isFinite(resolvedBytes) &&
       resolvedBytes > resolveTelegramRemoteUrlLimitBytes("photo");
   });
+}
+
+function albumItemVideoMetadata(
+  item: RelayAlbumInput["items"][number],
+): PreparedUpload["videoMetadata"] {
+  if (item.mediaType !== "video") return null;
+
+  const width = Number(item.metadata?.resolvedWidth || 0);
+  const height = Number(item.metadata?.resolvedHeight || 0);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    return null;
+  }
+
+  return {
+    width,
+    height,
+    durationSeconds: null,
+    rotation: 0,
+  };
 }
 
 function itemCaption(
@@ -589,6 +611,7 @@ async function sendAlbumBatch(
       items: batch.map((item) => ({
         mediaUrl: item.mediaUrl.href,
         mediaType: item.mediaType,
+        videoMetadata: albumItemVideoMetadata(item),
         caption: item.caption,
         parseMode: item.parseMode,
       })),
@@ -623,6 +646,25 @@ async function sendAlbumBatch(
   }
 
   const mixedFallback = isMixedPhotoVideoBatch(batch) && allowsOrderedMixedFallback(input);
+
+  if (!input.forceCpu) {
+    return {
+      result: {
+        ...direct,
+        httpStatus: direct.httpStatus || 422,
+        description: [
+          direct.description || "Telegram rejected remote album delivery.",
+          "Worker multipart buffering is disabled in fast mode. Retry with force_cpu=true only if you want the resource-heavy fallback.",
+        ].join(" "),
+      },
+      transport: "url",
+      fallbackAttempted: false,
+      orderedFallbackAttempted: false,
+      fallbackError: "cpu_heavy_disabled",
+      hadExternalSideEffect: false,
+      attemptCount: 1 + priorAttemptCount,
+    };
+  }
 
   try {
     const uploads = await prepareAlbumUploads(input, batch, env);
