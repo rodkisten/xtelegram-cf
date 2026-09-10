@@ -1,4 +1,4 @@
-import { sendTelegramUpload, sendTelegramUrl } from "../telegram";
+import { sendTelegramStreamUpload, sendTelegramUpload, sendTelegramUrl } from "../telegram";
 import type {
   MediaType,
   ParseMode,
@@ -34,34 +34,65 @@ export async function sendPreparedMediaToChats(options: {
     }
 
     try {
-      const result =
-        options.prepared.type === "file"
-          ? await sendTelegramUrl({
-              botToken: options.botToken,
-              chatId: destination.chatId,
-              messageThreadId: destination.messageThreadId,
-              mediaUrl: options.prepared.url,
-              mediaType: options.mediaType,
-              caption: options.caption,
-              parseMode: options.parseMode,
-              videoMetadata: options.prepared.videoMetadata,
-            })
-          : await sendTelegramUpload({
-              botToken: options.botToken,
-              chatId: destination.chatId,
-              messageThreadId: destination.messageThreadId,
-              // Reuse the same byte buffer for every destination. The Blob only
-              // materializes the exact view and avoids an eager full-file copy.
-              file: new Blob([toBlobArrayBuffer(options.prepared.bytes)], {
-                type: options.prepared.contentType,
-              }),
-              filename: options.prepared.filename,
-              contentType: options.prepared.contentType,
-              mediaType: options.mediaType,
-              caption: options.caption,
-              parseMode: options.parseMode,
-              videoMetadata: options.prepared.videoMetadata,
-            });
+      let result: TelegramApiResult<TelegramMessage>;
+
+      if (options.prepared.type === "file") {
+        const prepared = options.prepared;
+
+        if (prepared.deliveryMode === "worker-stream") {
+          result = await sendPreparedFileAsStream(
+            options.botToken,
+            destination.chatId,
+            destination.messageThreadId,
+            prepared,
+            options.mediaType,
+            options.caption,
+            options.parseMode,
+          );
+        } else {
+          result = await sendTelegramUrl({
+            botToken: options.botToken,
+            chatId: destination.chatId,
+            messageThreadId: destination.messageThreadId,
+            mediaUrl: prepared.url,
+            mediaType: options.mediaType,
+            caption: options.caption,
+            parseMode: options.parseMode,
+            videoMetadata: prepared.videoMetadata,
+          });
+
+          // Telegram cannot forward request-specific Referer/User-Agent headers
+          // when it fetches a URL itself. A definitive Bot API 400 means no
+          // message was created, so it is safe to retry the same logical media
+          // once through the constant-memory Worker streaming proxy.
+          if (shouldRetryTelegramUrlAsStream(result, prepared)) {
+            result = await sendPreparedFileAsStream(
+              options.botToken,
+              destination.chatId,
+              destination.messageThreadId,
+              prepared,
+              options.mediaType,
+              options.caption,
+              options.parseMode,
+            );
+          }
+        }
+      } else {
+        result = await sendTelegramUpload({
+          botToken: options.botToken,
+          chatId: destination.chatId,
+          messageThreadId: destination.messageThreadId,
+          file: new Blob([toBlobArrayBuffer(options.prepared.bytes)], {
+            type: options.prepared.contentType,
+          }),
+          filename: options.prepared.filename,
+          contentType: options.prepared.contentType,
+          mediaType: options.mediaType,
+          caption: options.caption,
+          parseMode: options.parseMode,
+          videoMetadata: options.prepared.videoMetadata,
+        });
+      }
 
       return { requestedChatId: destination.key, result };
     } catch (error) {
@@ -75,11 +106,66 @@ export async function sendPreparedMediaToChats(options: {
     }
   };
 
-  // URL deliveries are cheap because Telegram fetches the remote media itself,
-  // so parallelize them aggressively. Worker-owned uploads are intentionally
-  // capped lower to keep memory/network pressure predictable for large files.
-  const concurrency = options.prepared.type === "file" ? 4 : 1;
+  // Pure Telegram-URL delivery is network-bound and uses negligible media
+  // memory. Streaming proxy or Worker-owned uploads use one destination at a
+  // time to keep subrequests and backpressure predictable.
+  const concurrency =
+    options.prepared.type === "file" &&
+    (options.prepared.deliveryMode || "telegram-url") === "telegram-url"
+      ? 2
+      : 1;
+
   return mapWithConcurrency(options.chatIds, concurrency, sendOne);
+}
+
+async function sendPreparedFileAsStream(
+  botToken: string,
+  chatId: string,
+  messageThreadId: number | null,
+  prepared: Extract<PreparedMedia, { type: "file" }>,
+  mediaType: MediaType,
+  caption: string,
+  parseMode: ParseMode | null,
+): Promise<TelegramApiResult<TelegramMessage>> {
+  return sendTelegramStreamUpload({
+    botToken,
+    chatId,
+    messageThreadId,
+    mediaUrl: prepared.url,
+    mediaHeaders: prepared.mediaHeaders || {},
+    filename: prepared.filename || "media",
+    contentType: prepared.contentType,
+    maximumBytes: prepared.streamMaxBytes || Number.MAX_SAFE_INTEGER,
+    expectedContentLength: prepared.contentLength,
+    mediaType,
+    caption,
+    parseMode,
+    videoMetadata: prepared.videoMetadata,
+  });
+}
+
+function shouldRetryTelegramUrlAsStream(
+  result: TelegramApiResult<TelegramMessage>,
+  prepared: Extract<PreparedMedia, { type: "file" }>,
+): boolean {
+  if (result.ok) return false;
+
+  // Only a definitive Telegram 400 is retried. Network failures, 5xx responses,
+  // and ambiguous outcomes are never replayed because Telegram might already
+  // have accepted the message before the connection failed.
+  const definitiveBadRequest =
+    result.httpStatus === 400 || result.error_code === 400;
+  if (!definitiveBadRequest) return false;
+
+  if (!prepared.streamMaxBytes) return false;
+  if (
+    prepared.contentLength != null &&
+    prepared.contentLength > prepared.streamMaxBytes
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 /**
@@ -117,7 +203,7 @@ export function formatTelegramDelivery(delivery: TelegramDelivery) {
 export function buildProcessingResult(prepared: PreparedMedia) {
   return prepared.type === "file"
     ? {
-        delivery: "telegram-url",
+        delivery: prepared.deliveryMode || "telegram-url",
         contentLength: prepared.contentLength,
         contentType: prepared.contentType,
       }
