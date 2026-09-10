@@ -29,7 +29,10 @@ const AUDIO_EXTENSIONS = new Set([
 ]);
 
 export interface PrepareMediaOptions {
+  /** Effective configured/protocol ceiling used by the quality ladder. */
   maxMediaBytes?: number;
+  /** Separate isolate-memory ceiling for paths that truly need replayable bytes. */
+  workerBufferedMaxBytes?: number;
   concurrency?: number;
   hlsMaxMediaBytes?: number;
   signal?: AbortSignal;
@@ -48,6 +51,10 @@ export async function prepareMedia(
   options: PrepareMediaOptions = {},
 ): Promise<PreparedMedia> {
   const maxMediaBytes = clampMaxMediaBytes(options.maxMediaBytes);
+  const workerBufferedMaxBytes = Math.min(
+    maxMediaBytes,
+    resolveWorkerBufferedMediaBytes(options.workerBufferedMaxBytes),
+  );
   const hlsMaxMediaBytes = clampHlsMaxMediaBytes(options.hlsMaxMediaBytes);
   const allowCpuHeavy = Boolean(options.allowCpuHeavy || options.allowWorkerHlsTransmux);
   const resolver = new HlsResolver({
@@ -96,28 +103,6 @@ export async function prepareMedia(
     const remoteLimitBytes = resolveTelegramRemoteUrlLimitBytes(inferredMediaType);
     const directMetadataHint = isVideo ? videoMetadataHintFromInput(input) : null;
 
-    if (isVideo && !directMetadataHint && !allowCpuHeavy) {
-      const metadataSafeFallback = await tryKnownQualityFallback(
-        input,
-        direct,
-        inferredMediaType,
-        uploadLimitBytes,
-        options.signal,
-        false,
-      );
-      if (metadataSafeFallback) return metadataSafeFallback;
-
-      throwCpuHeavyDisabled(
-        input,
-        direct.url,
-        "video-metadata",
-        "Video dimensions are not available from the resolver, and container parsing is disabled in fast mode.",
-      );
-    }
-
-    // The hosted Telegram Bot API has different URL and multipart ceilings.
-    // Resolve the real size before deciding the transport whenever the resolver
-    // did not already provide it.
     if (direct.contentLength == null) {
       const rangedLength = await probeContentLengthByRange(
         direct.url,
@@ -127,37 +112,30 @@ export async function prepareMedia(
       if (rangedLength != null) direct.contentLength = rangedLength;
     }
 
-    if (
-      !options.forceUpload &&
-      !isVideo &&
-      direct.contentLength != null &&
-      direct.contentLength <= remoteLimitBytes
-    ) {
-      return direct;
-    }
+    // Ordinary single-file media never needs to live in isolate memory.
+    // Telegram fetches small URLs itself; larger files are proxied as a
+    // streaming multipart body without materializing the full media.
+    if (!options.forceUpload && (!isVideo || directMetadataHint)) {
+      if (direct.contentLength == null || direct.contentLength <= uploadLimitBytes) {
+        return buildDirectStreamingCandidate(
+          direct,
+          inferredMediaType,
+          directMetadataHint,
+          input.mediaHeaders,
+          uploadLimitBytes,
+          remoteLimitBytes,
+        );
+      }
 
-    if (direct.contentLength != null && direct.contentLength > uploadLimitBytes) {
-      const qualityFallback = await tryKnownQualityFallback(
+      const qualityFallback = await tryKnownQualityDeliveryFallback(
         input,
         direct,
         inferredMediaType,
         uploadLimitBytes,
+        remoteLimitBytes,
         options.signal,
-        allowCpuHeavy,
       );
       if (qualityFallback) return qualityFallback;
-
-      // Legacy compatibility for older clients/resolvers that do not yet send
-      // mediaVariants. New resolve-and-send traffic normally never needs this.
-      const mediumFallback = await tryTwitterMediumQualityFallback(
-        input,
-        direct,
-        uploadLimitBytes,
-        options.signal,
-        options.twirrlVersionToken,
-        allowCpuHeavy,
-      );
-      if (mediumFallback) return mediumFallback;
 
       throw new RelayLimitExceededError(
         `Direct media is ${direct.contentLength} bytes, above the effective Telegram/configured upload limit of ${uploadLimitBytes} bytes`,
@@ -175,26 +153,74 @@ export async function prepareMedia(
       );
     }
 
+    // Fast mode refuses deep container parsing. A lower resolver variant with
+    // trusted width/height may still be delivered without any media buffering.
+    if (isVideo && !directMetadataHint && !allowCpuHeavy) {
+      const metadataSafeFallback = await tryKnownQualityDeliveryFallback(
+        input,
+        direct,
+        inferredMediaType,
+        uploadLimitBytes,
+        remoteLimitBytes,
+        options.signal,
+      );
+      if (metadataSafeFallback) return metadataSafeFallback;
+
+      throwCpuHeavyDisabled(
+        input,
+        direct.url,
+        "video-metadata",
+        "Video dimensions are not available from the resolver, and container parsing is disabled in fast mode.",
+      );
+    }
+
+    // Album attach:// and explicit deep inspection need replayable bytes.
+    // Keep that memory ceiling independent from the Telegram upload ceiling.
+    const bufferedLimitBytes = Math.min(uploadLimitBytes, workerBufferedMaxBytes);
+
+    if (direct.contentLength != null && direct.contentLength > bufferedLimitBytes) {
+      const bufferedFallback = await tryKnownQualityFallback(
+        input,
+        direct,
+        inferredMediaType,
+        bufferedLimitBytes,
+        options.signal,
+        allowCpuHeavy,
+      );
+      if (bufferedFallback) return bufferedFallback;
+
+      throw new RelayLimitExceededError(
+        `Media requires Worker-owned bytes but ${direct.contentLength} bytes exceeds the isolate-safe buffer budget of ${bufferedLimitBytes} bytes`,
+        {
+          kind: "worker_resource_budget",
+          stage: "prepare-media-buffer-budget",
+          limitBytes: bufferedLimitBytes,
+          actualBytes: direct.contentLength,
+          resolvedMediaUrl: direct.url,
+          sourceUrl: input.sourceUrl,
+          inputUrl: input.mediaUrl.href,
+          mediaType: inferredMediaType,
+          contentType: direct.contentType,
+        },
+      );
+    }
+
     let downloadedDirect: DownloadedDirectFile;
     try {
       downloadedDirect = await downloadDirectFile(
         direct.url,
         input.mediaHeaders,
-        uploadLimitBytes,
+        bufferedLimitBytes,
         options.signal,
         allowCpuHeavy,
       );
     } catch (error) {
       if (isRelayLimitExceededError(error)) {
-        // The resolver may have been unable to determine Content-Length during
-        // its HEAD/Range probes. If the authoritative download discovers that
-        // the selected quality is too large, keep walking the already-known
-        // quality ladder instead of returning 413 immediately.
         const qualityFallback = await tryKnownQualityFallback(
           input,
           direct,
           inferredMediaType,
-          uploadLimitBytes,
+          bufferedLimitBytes,
           options.signal,
           allowCpuHeavy,
         );
@@ -203,7 +229,7 @@ export async function prepareMedia(
         const mediumFallback = await tryTwitterMediumQualityFallback(
           input,
           direct,
-          uploadLimitBytes,
+          bufferedLimitBytes,
           options.signal,
           options.twirrlVersionToken,
           allowCpuHeavy,
@@ -212,11 +238,10 @@ export async function prepareMedia(
       }
       throw error;
     }
+
     const bytes = downloadedDirect.bytes;
-    const mediaType =
-      input.mediaType || inferTelegramMediaType(direct.url, direct.contentType);
     const videoMetadata =
-      mediaType === "video"
+      inferredMediaType === "video"
         ? reconcileVideoMetadata(
             directMetadataHint || !allowCpuHeavy
               ? null
@@ -225,7 +250,7 @@ export async function prepareMedia(
           )
         : null;
 
-    if (mediaType === "video" && !videoMetadata) {
+    if (inferredMediaType === "video" && !videoMetadata) {
       throw new Error(
         "Unable to determine the real video dimensions. Refusing to send the video without width/height metadata to prevent Telegram aspect-ratio distortion.",
       );
@@ -236,9 +261,9 @@ export async function prepareMedia(
       bytes,
       filename: filenameFromUrl(direct.url),
       contentType: direct.contentType || "application/octet-stream",
-      mediaType,
-      selectedBitrate: null,
-      selectedResolution: null,
+      mediaType: inferredMediaType,
+      selectedBitrate: direct.selectedBitrate,
+      selectedResolution: direct.selectedResolution,
       playlistDepth: 0,
       videoMetadata,
       sourceUrl: direct.url,
@@ -477,10 +502,9 @@ export function inferTelegramMediaType(
 }
 
 /**
- * Forces Worker-owned uploads for videos whenever the configured size limit
- * permits it. This is intentionally provider-agnostic: the Worker must inspect
- * the actual container dimensions and send those dimensions to Telegram instead
- * of allowing a remote fetch to guess the media geometry.
+ * Worker-owned video uploads are now an explicit slow-path operation. Fast
+ * mode uses Telegram URL delivery with resolver-provided width/height so the
+ * Worker never needs to buffer ordinary remote videos in isolate memory.
  *
  * @example
  * shouldPreferWorkerUploadForTelegram({ mediaType: "video" }, "https://cdn.example/video.mp4");
@@ -505,8 +529,9 @@ export function resolveTelegramUploadLimitBytes(
 export function shouldPreferWorkerUploadForTelegram(
   input: Pick<RelayInput, "mediaType">,
   _mediaUrl: string,
+  allowCpuHeavy = false,
 ): boolean {
-  return input.mediaType === "video";
+  return input.mediaType === "video" && allowCpuHeavy;
 }
 
 export function resolveWorkerBufferedMediaBytes(rawValue?: string | number): number {
@@ -551,6 +576,101 @@ function clampMaxMediaBytes(value?: number): number {
     RELAY_LIMITS.directMediaHardBytes,
     Math.max(RELAY_LIMITS.mediaMinimumBytes, Math.floor(value!)),
   );
+}
+
+function buildDirectStreamingCandidate(
+  direct: ResolvedDirectFile,
+  mediaType: MediaType,
+  videoMetadata: VideoMetadata | null,
+  mediaHeaders: Record<string, string>,
+  uploadLimitBytes: number,
+  remoteLimitBytes: number,
+): ResolvedDirectFile {
+  const streamRequired =
+    direct.contentLength != null && direct.contentLength > remoteLimitBytes;
+
+  return {
+    ...direct,
+    videoMetadata,
+    deliveryMode: streamRequired ? "worker-stream" : "telegram-url",
+    mediaHeaders: { ...mediaHeaders },
+    filename: filenameFromUrl(direct.url),
+    streamMaxBytes: uploadLimitBytes,
+  };
+}
+
+async function tryKnownQualityDeliveryFallback(
+  input: RelayInput,
+  direct: ResolvedDirectFile,
+  mediaType: MediaType,
+  maximumUploadBytes: number,
+  remoteLimitBytes: number,
+  signal?: AbortSignal,
+): Promise<ResolvedDirectFile | null> {
+  if (!input.mediaVariants.length || signal?.aborted) return null;
+
+  const variants = dedupeRelayVariants(input.mediaVariants);
+  const currentIndex = variants.findIndex((variant) =>
+    variant.mediaUrl.href === direct.url || variant.mediaUrl.href === input.mediaUrl.href,
+  );
+  const candidates = (currentIndex >= 0 ? variants.slice(currentIndex + 1) : variants)
+    .filter((variant) =>
+      variant.mediaUrl.href !== direct.url && variant.mediaUrl.href !== input.mediaUrl.href,
+    );
+
+  let unknownSizeCandidate: ResolvedDirectFile | null = null;
+
+  for (const variant of candidates) {
+    if (signal?.aborted) return null;
+
+    const metadataHint = mediaType === "video"
+      ? variant.width && variant.height
+        ? {
+            width: variant.width,
+            height: variant.height,
+            durationSeconds: null,
+            rotation: 0 as const,
+          }
+        : videoMetadataHintFromInput(input)
+      : null;
+
+    if (mediaType === "video" && !metadataHint) continue;
+
+    let contentLength = variant.contentLength;
+    if (contentLength == null) {
+      contentLength = await probeContentLengthByRange(
+        variant.mediaUrl.href,
+        variant.mediaHeaders,
+        signal,
+      );
+    }
+    if (contentLength != null && contentLength > maximumUploadBytes) continue;
+
+    const candidate = buildDirectStreamingCandidate(
+      {
+        type: "file",
+        url: variant.mediaUrl.href,
+        contentType: inferContentTypeFromUrl(variant.mediaUrl.href),
+        contentLength,
+        selectedBitrate: variant.bitrate,
+        selectedResolution:
+          variant.quality ||
+          (variant.width && variant.height ? `${variant.width}x${variant.height}` : null),
+        playlistDepth: 0,
+        videoMetadata: metadataHint,
+      },
+      mediaType,
+      metadataHint,
+      variant.mediaHeaders,
+      maximumUploadBytes,
+      remoteLimitBytes,
+    );
+
+    if (contentLength != null) return candidate;
+    if (!unknownSizeCandidate) unknownSizeCandidate = candidate;
+  }
+
+  return unknownSizeCandidate;
 }
 
 async function tryKnownQualityFallback(
