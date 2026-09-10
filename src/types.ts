@@ -182,6 +182,14 @@ export interface ResolvedDirectFile {
   selectedResolution: string | null;
   playlistDepth: number;
   videoMetadata: VideoMetadata | null;
+  /** Fast path transport. URL lets Telegram fetch; stream proxies bytes without buffering them. */
+  deliveryMode?: "telegram-url" | "worker-stream";
+  /** Source headers used only when worker-stream must proxy a protected CDN URL. */
+  mediaHeaders?: Record<string, string>;
+  /** Filename used by the streaming multipart fallback. */
+  filename?: string;
+  /** Effective configured/Telegram multipart ceiling for streaming validation. */
+  streamMaxBytes?: number;
 }
 
 export interface PreparedUpload {
