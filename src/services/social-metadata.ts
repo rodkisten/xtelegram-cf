@@ -1,6 +1,7 @@
 import type { Env, ParseMode } from "../types";
 import { debugUrl } from "../lib/debug";
 import { RELAY_LIMITS } from "../config/constants";
+import { appendHashtagsToCaption } from "../lib/hashtags";
 
 export type SocialPlatform = "twitter" | "instagram" | "tiktok" | "reddit" | "youtube";
 
@@ -17,6 +18,7 @@ export interface SocialPostMetadata {
 export interface SocialDeliveryContent {
   caption: string;
   captionExplicit?: boolean;
+  hashtags?: string[];
   parseMode: ParseMode | null;
   metadata: Record<string, string> | null;
   social: SocialPostMetadata | null;
@@ -28,6 +30,7 @@ interface SocialDeliveryInput {
   pageUrl?: string | null;
   caption: string;
   captionExplicit?: boolean;
+  hashtags?: string[];
   parseMode: ParseMode | null;
   metadata: Record<string, string> | null;
 }
@@ -56,12 +59,12 @@ export async function resolveSocialDeliveryContent(
   // workflows where metadata is captured before a downloadable media URL is
   // available, and avoids replacing a richer caption with scraper output.
   if (input.captionExplicit && input.caption.trim()) {
-    return {
+    return finalizeHashtags({
       caption: input.caption,
       parseMode: input.parseMode,
       metadata: input.metadata,
       social: null,
-    };
+    }, input.hashtags);
   }
 
   const target = resolveSocialTarget(input);
@@ -69,12 +72,12 @@ export async function resolveSocialDeliveryContent(
     const fallbackUrl = resolveDeliveryFallbackUrl(input);
     const caption = input.caption.trim() || fallbackUrl || "";
 
-    return {
+    return finalizeHashtags({
       caption,
       parseMode: input.caption.trim() ? input.parseMode : null,
       metadata: input.metadata,
       social: null,
-    };
+    }, input.hashtags);
   }
 
   let social: SocialPostMetadata;
@@ -105,11 +108,28 @@ export async function resolveSocialDeliveryContent(
     socialMetadataEnriched: hasMetadata ? "true" : "false",
   });
 
-  return {
+  return finalizeHashtags({
     caption,
     parseMode: hasMetadata ? "HTML" : null,
     metadata,
     social,
+  }, input.hashtags);
+}
+
+function finalizeHashtags(
+  content: SocialDeliveryContent,
+  hashtags: string[] | undefined,
+): SocialDeliveryContent {
+  const applied = appendHashtagsToCaption(
+    content.caption,
+    hashtags || [],
+    content.parseMode,
+  );
+
+  return {
+    ...content,
+    caption: applied.caption,
+    parseMode: applied.parseMode,
   };
 }
 

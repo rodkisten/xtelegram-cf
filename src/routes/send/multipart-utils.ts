@@ -8,6 +8,8 @@ export interface MultipartPayload {
   username?: string;
   usernames?: string[] | string;
   caption?: string;
+  hashtags?: unknown;
+  hashtag?: unknown;
   parseMode?: string;
   mediaType?: string;
   title?: string;
