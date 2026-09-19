@@ -11,6 +11,7 @@ import {
   relayTraceId,
 } from "../lib/debug";
 import { normalizePublicHttpUrl } from "../lib/http";
+import { normalizeHashtags } from "../lib/hashtags";
 import {
   resolveSocialMedia,
   SocialResolverError,
@@ -34,6 +35,8 @@ interface ResolveRequestBody {
   username?: unknown;
   usernames?: unknown;
   caption?: unknown;
+  hashtags?: unknown;
+  hashtag?: unknown;
   parseMode?: unknown;
   metadata?: unknown;
   mediaId?: unknown;
@@ -142,6 +145,12 @@ export async function handleResolve(
     return json({ ok: false, error: usernameValidation.error }, 400);
   }
 
+  const hashtagValidation = normalizeHashtags(body.hashtags ?? body.hashtag);
+  if (!hashtagValidation.ok) {
+    relayDebug(env, traceId, "resolve.invalid-hashtags", { error: hashtagValidation.error });
+    return json({ ok: false, error: hashtagValidation.error }, 400);
+  }
+
   const parseMode = normalizeParseMode(body.parseMode);
   if (body.parseMode && !parseMode) {
     relayDebug(env, traceId, "resolve.invalid-parse-mode", { parseMode: String(body.parseMode) });
@@ -168,6 +177,7 @@ export async function handleResolve(
     provider: resolution.source,
     caption,
     captionExplicit,
+    hashtags: hashtagValidation.value,
     parseMode: captionExplicit ? parseMode : null,
     channels: channelValidation.value,
     usernames: usernameValidation.value,
