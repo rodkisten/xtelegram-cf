@@ -3,6 +3,7 @@ import { RELAY_LIMITS } from "../../config/constants";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import { resolveCpuHeavyEnabled } from "../../lib/cpu-policy";
+import { normalizeHashtags } from "../../lib/hashtags";
 import { buildLimitExceededPayload, RelayLimitExceededError } from "../../lib/limit-error";
 import { mapWithConcurrency } from "../../lib/concurrency";
 import {
@@ -137,6 +138,17 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   );
 
   relayDebug(env, traceId, "multipart.cpu-policy", { forceCpu });
+
+  const rawHashtags = payload.hashtags ?? payload.hashtag ?? (() => {
+    const values = form.getAll("hashtags").filter((value): value is string => typeof value === "string");
+    if (values.length) return values;
+    const single = form.get("hashtag");
+    return typeof single === "string" ? single : undefined;
+  })();
+  const hashtagValidation = normalizeHashtags(rawHashtags);
+  if (!hashtagValidation.ok) {
+    return json({ ok: false, error: hashtagValidation.error, stage: "validate-hashtags" }, 400);
+  }
 
   const channelValidation = normalizeTelegramChannels(payload.channel, payload.channels);
   if (!channelValidation.ok) {
@@ -439,6 +451,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       pageUrl: payload.pageUrl || null,
       caption: resolvePayloadCaption(payload as Record<string, unknown>),
       captionExplicit: Boolean(payloadCaption && !isGenericMediaLabel(payloadCaption)),
+      hashtags: hashtagValidation.value,
       parseMode,
       metadata: baseMetadata,
     }, env);
