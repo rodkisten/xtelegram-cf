@@ -1,5 +1,5 @@
 export const SERVICE_NAME = "generic-telegram-media-relay";
-export const SERVICE_VERSION = "2.16.1";
+export const SERVICE_VERSION = "2.17.0";
 export const SERVICE_RUNTIME =
   "typescript-hls-remux-photo-video-album-ordered-fallback-d1-atomic-claims-batch-send-social-metadata-modular";
 
@@ -25,6 +25,11 @@ export const RELAY_LIMITS = Object.freeze({
 
   directMediaDefaultBytes: 48 * 1024 * 1024,
   directMediaHardBytes: 50 * 1024 * 1024,
+
+  // Client-side compression target used by the Shortcuts/a-Shell fallback.
+  // Keep meaningful headroom below the hosted Bot API upload ceiling.
+  clientCompressionTargetDefaultBytes: 47_000_000,
+  clientCompressionTargetHardBytes: 49_000_000,
 
   // Cloudflare isolates have 128 MB shared across concurrent requests. A Telegram
   // multipart send can temporarily retain the source buffer plus Blob/FormData/network
