@@ -6,6 +6,8 @@ export interface Env {
   TELEGRAM_CHANNEL_ID?: string;
   RELAY_TOKEN: string;
   MAX_MEDIA_BYTES?: string;
+  /** Target bytes for client-side a-Shell compression before direct Telegram upload. */
+  CLIENT_COMPRESS_TARGET_BYTES?: string;
   HLS_CONCURRENCY?: string;
   HLS_MAX_MEDIA_BYTES?: string;
   /** Max bytes the Worker may buffer for one direct media upload before client fallback. */
