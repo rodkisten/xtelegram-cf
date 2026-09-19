@@ -5,6 +5,7 @@ import { handleChannels } from "../routes/channels";
 import { handleHealth } from "../routes/health";
 import { handleMediaCheck } from "../routes/media/check";
 import { handleMediaQuery } from "../routes/media/query";
+import { handleMediaRegister } from "../routes/media/register";
 import { handleResolve } from "../routes/resolve";
 import { handleSend } from "../routes/send";
 import { relayDebug, relayTraceId } from "../lib/debug";
@@ -44,6 +45,10 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   if (method === "POST" && url.pathname === "/media/check") {
     relayDebug(env, traceId, "router.dispatch", { handler: "media-check" });
     return handleMediaCheck(request, env);
+  }
+  if (method === "POST" && url.pathname === "/media/register") {
+    relayDebug(env, traceId, "router.dispatch", { handler: "media-register" });
+    return handleMediaRegister(request, env);
   }
   if (
     method === "GET" &&
