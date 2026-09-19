@@ -10,7 +10,11 @@ import {
 } from "../../media";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
-import { buildLimitExceededPayload, isRelayLimitExceededError } from "../../lib/limit-error";
+import {
+  buildLimitExceededPayload,
+  isRelayLimitExceededError,
+  resolveClientCompressionTargetBytes,
+} from "../../lib/limit-error";
 import {
   debugChannelSummary,
   debugError,
@@ -198,16 +202,36 @@ export async function handleSingleSend(
         });
 
         if (isRelayLimitExceededError(prepareResult.reason)) {
+          const fallbackSocial = socialResult.status === "fulfilled"
+            ? socialResult.value
+            : {
+                caption: input.caption || input.sourceUrl || input.mediaUrl.href,
+                parseMode: input.parseMode,
+                metadata: input.metadata,
+              };
+          const payload = buildLimitExceededPayload(prepareResult.reason, {
+            sourceUrl: input.sourceUrl,
+            inputUrl: input.mediaUrl.href,
+            mediaType: input.mediaType,
+            targetBytes: resolveClientCompressionTargetBytes(env.CLIENT_COMPRESS_TARGET_BYTES),
+            mediaHeaders: input.mediaHeaders,
+            variants: input.mediaVariants,
+            caption: fallbackSocial.caption,
+            parseMode: fallbackSocial.parseMode,
+            provider: input.provider,
+            mediaId: input.mediaId,
+            mediaKey: plan.identity.key,
+            hashtags: input.hashtags,
+            channels: plan.channelsToSend,
+            metadata: fallbackSocial.metadata,
+          });
           return json(
             {
-              ...buildLimitExceededPayload(prepareResult.reason, {
-                sourceUrl: input.sourceUrl,
-                inputUrl: input.mediaUrl.href,
-                mediaType: input.mediaType,
-              }),
+              ...payload,
               forceCpu: input.forceCpu,
               channels: chatIds,
-              metadata: input.metadata,
+              media: plan.identity,
+              metadata: fallbackSocial.metadata,
             },
             prepareResult.reason.details.kind === "cpu_heavy_disabled" ? 422 : 413,
           );

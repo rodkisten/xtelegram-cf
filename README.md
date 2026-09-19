@@ -1,4 +1,11 @@
-# xtelegram-cf · Telegram Media Relay v2.16.1
+# xtelegram-cf · Telegram Media Relay v2.17.0
+
+
+## v2.17.0 · iOS direct-upload fallback
+
+For media that should not be buffered or processed inside Cloudflare, the relay can now return a structured `clientFallback`. The iOS client/a-Shell prepares the video locally, uploads it directly to Telegram, then reconciles the successful message through authenticated `POST /media/register`. This preserves D1 dedupe/history without routing the large file back through the Worker. See `CLIENT-FALLBACK-IOS.md`.
+
+`CLIENT_COMPRESS_TARGET_BYTES` controls the client target and defaults to 47,000,000 bytes. `force_cpu=true` remains available, but CPU-heavy Worker processing stays disabled by default.
 
 ## Hashtags opcionais · v2.16.1
 
