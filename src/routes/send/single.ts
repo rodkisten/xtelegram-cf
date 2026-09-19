@@ -165,6 +165,7 @@ export async function handleSingleSend(
       pageUrl: input.pageUrl,
       caption: input.caption,
       captionExplicit: input.captionExplicit,
+      hashtags: input.hashtags,
       parseMode: input.parseMode,
       metadata: input.metadata,
     }, env);
