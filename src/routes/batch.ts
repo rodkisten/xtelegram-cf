@@ -36,6 +36,8 @@ interface BatchBody {
   force_cpu?: unknown;
   forceCpu?: unknown;
   caption?: unknown;
+  hashtags?: unknown;
+  hashtag?: unknown;
   parseMode?: unknown;
   metadata?: unknown;
   concurrency?: unknown;
@@ -207,6 +209,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         force,
         force_cpu: forceCpu,
         caption: item.caption ?? body.caption,
+        hashtags: item.hashtags ?? item.hashtag ?? body.hashtags ?? body.hashtag,
         parseMode: item.parseMode ?? body.parseMode,
         metadata: item.metadata ?? body.metadata,
         usernames: item.usernames ?? item.username ?? body.usernames ?? body.username,
