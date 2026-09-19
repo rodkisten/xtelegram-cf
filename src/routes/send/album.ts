@@ -1,7 +1,12 @@
 import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
-import { buildLimitExceededPayload, isRelayLimitExceededError, RelayLimitExceededError } from "../../lib/limit-error";
+import {
+  buildLimitExceededPayload,
+  isRelayLimitExceededError,
+  RelayLimitExceededError,
+  resolveClientCompressionTargetBytes,
+} from "../../lib/limit-error";
 import { mapWithConcurrency } from "../../lib/concurrency";
 import {
   debugChannelSummary,
@@ -556,10 +561,22 @@ async function sendAlbumBatch(
       preferredUploadError = uploaded.description || "Telegram rejected the video upload";
     } catch (error) {
       if (isRelayLimitExceededError(error)) {
+        const firstItem = batch[0];
         const clientFallback = buildLimitExceededPayload(error, {
           sourceUrl: input.sourceUrl,
-          inputUrl: batch[0]?.mediaUrl.href || null,
-          mediaType: batch[0]?.mediaType || null,
+          inputUrl: firstItem?.mediaUrl.href || null,
+          mediaType: firstItem?.mediaType || null,
+          targetBytes: resolveClientCompressionTargetBytes(env.CLIENT_COMPRESS_TARGET_BYTES),
+          mediaHeaders: firstItem?.mediaHeaders || {},
+          variants: firstItem?.mediaVariants || [],
+          caption: firstItem?.caption || input.caption,
+          parseMode: firstItem?.parseMode ?? input.parseMode,
+          provider: input.provider,
+          mediaId: input.mediaId,
+          mediaKey: input.mediaKey,
+          hashtags: input.hashtags,
+          channels: [chatId],
+          metadata: firstItem?.metadata ?? input.metadata,
         });
         return {
           result: { ok: false, httpStatus: 413, description: error.message },
@@ -735,10 +752,22 @@ async function sendAlbumBatch(
     };
   } catch (error) {
     if (isRelayLimitExceededError(error)) {
+      const firstItem = batch[0];
       const clientFallback = buildLimitExceededPayload(error, {
         sourceUrl: input.sourceUrl,
-        inputUrl: batch[0]?.mediaUrl.href || null,
-        mediaType: batch[0]?.mediaType || null,
+        inputUrl: firstItem?.mediaUrl.href || null,
+        mediaType: firstItem?.mediaType || null,
+        targetBytes: resolveClientCompressionTargetBytes(env.CLIENT_COMPRESS_TARGET_BYTES),
+        mediaHeaders: firstItem?.mediaHeaders || {},
+        variants: firstItem?.mediaVariants || [],
+        caption: firstItem?.caption || input.caption,
+        parseMode: firstItem?.parseMode ?? input.parseMode,
+        provider: input.provider,
+        mediaId: input.mediaId,
+        mediaKey: input.mediaKey,
+        hashtags: input.hashtags,
+        channels: [chatId],
+        metadata: firstItem?.metadata ?? input.metadata,
       });
       return {
         result: { ok: false, httpStatus: 413, description: error.message },
