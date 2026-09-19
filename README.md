@@ -1,4 +1,28 @@
-# xtelegram-cf · Telegram Media Relay v2.13.6
+# xtelegram-cf · Telegram Media Relay v2.16.1
+
+## Hashtags opcionais · v2.16.1
+
+Passe `hashtags` em qualquer envio JSON (`/send`, `/resolve-and-send`, `/batch`) como array ou string:
+
+```json
+{
+  "url": "https://x.com/user/status/123",
+  "hashtags": ["rod", "#video", "front-end"]
+}
+```
+
+Também é válido:
+
+```json
+{
+  "hashtags": "#rod #video, front_end"
+}
+```
+
+O relay normaliza para `#rod #video #front_end`, remove duplicatas e acrescenta a linha **depois do caption final/enriquecido**. Em `/batch`, hashtags globais são herdadas pelos itens, mas `item.hashtags` substitui as globais. Multipart aceita `hashtags` dentro de `payload` e também campos `hashtags` repetidos no `FormData`.
+
+Se caption + hashtags ultrapassarem o limite de caption do Telegram, o relay encurta primeiro o texto-base e preserva todas as hashtags fornecidas.
+
 
 > **v2.13.2 resolver caption fix:** generic resolver labels such as `Twitter video` / `Twitter media` are never promoted to Telegram captions. `/resolve-and-send` uses only an explicit caller caption or a real resolver caption; otherwise it falls back to the original post URL. Internally generated captions are marked `captionExplicit=false`, so Twitter/X and Instagram metadata enrichment still runs.
 
