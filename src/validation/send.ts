@@ -1,4 +1,5 @@
 import { normalizeOptionalSourceUrl, normalizePublicHttpUrl } from "../lib/http";
+import { normalizeHashtags } from "../lib/hashtags";
 import type { AlbumMediaType, RelayAlbumInput, RelayInput, RelayMediaVariant } from "../types";
 import {
   normalizeCaption,
@@ -56,6 +57,8 @@ export function validateRequestBody(body: unknown): SendValidationResult {
 
   const mediaHeaders = normalizeMediaHeaders(record.mediaHeaders);
   const mediaVariants = normalizeRelayMediaVariants(record.mediaVariants, mediaHeaders);
+  const hashtagValidation = normalizeHashtags(record.hashtags ?? record.hashtag);
+  if (!hashtagValidation.ok) return { ok: false, error: hashtagValidation.error };
 
   return {
     ok: true,
@@ -68,6 +71,7 @@ export function validateRequestBody(body: unknown): SendValidationResult {
       text: normalizeOptionalText(record.text, 20_000),
       caption: resolvePayloadCaption(record),
       captionExplicit: resolveCaptionExplicitFlag(record),
+      hashtags: hashtagValidation.value,
       parseMode: resolveCaptionExplicitFlag(record) ? parseMode : null,
       mediaType,
       mediaHeaders,
@@ -194,6 +198,8 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
 
   const pageUrl = normalizeOptionalSourceUrl(record.pageUrl);
   const explicitCaption = normalizeCaption(record.caption);
+  const hashtagValidation = normalizeHashtags(record.hashtags ?? record.hashtag);
+  if (!hashtagValidation.ok) return { kind: "invalid", error: hashtagValidation.error };
 
   return {
     kind: "valid",
@@ -206,6 +212,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       text: normalizeOptionalText(record.text, 20_000),
       caption: resolvePayloadCaption(record),
       captionExplicit: resolveCaptionExplicitFlag(record),
+      hashtags: hashtagValidation.value,
       parseMode: resolveCaptionExplicitFlag(record) ? parseMode : null,
       channels: channelValidation.value,
       usernames: usernameValidation.value,
