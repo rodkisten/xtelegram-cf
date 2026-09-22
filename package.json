@@ -1,19 +1,19 @@
 {
   "name": "generic-telegram-media-relay",
-  "version": "2.17.0",
+  "version": "2.18.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "wrangler build",
+    "build": "wrangler deploy --dry-run",
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "lockfile:refresh": "npm install --package-lock-only --ignore-scripts",
     "db:create": "wrangler d1 create xtelegram-relay",
-    "db:migrate:local": "wrangler d1 migrations apply xtelegram-relay --local",
-    "db:migrate:remote": "wrangler d1 migrations apply xtelegram-relay --remote",
-    "db:migrations:list": "wrangler d1 migrations list xtelegram-relay",
-    "test": "node --experimental-strip-types --test tests/**/*.test.ts"
+    "db:migrate:local": "wrangler d1 migrations apply RELAY_DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply RELAY_DB --remote",
+    "db:migrations:list": "wrangler d1 migrations list RELAY_DB",
+    "test": "node --import ./tests/register-loader.mjs --experimental-transform-types --test tests/*.test.ts"
   },
   "dependencies": {
     "mux.js": "7.1.0"
@@ -22,5 +22,8 @@
     "typescript": "^5.8.3",
     "wrangler": "^4.0.0"
   },
-  "packageManager": "npm@10.9.2"
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": ">=24.0.0"
+  }
 }
