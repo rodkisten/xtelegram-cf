@@ -72,6 +72,10 @@ export interface RelayInput {
   channels: string[];
   usernames: string[];
   metadata: Record<string, string> | null;
+  /** True when the caller explicitly supplied a metadata field, including an empty object. */
+  metadataProvided: boolean;
+  /** Original caller metadata, excluding resolver additions. */
+  presentationMetadata?: Record<string, string> | null;
   mediaId: string | null;
   mediaKey: string | null;
   force: boolean;
@@ -104,6 +108,10 @@ export interface RelayAlbumInput {
   channels: string[];
   usernames: string[];
   metadata: Record<string, string> | null;
+  /** True when the caller explicitly supplied a metadata field, including an empty object. */
+  metadataProvided: boolean;
+  /** Original caller metadata, excluding resolver additions. */
+  presentationMetadata?: Record<string, string> | null;
   mediaId: string | null;
   mediaKey: string | null;
   force: boolean;
