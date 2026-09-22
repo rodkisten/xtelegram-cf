@@ -1,0 +1,22 @@
+Validação do xtelegram-cf 2.9.1
+
+Base validada: xtelegram-cf-main (7).zip, originalmente 2.9.0.
+
+Executado com sucesso:
+
+- npm ci --ignore-scripts
+- npm run typecheck
+- npm run build (Wrangler dry run)
+- Checagem estática de integração:
+  - headers por item no álbum;
+  - propagação de headers por /resolve-and-send;
+  - fallback URL -> attach:// multipart;
+  - budget de multipart e preparação forçada;
+  - versão 2.9.1 sincronizada;
+  - ausência de credenciais no wrangler.jsonc distribuído.
+
+Escopo de teste
+
+O build do Worker foi validado localmente. O envio real para Telegram e a
+busca em CDN protegido exigem os secrets e o ambiente Cloudflare do deploy;
+por isso não foram disparados durante a validação.
