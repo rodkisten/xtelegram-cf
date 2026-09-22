@@ -20,7 +20,7 @@ import {
 } from "../services/channels";
 import { detectSocialProvider } from "../social";
 import type { Env } from "../types";
-import { normalizeRoutingUsernames, normalizeTelegramChannels } from "../validation/common";
+import { hasProvidedField, normalizeRoutingUsernames, normalizeTelegramChannels } from "../validation/common";
 import { normalizeMediaIdentityInput } from "../validation/media-identity";
 import { handleResolve } from "./resolve";
 import { handleSend } from "./send";
@@ -208,10 +208,10 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         channels,
         force,
         force_cpu: forceCpu,
-        caption: item.caption ?? body.caption,
+        caption: hasProvidedField(item, "caption") ? item.caption : body.caption,
         hashtags: item.hashtags ?? item.hashtag ?? body.hashtags ?? body.hashtag,
         parseMode: item.parseMode ?? body.parseMode,
-        metadata: item.metadata ?? body.metadata,
+        metadata: hasProvidedField(item, "metadata") ? item.metadata : body.metadata,
         usernames: item.usernames ?? item.username ?? body.usernames ?? body.username,
       };
       delete payload.channel;
@@ -309,8 +309,10 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     const scheduled = scheduledByMediaKey.get(schedulingKey) ?? new Map<string, number>();
     const preSkipped: BatchSkip[] = [];
 
+    const presentationRequested = !item.force &&
+      ["caption", "metadata", "hashtags", "hashtag"].some((key) => hasProvidedField(item.payload, key));
     for (const channelId of item.channels) {
-      if (existingChannels.has(channelId)) {
+      if (existingChannels.has(channelId) && !presentationRequested) {
         preSkipped.push({ channelId, reason: "already_sent" });
         continue;
       }

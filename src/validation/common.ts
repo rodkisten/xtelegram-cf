@@ -149,7 +149,7 @@ function resolveFallbackMediaUrl(record: Record<string, unknown>): string | null
 
 export function resolvePayloadCaption(record: Record<string, unknown>): string {
   const explicit = normalizeCaption(record.caption);
-  if (explicit && !isGenericMediaLabel(explicit)) return explicit;
+  if (record.captionExplicit !== false && hasProvidedField(record, "caption")) return explicit;
 
   const rawTitle = normalizeOptionalText(record.title, 1000);
   const title = isGenericMediaLabel(rawTitle) ? "" : rawTitle;
@@ -231,4 +231,10 @@ export function normalizeMetadata(value: unknown): Record<string, string> | null
   }
 
   return Object.keys(metadata).length > 0 ? metadata : null;
+}
+
+/** Omitted values preserve stored state; null/empty values explicitly clear it. */
+export function hasProvidedField(record: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key) &&
+    (record as Record<string, unknown>)[key] !== undefined;
 }

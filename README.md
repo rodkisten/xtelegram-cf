@@ -1,4 +1,24 @@
-# xtelegram-cf · Telegram Media Relay v2.17.0
+# xtelegram-cf · Telegram Media Relay v2.18.1
+
+Versão atual: **2.18.1**. Veja [comportamento, de-para e instalação](CHANGELOG-v2.18.1.md).
+
+
+
+## v2.18.0 · de-para de caption/metadata e edição idempotente
+
+O relay agora guarda, **por mídia + destino Telegram**, o último payload de apresentação confirmado. Quando a mesma mídia chega novamente com `caption` custom, `hashtags` ou `metadata`, ele faz um de-para antes de qualquer reenvio:
+
+- caption/parse mode iguais + metadata igual: **não chama Telegram**;
+- metadata mudou, mas o caption renderizado não mudou: atualiza o snapshot/D1 sem fazer `editMessageCaption` inútil;
+- caption ou parse mode mudou: chama `editMessageCaption` somente nos destinos cujo snapshot realmente diverge;
+- se um edit falhar, o snapshot antigo daquele canal é preservado, então a próxima tentativa continua elegível para retry;
+- `force=true` continua significando **reenviar a mídia**, não editar a entrega existente.
+
+A reconciliação vale para `/send`, `/resolve-and-send` (via `/send`), `/batch`, multipart, `/media/check` e retries idempotentes de `/media/register`. Álbuns editam o caption na primeira mensagem armazenada do grupo.
+
+A resposta expõe `presentation` e `presentationResults`, incluindo `captionChanged`, `parseModeChanged`, `metadataChanged`, chaves adicionadas/removidas/alteradas e se houve edit real ou apenas persistência de metadata.
+
+**Migration obrigatória:** aplique `migrations/0007_delivery_presentation_state.sql` antes do deploy da v2.18.0.
 
 
 ## v2.17.0 · iOS direct-upload fallback

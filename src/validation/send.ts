@@ -3,6 +3,7 @@ import { normalizeHashtags } from "../lib/hashtags";
 import type { AlbumMediaType, RelayAlbumInput, RelayInput, RelayMediaVariant } from "../types";
 import {
   normalizeCaption,
+  hasProvidedField,
   normalizeMediaHeaders,
   normalizeMediaType,
   normalizeMetadata,
@@ -79,6 +80,9 @@ export function validateRequestBody(body: unknown): SendValidationResult {
       channels: channelValidation.value,
       usernames: usernameValidation.value,
       metadata: normalizeMetadata(record.metadata),
+      metadataProvided: record.metadataProvided !== false && hasProvidedField(record, "metadata"),
+      presentationMetadata: normalizeMetadata(hasProvidedField(record, "presentationMetadata")
+        ? record.presentationMetadata : record.metadata),
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),
       force: record.force === true,
@@ -217,6 +221,9 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
       channels: channelValidation.value,
       usernames: usernameValidation.value,
       metadata: normalizeMetadata(record.metadata),
+      metadataProvided: record.metadataProvided !== false && hasProvidedField(record, "metadata"),
+      presentationMetadata: normalizeMetadata(hasProvidedField(record, "presentationMetadata")
+        ? record.presentationMetadata : record.metadata),
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),
       force: record.force === true,
@@ -262,8 +269,7 @@ function normalizePositiveInteger(value: unknown): number | null {
 
 function resolveCaptionExplicitFlag(record: Record<string, unknown>): boolean {
   if (record.captionExplicit === false) return false;
-  if (record.captionExplicit === true) return Boolean(normalizeCaption(record.caption));
-  return Boolean(normalizeCaption(record.caption));
+  return hasProvidedField(record, "caption");
 }
 
 function normalizeAlbumMediaType(value: unknown, mediaUrl: string): AlbumMediaType | null {

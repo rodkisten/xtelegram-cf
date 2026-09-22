@@ -1,5 +1,6 @@
 import {
   checkStoredMediaDeliveries,
+  persistKnownMedia,
   persistSuccessfulDeliveries,
   requireRelayDb,
   resolveMediaIdentity,
@@ -10,6 +11,10 @@ import { getErrorMessage } from "../../lib/errors";
 import { relayDebug, relayTraceId } from "../../lib/debug";
 import { normalizePublicHttpUrl } from "../../lib/http";
 import { parseTelegramDestination } from "../../services/channels";
+import {
+  reconcileTelegramPresentation,
+  summarizePresentationSync,
+} from "../../services/media-presentation-sync";
 import type { Env, MediaType, ParseMode } from "../../types";
 import { normalizeMetadata, normalizeParseMode } from "../../validation/common";
 
@@ -64,8 +69,11 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
   const mediaType = normalizeMediaType(body.mediaType);
   const caption = cleanString(body.caption) || "";
   const parseMode = normalizeOptionalParseMode(body.parseMode);
+  const customMetadata = normalizeMetadata(body.metadata);
+  const metadataProvided = Object.prototype.hasOwnProperty.call(body, "metadata");
+  const captionProvided = Object.prototype.hasOwnProperty.call(body, "caption");
   const metadata = {
-    ...(normalizeMetadata(body.metadata) || {}),
+    ...(customMetadata || {}),
     ...(cleanString(body.telegramFileId) ? { telegramFileId: cleanString(body.telegramFileId)! } : {}),
     ...(cleanString(body.telegramFileUniqueId)
       ? { telegramFileUniqueId: cleanString(body.telegramFileUniqueId)! }
@@ -139,8 +147,37 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
     );
 
     if (alreadyRegistered) {
+      let presentationResults: Awaited<ReturnType<typeof reconcileTelegramPresentation>> = [];
+      if ((captionProvided || metadataProvided) && existingRecord?.deliveries.length) {
+        presentationResults = await reconcileTelegramPresentation({
+          db,
+          mediaKey: existingRecord.media.key || identity.key,
+          botToken: env.TELEGRAM_BOT_TOKEN,
+          caption,
+          parseMode,
+          captionProvided,
+          metadata: customMetadata,
+          metadataProvided,
+          storedMedia: existingRecord.media,
+          deliveries: existingRecord.deliveries.filter((entry) => entry.channelId === destination.key),
+        });
+        const summary = summarizePresentationSync(presentationResults);
+        if (summary.changed > 0 && summary.failed === 0) await persistKnownMedia(db, {
+          identity,
+          sourceUrl,
+          pageUrl,
+          metadata: Object.keys(metadata).length ? metadata : null,
+          caption: captionProvided ? caption || null : null,
+          captionProvided,
+          metadataProvided,
+          parseMode: captionProvided ? parseMode : null,
+          mediaStatus: "sent",
+        });
+      }
+      const failed = summarizePresentationSync(presentationResults).failed;
       return json({
-        ok: true,
+        ok: failed === 0,
+        partial: failed > 0,
         alreadyRegistered: true,
         media: identity,
         channels: {
@@ -148,8 +185,10 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
           inserted: [],
           covered: [destination.key],
         },
+        presentation: summarizePresentationSync(presentationResults),
+        presentationResults,
         messageIds,
-      });
+      }, failed ? 207 : 200);
     }
 
     const inserted = await persistSuccessfulDeliveries(db, {
@@ -159,6 +198,7 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
       mediaType,
       mediaCount: 1,
       metadata: Object.keys(metadata).length ? metadata : null,
+      presentationMetadata: metadataProvided ? customMetadata : null,
       caption,
       parseMode,
       resolvedMediaUrl,

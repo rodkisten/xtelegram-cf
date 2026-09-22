@@ -1,6 +1,7 @@
 import type { AlbumMediaType, Env, MediaType } from "./types";
 import { parseTelegramDestination } from "./services/channels";
 import { compareMediaFingerprints } from "./services/media-fingerprint";
+import { buildPresentationSnapshot, serializePresentationSnapshot } from "./services/presentation-state";
 
 export interface MediaIdentityInput {
   provider?: string | null;
@@ -37,6 +38,8 @@ export interface DeliveryHistoryRecord {
   sendCount: number;
   firstSentAt: string;
   lastSentAt: string;
+  presentationJson: string | null;
+  presentationUpdatedAt: string | null;
 }
 
 export interface DeliveryClaimResult {
@@ -61,12 +64,15 @@ export interface PersistMediaInput {
   parseMode?: string | null;
   resolvedMediaUrl?: string | null;
   mediaStatus?: "pending" | "ready" | "sent";
+  captionProvided?: boolean;
+  metadataProvided?: boolean;
   mediaSha256?: string | null;
   mediaFingerprint?: string | null;
   mediaFingerprintVersion?: number | null;
   mediaByteLength?: number | null;
   mediaWidth?: number | null;
   mediaHeight?: number | null;
+  presentationMetadata?: Record<string, string> | null;
   deliveries: Array<{
     requestedChatId: string;
     telegramChatId: string | number | null;
@@ -85,6 +91,8 @@ export interface StoredDeliveryRow {
   send_count: number;
   first_sent_at: string;
   last_sent_at: string;
+  presentation_json: string | null;
+  presentation_updated_at: string | null;
 }
 
 export interface StoredMediaRow {
@@ -224,7 +232,8 @@ export async function checkStoredMediaDeliveries(
       m.first_seen_at, m.updated_at,
       d.channel_id, d.telegram_chat_id, d.message_thread_id, d.telegram_chat_title,
       d.first_message_ids_json, d.last_message_ids_json,
-      d.send_count, d.first_sent_at, d.last_sent_at
+      d.send_count, d.first_sent_at, d.last_sent_at,
+      d.presentation_json, d.presentation_updated_at
      FROM media AS m
      LEFT JOIN media_deliveries AS d
        ON d.media_key = m.media_key${channelJoin}
@@ -252,6 +261,8 @@ export async function checkStoredMediaDeliveries(
         send_count: row.send_count ?? 1,
         first_sent_at: row.first_sent_at ?? "",
         last_sent_at: row.last_sent_at ?? "",
+        presentation_json: row.presentation_json ?? null,
+        presentation_updated_at: row.presentation_updated_at ?? null,
       }));
     }
   }
@@ -366,7 +377,7 @@ export async function acquireDeliveryClaims(
     `SELECT
        channel_id, telegram_chat_id, message_thread_id, telegram_chat_title,
        first_message_ids_json, last_message_ids_json, send_count,
-       first_sent_at, last_sent_at
+       first_sent_at, last_sent_at, presentation_json, presentation_updated_at
      FROM media_deliveries
      WHERE media_key IN (SELECT CAST(value AS TEXT) FROM json_each(?1))
        AND channel_id IN (SELECT CAST(value AS TEXT) FROM json_each(?2))
@@ -433,6 +444,8 @@ export interface PersistKnownMediaInput {
   parseMode?: string | null;
   resolvedMediaUrl?: string | null;
   mediaStatus?: "pending" | "ready" | "sent";
+  captionProvided?: boolean;
+  metadataProvided?: boolean;
   mediaSha256?: string | null;
   mediaFingerprint?: string | null;
   mediaFingerprintVersion?: number | null;
@@ -468,10 +481,10 @@ export async function persistKnownMedia(
       page_url = COALESCE(excluded.page_url, media.page_url),
       media_type = CASE WHEN excluded.media_type = 'pending' THEN media.media_type ELSE excluded.media_type END,
       media_count = MAX(media.media_count, excluded.media_count),
-      metadata_json = COALESCE(excluded.metadata_json, media.metadata_json),
-      caption = COALESCE(NULLIF(excluded.caption, ''), media.caption),
+      metadata_json = CASE WHEN ?22 THEN excluded.metadata_json ELSE COALESCE(excluded.metadata_json, media.metadata_json) END,
+      caption = CASE WHEN ?23 THEN excluded.caption ELSE COALESCE(NULLIF(excluded.caption, ''), media.caption) END,
       caption_parse_mode = CASE
-        WHEN NULLIF(excluded.caption, '') IS NOT NULL THEN excluded.caption_parse_mode
+        WHEN ?23 OR NULLIF(excluded.caption, '') IS NOT NULL THEN excluded.caption_parse_mode
         ELSE media.caption_parse_mode
       END,
       resolved_media_url = COALESCE(excluded.resolved_media_url, media.resolved_media_url),
@@ -509,6 +522,8 @@ export async function persistKnownMedia(
     input.mediaHeight ?? null,
     now,
     now,
+    input.metadataProvided === true ? 1 : 0,
+    input.captionProvided === true ? 1 : 0,
   ).run();
 }
 
@@ -519,6 +534,11 @@ export async function persistSuccessfulDeliveries(
   if (!input.deliveries.length) return [];
   const now = new Date().toISOString();
   const metadataJson = input.metadata ? JSON.stringify(input.metadata) : null;
+  const presentationJson = serializePresentationSnapshot(buildPresentationSnapshot({
+    caption: input.caption || "",
+    parseMode: input.parseMode || null,
+    metadata: input.presentationMetadata ?? null,
+  }));
   const statements: D1PreparedStatement[] = [
     db.prepare(
       `INSERT INTO media (
@@ -584,15 +604,18 @@ export async function persistSuccessfulDeliveries(
       db.prepare(
         `INSERT INTO media_deliveries (
           media_key, channel_id, telegram_chat_id, message_thread_id, telegram_chat_title,
-          first_message_ids_json, last_message_ids_json, send_count, first_sent_at, last_sent_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+          first_message_ids_json, last_message_ids_json, send_count, first_sent_at, last_sent_at,
+          presentation_json, presentation_updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
         ON CONFLICT(media_key, channel_id) DO UPDATE SET
           telegram_chat_id = excluded.telegram_chat_id,
           message_thread_id = excluded.message_thread_id,
           telegram_chat_title = COALESCE(excluded.telegram_chat_title, media_deliveries.telegram_chat_title),
           last_message_ids_json = excluded.last_message_ids_json,
           send_count = media_deliveries.send_count + 1,
-          last_sent_at = excluded.last_sent_at`,
+          last_sent_at = excluded.last_sent_at,
+          presentation_json = excluded.presentation_json,
+          presentation_updated_at = excluded.presentation_updated_at`,
       ).bind(
         input.identity.key,
         delivery.requestedChatId,
@@ -603,12 +626,32 @@ export async function persistSuccessfulDeliveries(
         messageIds,
         now,
         now,
+        presentationJson,
+        now,
       ),
     );
   }
 
   await db.batch(statements);
   return input.deliveries.map((delivery) => delivery.requestedChatId);
+}
+
+
+export async function updateDeliveryPresentationSnapshots(
+  db: D1Database,
+  mediaKey: string,
+  updates: Array<{ channelId: string; presentationJson: string }>,
+): Promise<void> {
+  if (!updates.length) return;
+  const now = new Date().toISOString();
+  const statements = updates.map((update) =>
+    db.prepare(
+      `UPDATE media_deliveries
+       SET presentation_json = ?3, presentation_updated_at = ?4
+       WHERE media_key = ?1 AND channel_id = ?2`,
+    ).bind(mediaKey, update.channelId, update.presentationJson, now),
+  );
+  await db.batch(statements);
 }
 
 
@@ -754,6 +797,8 @@ function mergeContentDuplicateRows(
           send_count: row.send_count ?? 1,
           first_sent_at: row.first_sent_at ?? "",
           last_sent_at: row.last_sent_at ?? "",
+          presentation_json: row.presentation_json ?? null,
+          presentation_updated_at: row.presentation_updated_at ?? null,
         })
       : null;
     const existing = target.get(row.media_key);
@@ -882,6 +927,8 @@ function formatDeliveryHistoryRecord(row: StoredDeliveryRow): DeliveryHistoryRec
     sendCount: Math.max(0, Number(row.send_count || 0)),
     firstSentAt: row.first_sent_at || "",
     lastSentAt: row.last_sent_at || "",
+    presentationJson: row.presentation_json ?? null,
+    presentationUpdatedAt: row.presentation_updated_at ?? null,
   };
 }
 
@@ -904,11 +951,13 @@ function formatDeliveryRow(row: StoredDeliveryRow) {
     telegramChatId: row.telegram_chat_id,
     messageThreadId: row.message_thread_id ?? null,
     telegramChatTitle: row.telegram_chat_title,
-    firstMessageIds: parseJson(row.first_message_ids_json) || [],
-    lastMessageIds: parseJson(row.last_message_ids_json) || [],
+    firstMessageIds: numericMessageIds(row.first_message_ids_json),
+    lastMessageIds: numericMessageIds(row.last_message_ids_json),
     sendCount: row.send_count,
     firstSentAt: row.first_sent_at,
     lastSentAt: row.last_sent_at,
+    presentationJson: row.presentation_json ?? null,
+    presentationUpdatedAt: row.presentation_updated_at ?? null,
   };
 }
 

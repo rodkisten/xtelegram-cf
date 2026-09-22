@@ -35,6 +35,7 @@ import {
   resolveTelegramChatIdsForEnv,
 } from "../../services/channels";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
+import { reconcileExistingMediaPresentation } from "../../services/presentation-reconciliation";
 import {
   buildProcessingResult,
   formatTelegramDelivery,
@@ -115,7 +116,92 @@ export async function handleSingleSend(
     claimQueries: plan.claim.queryCount,
   });
 
+  const presentationRequested =
+    !input.force &&
+    (input.captionExplicit || input.hashtags.length > 0 || input.metadataProvided);
+  const captionProvided = input.captionExplicit || input.hashtags.length > 0;
+  const socialPromise = plan.channelsToSend.length || (presentationRequested && captionProvided)
+    ? resolveSocialDeliveryContent({
+        provider: input.provider,
+        sourceUrl: input.sourceUrl,
+        pageUrl: input.pageUrl,
+        caption: input.caption,
+        captionExplicit: input.captionExplicit,
+        hashtags: input.hashtags,
+        parseMode: input.parseMode,
+        metadata: input.metadata,
+      }, env)
+    : null;
+  let presentationSync: Awaited<ReturnType<typeof reconcileExistingMediaPresentation>> | null = null;
+  let reconciledSocialContent: Awaited<ReturnType<typeof resolveSocialDeliveryContent>> | null = null;
+
+  if (presentationRequested && plan.skippedAlreadySent.length > 0) {
+    try {
+      reconciledSocialContent = socialPromise ? await socialPromise : null;
+      presentationSync = await reconcileExistingMediaPresentation({
+        db,
+        env,
+        identity: plan.identity,
+        channels: plan.skippedAlreadySent.map((entry) => entry.channelId),
+        caption: reconciledSocialContent?.caption ?? "",
+        captionProvided,
+        parseMode: reconciledSocialContent?.parseMode ?? null,
+        metadata: input.presentationMetadata !== undefined ? input.presentationMetadata : input.metadata,
+        metadataProvided: input.metadataProvided,
+      });
+
+      if (presentationSync.summary.changed > 0 && presentationSync.summary.failed === 0) await persistKnownMedia(db, {
+        identity: plan.identity,
+        sourceUrl: input.sourceUrl,
+        pageUrl: input.pageUrl,
+        metadata: input.metadataProvided ? (reconciledSocialContent?.metadata ?? input.metadata) : null,
+        metadataProvided: input.metadataProvided,
+        caption: reconciledSocialContent?.caption ?? "",
+        captionProvided,
+        parseMode: reconciledSocialContent?.parseMode ?? null,
+        mediaStatus: "sent",
+      });
+
+      relayDebug(env, traceId, "single.presentation-reconciled", presentationSync.summary);
+    } catch (error) {
+      relayDebug(env, traceId, "single.presentation-reconcile-failed", {
+        error: debugError(error),
+      });
+      await releasePendingDeliveryClaims(plan).catch(() => {});
+      return json({
+        ok: false,
+        error: getErrorMessage(error),
+        stage: "presentation-reconcile",
+        media: plan.identity,
+      }, 500);
+    }
+  }
+
   if (!plan.channelsToSend.length) {
+    if (presentationSync) {
+      const failed = presentationSync.summary.failed;
+      const changed = presentationSync.summary.changed;
+      return json({
+        ok: failed === 0,
+        partial: failed > 0,
+        conflict: false,
+        action: changed > 0 ? "presentation_reconciled" : "presentation_unchanged",
+        message: changed > 0
+          ? `Existing Telegram message presentation compared; ${presentationSync.summary.edited} message(s) edited.`
+          : "Existing Telegram message presentation is already current.",
+        media: plan.identity,
+        channels: {
+          requested: chatIds,
+          attempted: [],
+          inserted: [],
+          notSent: plan.skippedAlreadySent,
+        },
+        presentation: presentationSync.summary,
+        presentationResults: presentationSync.results,
+        metadata: reconciledSocialContent?.metadata ?? input.metadata,
+      }, failed > 0 ? 207 : 200);
+    }
+
     relayDebug(env, traceId, "single.delivery-conflict", {
       channels: debugChannelSummary(buildDeliveryConflict(plan).channels),
     });
@@ -163,18 +249,10 @@ export async function handleSingleSend(
       allowCpuHeavy: input.forceCpu,
     });
 
-    const socialPromise = resolveSocialDeliveryContent({
-      provider: input.provider,
-      sourceUrl: input.sourceUrl,
-      pageUrl: input.pageUrl,
-      caption: input.caption,
-      captionExplicit: input.captionExplicit,
-      hashtags: input.hashtags,
-      parseMode: input.parseMode,
-      metadata: input.metadata,
-    }, env);
-
     let socialContent: Awaited<ReturnType<typeof resolveSocialDeliveryContent>>;
+    if (!socialPromise) {
+      throw new Error("Internal error: social content promise was not initialized.");
+    }
 
     try {
       [prepared, socialContent] = await Promise.all([preparePromise, socialPromise]);
@@ -399,6 +477,7 @@ export async function handleSingleSend(
         mediaType,
         mediaCount: 1,
         metadata: socialContent.metadata,
+        presentationMetadata: input.metadataProvided ? (input.presentationMetadata !== undefined ? input.presentationMetadata : input.metadata) : null,
         caption: socialContent.caption,
         parseMode: socialContent.parseMode,
         resolvedMediaUrl: prepared.type === "file" ? prepared.url : prepared.sourceUrl,
@@ -528,6 +607,8 @@ export async function handleSingleSend(
         deliveries: deliveries.map(formatTelegramDelivery),
       },
       metadata: socialContent.metadata,
+      presentation: presentationSync?.summary ?? null,
+      presentationResults: presentationSync?.results ?? [],
       socialMetadata: socialContent.social,
       metrics: {
         identityAliasQueries: plan.identityAliasQueries,

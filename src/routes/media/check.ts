@@ -20,7 +20,10 @@ import {
   normalizeRoutingUsernames,
   normalizeTelegramChannels,
 } from "../../validation/common";
-import { syncCaptionToTelegramDeliveries } from "../../services/media-caption-sync";
+import {
+  reconcileTelegramPresentation,
+  summarizePresentationSync,
+} from "../../services/media-presentation-sync";
 import { resolveTelegramChatIdsForEnv } from "../../services/channels";
 import type { Env } from "../../types";
 
@@ -37,8 +40,10 @@ interface NormalizedMediaCheckInput {
   input: unknown;
   identity: MediaIdentity;
   caption: string;
+  captionProvided: boolean;
   parseMode: import("../../types").ParseMode | null;
   metadata: Record<string, string> | null;
+  metadataProvided: boolean;
   sourceUrl: string | null;
   pageUrl: string | null;
   requestedChannels: string[];
@@ -146,8 +151,10 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
           input,
           identity: await resolveMediaIdentity(identityInput),
           caption,
+          captionProvided: Object.prototype.hasOwnProperty.call(record, "caption"),
           parseMode,
           metadata: normalizeMetadata(record.metadata),
+          metadataProvided: Object.prototype.hasOwnProperty.call(record, "metadata"),
           sourceUrl,
           pageUrl,
           requestedChannels: itemRequestedChannels,
@@ -158,27 +165,6 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
     }),
   );
   valid.sort((left, right) => left.index - right.index);
-
-  // Caption-first reconciliation: a status probe may teach the relay about a
-  // post before its downloadable media URL exists. Persist only entries that
-  // actually carry useful mutable data; pure checks remain read-only.
-  try {
-    await Promise.all(valid.map(async (item) => {
-      if (!item.caption && !item.metadata) return;
-      await persistKnownMedia(db, {
-        identity: item.identity,
-        sourceUrl: item.sourceUrl,
-        pageUrl: item.pageUrl,
-        caption: item.caption || null,
-        parseMode: item.parseMode,
-        metadata: item.metadata,
-        mediaStatus: "pending",
-      });
-    }));
-  } catch (error) {
-    relayDebug(env, traceId, "media-check.caption-persist-failed", { error: debugError(error) });
-    return json({ ok: false, error: getErrorMessage(error), stage: "caption-persist" }, 500);
-  }
 
   const requestedChannels = [...new Set(valid.flatMap((item) => item.requestedChannels))];
 
@@ -205,24 +191,61 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
     );
   }
 
-  const captionSyncByIndex = new Map<number, Awaited<ReturnType<typeof syncCaptionToTelegramDeliveries>>>();
-  for (const item of valid) {
-    if (!item.caption) continue;
-    const record = records.get(item.identity.key);
-    if (!record?.deliveries.length) continue;
-    const sync = await syncCaptionToTelegramDeliveries({
-      botToken: env.TELEGRAM_BOT_TOKEN,
-      caption: item.caption,
-      parseMode: item.parseMode,
-      deliveries: record.deliveries.map((delivery) => ({
-        channelId: delivery.channelId,
-        telegramChatId: delivery.telegramChatId,
-        lastMessageIds: delivery.lastMessageIds,
-      })),
+  const presentationSyncByIndex = new Map<number, Awaited<ReturnType<typeof reconcileTelegramPresentation>>>();
+  try {
+    for (const item of valid) {
+      if (!item.captionProvided && !item.metadataProvided) continue;
+      const record = records.get(item.identity.key);
+
+      if (record?.deliveries.length) {
+        const sync = await reconcileTelegramPresentation({
+          db,
+          mediaKey: record.media.key || item.identity.key,
+          botToken: env.TELEGRAM_BOT_TOKEN,
+          caption: item.caption,
+          parseMode: item.parseMode,
+          captionProvided: item.captionProvided,
+          metadata: item.metadata,
+          metadataProvided: item.metadataProvided,
+          storedMedia: record.media,
+          deliveries: item.requestedChannels.length
+            ? record.deliveries.filter((entry) => item.requestedChannels.includes(entry.channelId))
+            : record.deliveries,
+        });
+        presentationSyncByIndex.set(item.index, sync);
+      }
+
+      // Persist the newest known presentation only after the de-para used the old
+      // row as its baseline. This prevents an unsuccessful Telegram edit from
+      // making the next retry look falsely up to date.
+      const syncResults = presentationSyncByIndex.get(item.index);
+      if (syncResults && (!syncResults.some((entry) => entry.changed) || summarizePresentationSync(syncResults).failed)) continue;
+      await persistKnownMedia(db, {
+        identity: item.identity,
+        sourceUrl: item.sourceUrl,
+        pageUrl: item.pageUrl,
+        caption: item.captionProvided ? item.caption || null : null,
+        captionProvided: item.captionProvided,
+        metadataProvided: item.metadataProvided,
+        parseMode: item.captionProvided ? item.parseMode : null,
+        metadata: item.metadataProvided ? item.metadata : null,
+        mediaStatus: record?.media.status === "sent" ? "sent" : "pending",
+      });
+    }
+  } catch (error) {
+    relayDebug(env, traceId, "media-check.presentation-reconcile-failed", {
+      error: debugError(error),
     });
-    captionSyncByIndex.set(item.index, sync);
+    return json({
+      ok: false,
+      error: getErrorMessage(error),
+      stage: "presentation-reconcile",
+    }, 500);
   }
 
+  if ([...presentationSyncByIndex.values()].some((items) => items.some((item) => item.changed && item.persisted))) {
+    records = await checkStoredMediaDeliveries(db, uniqueIdentities, requestedChannels);
+  }
   const results = body.items.map((input, index) => {
     const validationError = invalid.get(index);
     if (validationError) {
@@ -241,7 +264,8 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
 
     const normalized = validByIndex.get(index)!;
     const record = records.get(normalized.identity.key);
-    const deliveries = record?.deliveries ?? [];
+    const deliveries = (record?.deliveries ?? []).filter((delivery) =>
+      !normalized.requestedChannels.length || normalized.requestedChannels.includes(delivery.channelId));
 
     return {
       index,
@@ -255,10 +279,13 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
       exists: Boolean(record),
       media: record?.media ?? null,
       channels: deliveries,
-      captionPersistence: normalized.caption
+      captionPersistence: normalized.captionProvided || normalized.metadataProvided
         ? { persisted: true, status: record?.media.status ?? "pending" }
         : null,
-      telegramCaptionSync: captionSyncByIndex.get(index) ?? [],
+      presentationSync: presentationSyncByIndex.has(index)
+        ? summarizePresentationSync(presentationSyncByIndex.get(index)!)
+        : null,
+      telegramCaptionSync: presentationSyncByIndex.get(index) ?? [],
       ...(normalized.requestedChannels.length
         ? { requestedChannels: buildRequestedChannelStatus(normalized.requestedChannels, deliveries) }
         : {}),
@@ -279,8 +306,10 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
     durationMs: Date.now() - startedAt,
   });
 
+  const failedSync = summarizePresentationSync([...presentationSyncByIndex.values()].flat()).failed;
   return json({
-    ok: true,
+    ok: failedSync === 0,
+    partial: failedSync > 0,
     results,
     meta: {
       requested: body.items.length,
@@ -294,7 +323,7 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
       channelFilterCount: requestedChannels.length,
       durationMs: Date.now() - startedAt,
     },
-  });
+  }, failedSync ? 207 : 200);
 }
 
 function buildRequestedChannelStatus(

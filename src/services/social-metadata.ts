@@ -58,7 +58,7 @@ export async function resolveSocialDeliveryContent(
   // Explicit caller content is authoritative. This enables caption-first
   // workflows where metadata is captured before a downloadable media URL is
   // available, and avoids replacing a richer caption with scraper output.
-  if (input.captionExplicit && input.caption.trim()) {
+  if (input.captionExplicit) {
     return finalizeHashtags({
       caption: input.caption,
       parseMode: input.parseMode,
