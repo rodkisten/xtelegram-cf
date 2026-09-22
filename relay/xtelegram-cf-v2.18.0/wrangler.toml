@@ -1,0 +1,78 @@
+name = "xtelegram-cf"
+main = "src/index.ts"
+compatibility_date = "2026-07-22"
+
+[[d1_databases]]
+binding = "RELAY_DB"
+database_name = "xtelegram"
+database_id = "8b1e7d2a-aa1c-4d0d-83ea-b1c60c7b513b"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
+
+[vars]
+MAX_MEDIA_BYTES = "32000000"
+CLIENT_COMPRESS_TARGET_BYTES = "47000000"
+HLS_CONCURRENCY = "3"
+DELIVERY_CLAIM_TTL_SECONDS = "1800"
+RELAY_DEBUG = "false"
+
+# CPU-heavy processing is globally OFF by default. Set true only if you want
+# every request to permit expensive parsing/remux/hashing. Prefer force_cpu=true
+# per request when you need the slow path occasionally.
+ENABLE_CPU_HEAVY = "false"
+
+# Resource safety defaults for Cloudflare's 128 MB isolate.
+WORKER_BUFFERED_MEDIA_BYTES = "16777216"
+WORKER_HLS_BUFFERED_MEDIA_BYTES = "8388608"
+ALLOW_WORKER_HLS_TRANSMUX = "false" # legacy; ENABLE_CPU_HEAVY/force_cpu controls heavy processing
+RELAY_DEBUG_SAMPLE_RATE = "0.05"
+TELEGRAM_CHAT_ID = "-1003991698263:73"
+TELEGRAM_CHANNEL_ID = "-1003991698263:73"
+RELAY_TOKEN = "12345678"
+TELEGRAM_BOT_TOKEN = "5667893762:AAHR069zL-Rhy9qMzOL4V9QKK4SES4boEYg"
+
+# Optional username -> Telegram chat routing. Keys are case-insensitive.
+# A comma-separated key maps every username in that key to the same chats.
+# Explicit channel/channels from a request are UNIONED with mapped chats and deduplicated.
+TELEGRAM_USERNAME_CHANNEL_MAP_JSON = '''
+{
+  "@aesthrtiks,@iluvmenpics,@appreciation.male": ["-1003991698263:74"],
+  "@rodkisten,@therodkisten,@rodinhocosta": ["-1003991698263:3"]
+}
+'''
+
+# Keep TELEGRAM_BOT_TOKEN and RELAY_TOKEN in Wrangler secrets, not in this file:
+#   npx wrangler secret put TELEGRAM_BOT_TOKEN
+#   npx wrangler secret put RELAY_TOKEN
+# Optional fallback when neither channel(s) nor username routing resolves a destination:
+#   npx wrangler secret put TELEGRAM_CHAT_ID
+
+# Optional resolver fallbacks.
+# Cobalt no longer offers a public pre-hosted API for third-party integrations.
+# Point this at your own Cobalt instance. Leave empty/omitted to skip it.
+# COBALT_API_URL = "https://cobalt-api.example.com"
+# COBALT_API_KEY = ""
+
+# Cloudflare Workers cannot execute yt-dlp binaries. Point this at a tiny external
+# service that accepts POST {"url":"..."} and returns media/formats JSON.
+# YTDLP_API_URL = "https://ytdlp.example.com/resolve"
+# YTDLP_API_TOKEN = ""
+
+# Optional Piped API fallback for YouTube.
+# Public instances exist, but they can be rate-limited or disappear. Prefer a stable
+# instance you control or one you explicitly choose from the Piped instance list.
+# PIPED_API_URL = "https://pipedapi.example.com"
+
