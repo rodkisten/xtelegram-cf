@@ -1,4 +1,4 @@
-import { persistSuccessfulDeliveries, requireRelayDb } from "../../db";
+import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { RELAY_LIMITS } from "../../config/constants";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
@@ -31,6 +31,7 @@ import {
 } from "../../services/delivery-plan";
 import { getTelegramMethodName } from "../../services/telegram-delivery";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
+import { reconcileExistingMediaPresentation } from "../../services/presentation-reconciliation";
 import { sendTelegramUpload } from "../../telegram";
 import type { Env, MediaType, TelegramApiResult, TelegramMessage, VideoMetadata } from "../../types";
 import {
@@ -434,7 +435,94 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     inProgress: plan.skippedInProgress.length,
   });
 
+  const baseMetadata = normalizeMetadata(payload.metadata);
+  const metadataProvided = Object.prototype.hasOwnProperty.call(payload, "metadata");
+  const payloadCaption = normalizeCaption(payload.caption);
+  const captionExplicit = Object.prototype.hasOwnProperty.call(payload, "caption");
+  const presentationRequested =
+    payload.force !== true &&
+    (captionExplicit || hashtagValidation.value.length > 0 || metadataProvided);
+  const captionProvided = captionExplicit || hashtagValidation.value.length > 0;
+  const socialPromise = plan.channelsToSend.length || (presentationRequested && captionProvided)
+    ? resolveSocialDeliveryContent({
+        provider: payload.provider || null,
+        sourceUrl: resolveOriginalSourceUrl(payload as Record<string, unknown>),
+        pageUrl: payload.pageUrl || null,
+        caption: resolvePayloadCaption(payload as Record<string, unknown>),
+        captionExplicit,
+        hashtags: hashtagValidation.value,
+        parseMode,
+        metadata: baseMetadata,
+      }, env)
+    : null;
+  let presentationSync: Awaited<ReturnType<typeof reconcileExistingMediaPresentation>> | null = null;
+  let reconciledSocialContent: Awaited<ReturnType<typeof resolveSocialDeliveryContent>> | null = null;
+
+  if (presentationRequested && plan.skippedAlreadySent.length > 0) {
+    try {
+      reconciledSocialContent = socialPromise ? await socialPromise : null;
+      presentationSync = await reconcileExistingMediaPresentation({
+        db,
+        env,
+        identity: plan.identity,
+        channels: plan.skippedAlreadySent.map((entry) => entry.channelId),
+        caption: reconciledSocialContent?.caption ?? "",
+        captionProvided,
+        parseMode: reconciledSocialContent?.parseMode ?? null,
+        metadata: baseMetadata,
+        metadataProvided,
+      });
+      if (presentationSync.summary.changed > 0 && presentationSync.summary.failed === 0) await persistKnownMedia(db, {
+        identity: plan.identity,
+        sourceUrl: resolveOriginalSourceUrl(payload as Record<string, unknown>),
+        pageUrl: payload.pageUrl || null,
+        mediaType: uploadedFiles.length > 1 ? "album" : uploadedFiles[0]!.mediaType,
+        mediaCount: uploadedFiles.length,
+        metadata: metadataProvided ? (reconciledSocialContent?.metadata ?? baseMetadata) : null,
+        metadataProvided,
+        caption: reconciledSocialContent?.caption ?? "",
+        captionProvided,
+        parseMode: reconciledSocialContent?.parseMode ?? null,
+        mediaStatus: "sent",
+      });
+      relayDebug(env, traceId, "multipart.presentation-reconciled", presentationSync.summary);
+    } catch (error) {
+      relayDebug(env, traceId, "multipart.presentation-reconcile-failed", { error: debugError(error) });
+      await releasePendingDeliveryClaims(plan).catch(() => {});
+      return json({
+        ok: false,
+        error: getErrorMessage(error),
+        stage: "presentation-reconcile",
+        media: plan.identity,
+      }, 500);
+    }
+  }
+
   if (!plan.channelsToSend.length) {
+    if (presentationSync) {
+      const failed = presentationSync.summary.failed;
+      const changed = presentationSync.summary.changed;
+      return json({
+        ok: failed === 0,
+        partial: failed > 0,
+        conflict: false,
+        action: changed > 0 ? "presentation_reconciled" : "presentation_unchanged",
+        message: changed > 0
+          ? `Existing Telegram upload presentation compared; ${presentationSync.summary.edited} message(s) edited.`
+          : "Existing Telegram upload presentation is already current.",
+        media: plan.identity,
+        channels: {
+          requested: chatIds,
+          attempted: [],
+          inserted: [],
+          notSent: plan.skippedAlreadySent,
+        },
+        presentation: presentationSync.summary,
+        presentationResults: presentationSync.results,
+        metadata: reconciledSocialContent?.metadata ?? baseMetadata,
+      }, failed > 0 ? 207 : 200);
+    }
+
     relayDebug(env, traceId, "multipart.delivery-conflict", {
       channels: debugChannelSummary(buildDeliveryConflict(plan).channels),
     });
@@ -443,18 +531,10 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
 
   try {
     relayDebug(env, traceId, "multipart.social-metadata.started", {});
-    const baseMetadata = normalizeMetadata(payload.metadata);
-    const payloadCaption = normalizeCaption(payload.caption);
-    const socialContent = await resolveSocialDeliveryContent({
-      provider: payload.provider || null,
-      sourceUrl: resolveOriginalSourceUrl(payload as Record<string, unknown>),
-      pageUrl: payload.pageUrl || null,
-      caption: resolvePayloadCaption(payload as Record<string, unknown>),
-      captionExplicit: Boolean(payloadCaption && !isGenericMediaLabel(payloadCaption)),
-      hashtags: hashtagValidation.value,
-      parseMode,
-      metadata: baseMetadata,
-    }, env);
+    if (!socialPromise) {
+      throw new Error("Internal error: social content promise was not initialized.");
+    }
+    const socialContent = reconciledSocialContent || await socialPromise;
     relayDebug(env, traceId, "multipart.social-metadata.completed", {
       captionLength: socialContent.caption.length,
       socialMetadataStrategy: socialContent.social?.strategy || null,
@@ -582,6 +662,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
         mediaType: uploadedFiles.length > 1 ? "album" : uploadedFiles[0]!.mediaType,
         mediaCount: uploadedFiles.length,
         metadata: socialContent.metadata,
+        presentationMetadata: metadataProvided ? baseMetadata : null,
         caption: socialContent.caption,
         parseMode: socialContent.parseMode,
         mediaStatus: "sent",
@@ -757,6 +838,8 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       telegram: { deliveries: formattedDeliveries },
       payload,
       metadata: socialContent.metadata,
+      presentation: presentationSync?.summary ?? null,
+      presentationResults: presentationSync?.results ?? [],
       socialMetadata: socialContent.social,
       metrics: multipartMetrics,
     });
