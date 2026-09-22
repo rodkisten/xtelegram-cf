@@ -1,4 +1,6 @@
-import { resolveMediaIdentity } from "../db";
+import { checkStoredMediaDeliveries, requireRelayDb, resolveMediaIdentity } from "../db";
+import { normalizeMediaIdentityInput } from "../validation/media-identity";
+import { resolveTelegramChatIdsForEnv } from "../services/channels";
 import { cloneAuthorizedJsonRequest } from "../http/internal-request";
 import { json } from "../http/response";
 import { getErrorMessage } from "../lib/errors";
@@ -21,6 +23,7 @@ import {
 import type { Env } from "../types";
 import {
   normalizeMetadata,
+  hasProvidedField,
   normalizeRoutingUsernames,
   normalizeParseMode,
   normalizeTelegramChannels,
@@ -74,6 +77,32 @@ export async function handleResolve(
       sourceUrl: debugUrl(sourceUrl),
     });
     return json({ ok: false, error: "url/sourceUrl must be a public HTTP(S) URL" }, 400);
+  }
+
+  // An existing delivery needs only a caption edit, even if the source CDN or
+  // resolver is offline. Route through /send's normal dedupe before resolving.
+  if (send && body.force !== true) {
+    const channels = normalizeTelegramChannels(body.channel, body.channels);
+    const usernames = normalizeRoutingUsernames(body.username, body.usernames);
+    if (!channels.ok) return json({ ok: false, error: channels.error }, 400);
+    if (!usernames.ok) return json({ ok: false, error: usernames.error }, 400);
+    const destinations = resolveTelegramChatIdsForEnv(env, channels.value, usernames.value);
+    const identityInput = normalizeMediaIdentityInput({ ...body, sourceUrl: normalized.href });
+    if (destinations.length && identityInput) {
+      try {
+        const identity = await resolveMediaIdentity(identityInput);
+        const records = await checkStoredMediaDeliveries(requireRelayDb(env), [identity], destinations);
+        const record = records.get(identity.key);
+        if (record && destinations.every((channel) => record.deliveries.some((d) => d.channelId === channel))) {
+          return handleSend(cloneAuthorizedJsonRequest(request, {
+            ...body, mediaUrl: normalized.href, sourceUrl: normalized.href,
+            mediaKey: record.media.key, provider: record.media.provider, channels: destinations,
+          }), env);
+        }
+      } catch (error) {
+        return json({ ok: false, error: getErrorMessage(error), stage: "presentation-preflight" }, 500);
+      }
+    }
   }
 
   // Preserve a handle captured from X's DOM/network payload. It is used only
@@ -159,8 +188,8 @@ export async function handleResolve(
 
   const explicitCaption = typeof body.caption === "string" ? body.caption.trim() : "";
   const resolvedCaption = typeof resolution.caption === "string" ? resolution.caption.trim() : "";
-  const caption = explicitCaption || resolvedCaption || resolution.sourceUrl;
-  const captionExplicit = Boolean(explicitCaption);
+  const captionExplicit = hasProvidedField(body, "caption");
+  const caption = captionExplicit ? explicitCaption : resolvedCaption || resolution.sourceUrl;
   const explicitMediaId = typeof body.mediaId === "string" ? body.mediaId.trim() : "";
   const explicitMediaKey = typeof body.mediaKey === "string" ? body.mediaKey.trim() : "";
   const metadata = {
@@ -186,6 +215,8 @@ export async function handleResolve(
     force: body.force === true,
     force_cpu: forceCpu,
     metadata,
+    metadataProvided: hasProvidedField(body, "metadata"),
+    presentationMetadata: requestMetadata,
   };
 
   const albumCompatible =
