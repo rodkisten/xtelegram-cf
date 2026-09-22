@@ -1,3 +1,4 @@
+import { storedCaptionHasAccessNotice } from "../../lib/social-caption";
 import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { RELAY_LIMITS } from "../../config/constants";
 import { json } from "../../http/response";
@@ -439,9 +440,11 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
   const metadataProvided = Object.prototype.hasOwnProperty.call(payload, "metadata");
   const payloadCaption = normalizeCaption(payload.caption);
   const captionExplicit = Object.prototype.hasOwnProperty.call(payload, "caption");
+  const needsCaptionRepair = plan.claim.alreadySentDeliveries.some((delivery) =>
+    storedCaptionHasAccessNotice(delivery.presentationJson));
   const presentationRequested =
     payload.force !== true &&
-    (captionExplicit || hashtagValidation.value.length > 0 || metadataProvided);
+    (captionExplicit || hashtagValidation.value.length > 0 || metadataProvided || needsCaptionRepair);
   const captionProvided = captionExplicit || hashtagValidation.value.length > 0;
   const socialPromise = plan.channelsToSend.length || (presentationRequested && captionProvided)
     ? resolveSocialDeliveryContent({
