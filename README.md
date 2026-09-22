@@ -1,6 +1,6 @@
-# xtelegram-cf · Telegram Media Relay v2.18.1
+# xtelegram-cf · Telegram Media Relay v2.18.3
 
-Versão atual: **2.18.1**. Veja [comportamento, de-para e instalação](CHANGELOG-v2.18.1.md).
+Versão atual: **2.18.3**. Veja [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
 
 
 
