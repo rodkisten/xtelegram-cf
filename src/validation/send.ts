@@ -1,3 +1,4 @@
+import { sanitizeDeliveryCaption } from "../lib/social-caption";
 import { normalizeOptionalSourceUrl, normalizePublicHttpUrl } from "../lib/http";
 import { normalizeHashtags } from "../lib/hashtags";
 import type { AlbumMediaType, RelayAlbumInput, RelayInput, RelayMediaVariant } from "../types";
@@ -187,7 +188,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
     items.push({
       mediaUrl,
       mediaType,
-      caption: itemCaption,
+      caption: sanitizeDeliveryCaption(itemCaption, itemParseMode, resolveOriginalSourceUrl(record)),
       parseMode: itemParseMode,
       mediaHeaders: normalizedItemHeaders,
       mediaVariants: itemVariants,

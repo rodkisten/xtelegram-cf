@@ -157,3 +157,38 @@ test('multipart duplicate compares metadata and edits the existing caption', asy
   assert.equal(response.status, 200, await response.text());
   assert.equal(f.calls.length, 1); assert.equal(f.calls[0].caption, 'Multipart caption');
 });
+
+const xWarning = 'Age-restricted adult content. This content might not be appropriate for people under 18 years old. To view this media, you’ll need to log in to X. Learn more';
+async function dirtyFixture(t: any) {
+  const f = await fixture(t);
+  const dirty = `<b>X</b>\n\n@example\n\n${xWarning}\n\n<a href="${identity.canonicalUrl}">Origem</a>\n\n#Caught #Public #Spy`;
+  f.sqlite.prepare('UPDATE media SET caption = ?').run(dirty);
+  f.sqlite.prepare('UPDATE media_deliveries SET presentation_json = ?').run(JSON.stringify({ caption: dirty, parseMode: 'HTML', metadata: { a: '1', b: '2' } }));
+  return f;
+}
+
+test('reprocessing a URL repairs a stored X warning once, retaining hashtags and message id', async (t) => {
+  const f = await dirtyFixture(t);
+  const body = { url: identity.canonicalUrl, channels: [channel] };
+  const first = await handleResolve(req(body), f.env, true);
+  assert.equal(first.status, 200); assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].message_id, 101);
+  assert.ok(f.calls[0].caption.endsWith('#Caught #Public #Spy'));
+  assert.ok(!f.calls[0].caption.includes('Age-restricted'));
+  assert.ok(!(await f.record()).media.caption?.includes('Age-restricted'));
+  await handleResolve(req(body), f.env, true); assert.equal(f.calls.length, 1);
+});
+
+test('batch also repairs stored warnings without requiring an explicit new caption', async (t) => {
+  const f = await dirtyFixture(t);
+  await handleBatch(req({ channels: [channel], items: [payload] }), f.env);
+  assert.equal(f.calls.length, 1); assert.ok(!f.calls[0].caption.includes('Age-restricted'));
+});
+
+test('a failed warning cleanup remains eligible for retry', async (t) => {
+  const f = await dirtyFixture(t); f.fail('Bad Request: unavailable');
+  assert.equal((await handleSend(req(payload), f.env)).status, 207);
+  assert.ok(JSON.parse((await f.record()).deliveries[0].presentationJson!).caption.includes('Age-restricted'));
+  f.fail(''); await handleSend(req(payload), f.env);
+  assert.equal(f.calls.length, 2);
+});

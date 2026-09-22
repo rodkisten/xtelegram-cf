@@ -1,3 +1,4 @@
+import { stripSocialAccessNotices } from "./lib/social-caption";
 import type { Env, MediaType } from "./types";
 import { debugError, debugUrl, relayDebug } from "./lib/debug";
 import { RELAY_LIMITS } from "./config/constants";
@@ -132,6 +133,8 @@ export async function resolveSocialMedia(
 
     try {
       const result = await provider.run();
+      result.caption = stripSocialAccessNotices(result.caption || "").caption || null;
+      result.title = stripSocialAccessNotices(result.title || "").caption || null;
       mergeMetadata(metadata, result);
 
       if (!result.media.length) {

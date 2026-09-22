@@ -1,3 +1,4 @@
+import { sanitizeDeliveryCaption } from "../../lib/social-caption";
 import {
   checkStoredMediaDeliveries,
   persistKnownMedia,
@@ -137,7 +138,7 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
           return;
         }
 
-        const caption = normalizeCaption(record.caption);
+        let caption = normalizeCaption(record.caption);
         const parseMode = caption ? normalizeParseMode(record.parseMode ?? record.parse_mode) : null;
         if (caption && (record.parseMode || record.parse_mode) && !parseMode) {
           invalid.set(index, "Invalid parseMode. Allowed values: HTML, MarkdownV2");
@@ -146,6 +147,7 @@ export async function handleMediaCheck(request: Request, env: Env): Promise<Resp
         const sourceUrl = typeof record.sourceUrl === "string" ? record.sourceUrl :
           typeof record.url === "string" ? record.url : null;
         const pageUrl = typeof record.pageUrl === "string" ? record.pageUrl : null;
+        caption = sanitizeDeliveryCaption(caption, parseMode, sourceUrl || pageUrl);
         valid.push({
           index,
           input,

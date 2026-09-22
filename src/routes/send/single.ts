@@ -1,3 +1,4 @@
+import { storedCaptionHasAccessNotice } from "../../lib/social-caption";
 import { findContentDuplicateMatches, persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import {
   inferTelegramMediaType,
@@ -13,6 +14,7 @@ import { getErrorMessage } from "../../lib/errors";
 import {
   buildLimitExceededPayload,
   isRelayLimitExceededError,
+  RelayLimitExceededError,
   resolveClientCompressionTargetBytes,
 } from "../../lib/limit-error";
 import {
@@ -116,9 +118,11 @@ export async function handleSingleSend(
     claimQueries: plan.claim.queryCount,
   });
 
+  const needsCaptionRepair = plan.claim.alreadySentDeliveries.some((delivery) =>
+    storedCaptionHasAccessNotice(delivery.presentationJson));
   const presentationRequested =
     !input.force &&
-    (input.captionExplicit || input.hashtags.length > 0 || input.metadataProvided);
+    (input.captionExplicit || input.hashtags.length > 0 || input.metadataProvided || needsCaptionRepair);
   const captionProvided = input.captionExplicit || input.hashtags.length > 0;
   const socialPromise = plan.channelsToSend.length || (presentationRequested && captionProvided)
     ? resolveSocialDeliveryContent({
@@ -635,6 +639,54 @@ export async function handleSingleSend(
         channelSummary: debugChannelSummary(payload.channels),
         failureReasons: failedChannels.map((entry) => entry.reason),
       });
+
+      const sizeFailure = failedDeliveries.find((entry) =>
+        entry.result.httpStatus === 413 ||
+        /(?:exceeds|above).*(?:limit|maximum)|too large/i.test(
+          entry.result.description || "",
+        ),
+      );
+
+      if (sizeFailure && prepared.type === "file") {
+        const maximumBytes = prepared.streamMaxBytes || resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
+        const limitError = new RelayLimitExceededError(
+          sizeFailure.result.description || "Telegram delivery exceeded the upload limit.",
+          {
+            kind: "direct_media_bytes",
+            stage: "telegram-delivery",
+            limitBytes: maximumBytes,
+            actualBytes: prepared.contentLength,
+            resolvedMediaUrl: prepared.url,
+            sourceUrl: input.sourceUrl,
+            inputUrl: input.mediaUrl.href,
+            mediaType,
+            contentType: prepared.contentType,
+          },
+        );
+        const fallback = buildLimitExceededPayload(limitError, {
+          sourceUrl: input.sourceUrl,
+          inputUrl: prepared.url,
+          mediaType,
+          targetBytes: resolveClientCompressionTargetBytes(env.CLIENT_COMPRESS_TARGET_BYTES),
+          mediaHeaders: prepared.mediaHeaders,
+          variants: input.mediaVariants,
+          caption: socialContent.caption,
+          parseMode: socialContent.parseMode,
+          provider: input.provider,
+          mediaId: input.mediaId,
+          mediaKey: plan.identity.key,
+          hashtags: input.hashtags,
+          channels: plan.channelsToSend,
+          metadata: socialContent.metadata,
+        });
+        return json({
+          ...fallback,
+          channels: payload.channels,
+          telegram: payload.telegram,
+          deliveryFailure: sizeFailure.result.description || null,
+        }, 413);
+      }
+
       return json(payload, 502);
     }
 
