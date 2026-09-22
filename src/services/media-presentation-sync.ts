@@ -1,3 +1,4 @@
+import { sanitizeDeliveryCaption } from "../lib/social-caption";
 import {
   acquireDeliveryClaims,
   releaseDeliveryClaims,
@@ -17,6 +18,9 @@ import {
 } from "./presentation-state";
 
 export interface StoredMediaPresentation {
+  sourceUrl?: string | null;
+  canonicalUrl?: string | null;
+  pageUrl?: string | null;
   caption?: string | null;
   parseMode?: ParseMode | string | null;
   metadata?: unknown;
@@ -117,6 +121,10 @@ async function reconcileClaimedPresentation(
       metadata: options.metadata,
       metadataProvided: options.metadataProvided,
     });
+    // Sanitize the desired state only: the old snapshot must stay intact so
+    // already-published warnings produce a real edit rather than a false no-op.
+    desired.caption = sanitizeDeliveryCaption(desired.caption, desired.parseMode,
+      options.storedMedia?.sourceUrl || options.storedMedia?.pageUrl || options.storedMedia?.canonicalUrl);
     const desiredJson = serializePresentationSnapshot(desired);
     const diff = comparePresentationSnapshots(storedSnapshot, desired);
     const messageId = firstMessageId(delivery);
@@ -210,6 +218,17 @@ async function reconcileClaimedPresentation(
     await updateDeliveryPresentationSnapshots(options.db, options.mediaKey, updates);
   }
 
+  const previousCaption = options.storedMedia?.caption;
+  if (previousCaption && results.length && results.every((result) => result.persisted)) {
+    const cleaned = sanitizeDeliveryCaption(previousCaption,
+      options.storedMedia?.parseMode === "HTML" || options.storedMedia?.parseMode === "MarkdownV2"
+        ? options.storedMedia.parseMode : null,
+      options.storedMedia?.sourceUrl || options.storedMedia?.pageUrl || options.storedMedia?.canonicalUrl);
+    if (cleaned !== previousCaption) {
+      await options.db.prepare(`UPDATE media SET caption = ?2
+        WHERE media_key = ?1 AND caption = ?3`).bind(options.mediaKey, cleaned, previousCaption).run();
+    }
+  }
   return results;
 }
 
