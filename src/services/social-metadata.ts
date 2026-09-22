@@ -1,3 +1,4 @@
+import { sanitizeDeliveryCaption, stripSocialAccessNotices } from "../lib/social-caption";
 import type { Env, ParseMode } from "../types";
 import { debugUrl } from "../lib/debug";
 import { RELAY_LIMITS } from "../config/constants";
@@ -41,7 +42,7 @@ const USER_AGENT =
 
 const cache = new Map<string, { expiresAt: number; value: SocialPostMetadata }>();
 const inFlight = new Map<string, Promise<SocialPostMetadata>>();
-const SOCIAL_CACHE_PATH_PREFIX = "https://xtelegram-social-cache.invalid/v1/";
+const SOCIAL_CACHE_PATH_PREFIX = "https://xtelegram-social-cache.invalid/v2/";
 
 /**
  * Enrich Telegram captions for Instagram and Twitter/X server-side.
@@ -60,7 +61,7 @@ export async function resolveSocialDeliveryContent(
   // available, and avoids replacing a richer caption with scraper output.
   if (input.captionExplicit) {
     return finalizeHashtags({
-      caption: input.caption,
+      caption: sanitizeDeliveryCaption(input.caption, input.parseMode, input.sourceUrl || input.pageUrl),
       parseMode: input.parseMode,
       metadata: input.metadata,
       social: null,
@@ -121,7 +122,7 @@ function finalizeHashtags(
   hashtags: string[] | undefined,
 ): SocialDeliveryContent {
   const applied = appendHashtagsToCaption(
-    content.caption,
+    sanitizeDeliveryCaption(content.caption, content.parseMode, content.social?.sourceUrl),
     hashtags || [],
     content.parseMode,
   );
@@ -273,10 +274,8 @@ function metadataHintFromInput(
     stringValue(metadata.socialAuthorUsername).replace(/^@/, ""),
   );
   const authorName = cleanCaption(stringValue(metadata.socialAuthorName));
-  const caption = cleanCaption(
-    stringValue(metadata.socialResolvedCaption) ||
-    stringValue(metadata.socialCaption),
-  );
+  const caption = [metadata.socialResolvedCaption, metadata.socialCaption]
+    .map((value) => cleanCaption(stringValue(value))).find(Boolean) || "";
 
   const author = authorUsername
     ? `@${authorUsername}`
@@ -884,11 +883,12 @@ function decodeHtml(value: string): string {
 }
 
 function cleanCaption(value: string): string {
-  return decodeHtml(String(value || ""))
+  const cleaned = decodeHtml(String(value || ""))
     .replace(/<[^>]*>/g, " ")
     .replace(/[\t\r ]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+  return stripSocialAccessNotices(cleaned).caption;
 }
 
 function cleanUsername(value: string): string {
@@ -1020,6 +1020,7 @@ function isValidSocialMetadata(value: unknown): value is SocialPostMetadata {
     typeof candidate.sourceUrl === "string" &&
     (typeof candidate.author === "string" || candidate.author === null) &&
     (typeof candidate.caption === "string" || candidate.caption === null) &&
+    !stripSocialAccessNotices(candidate.caption || "").removed &&
     typeof candidate.strategy === "string" &&
     typeof candidate.enriched === "boolean";
 }
