@@ -1,3 +1,4 @@
+import { storedCaptionHasAccessNotice } from "../../lib/social-caption";
 import { persistKnownMedia, persistSuccessfulDeliveries, requireRelayDb } from "../../db";
 import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
@@ -885,9 +886,11 @@ export async function handleJsonAlbumSend(
     inProgress: plan.skippedInProgress.length,
   });
 
+  const needsCaptionRepair = plan.claim.alreadySentDeliveries.some((delivery) =>
+    storedCaptionHasAccessNotice(delivery.presentationJson));
   const presentationRequested =
     !input.force &&
-    (input.captionExplicit || input.hashtags.length > 0 || input.metadataProvided);
+    (input.captionExplicit || input.hashtags.length > 0 || input.metadataProvided || needsCaptionRepair);
   const captionProvided = input.captionExplicit || input.hashtags.length > 0;
   const socialPromise = plan.channelsToSend.length || (presentationRequested && captionProvided)
     ? resolveSocialDeliveryContent({
