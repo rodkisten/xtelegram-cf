@@ -1,3 +1,4 @@
+import { sanitizeDeliveryCaption } from "../../lib/social-caption";
 import {
   checkStoredMediaDeliveries,
   persistKnownMedia,
@@ -67,8 +68,8 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
   const pageUrl = publicUrlOrNull(body.pageUrl);
   const resolvedMediaUrl = publicUrlOrNull(body.resolvedMediaUrl);
   const mediaType = normalizeMediaType(body.mediaType);
-  const caption = cleanString(body.caption) || "";
   const parseMode = normalizeOptionalParseMode(body.parseMode);
+  const caption = sanitizeDeliveryCaption(cleanString(body.caption) || "", parseMode, sourceUrl || pageUrl);
   const customMetadata = normalizeMetadata(body.metadata);
   const metadataProvided = Object.prototype.hasOwnProperty.call(body, "metadata");
   const captionProvided = Object.prototype.hasOwnProperty.call(body, "caption");
