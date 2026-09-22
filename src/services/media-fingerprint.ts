@@ -50,7 +50,7 @@ export class MediaFingerprintAccumulator {
 
     this.byteLength += chunk.byteLength;
     this.sampler.update(chunk);
-    if (this.writer) await this.writer.write(chunk);
+    if (this.writer) await this.writer.write(asBufferSource(chunk));
     return this;
   }
 
@@ -87,7 +87,7 @@ export async function buildMediaFingerprint(
 ): Promise<MediaContentFingerprint> {
   const sampler = new BoundedFingerprintSampler();
   sampler.update(bytes);
-  const digest = computeExactHash ? await crypto.subtle.digest("SHA-256", bytes) : null;
+  const digest = computeExactHash ? await crypto.subtle.digest("SHA-256", asBufferSource(bytes)) : null;
   return {
     sha256: digest ? bytesToHex(new Uint8Array(digest)) : null,
     fingerprint: sampler.digest(),
@@ -95,6 +95,13 @@ export async function buildMediaFingerprint(
     byteLength: bytes.byteLength,
     sampledBytes: sampler.sampleCount,
   };
+}
+
+function asBufferSource(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  // Ordinary Worker chunks need no copy. Web Crypto cannot consume shared memory.
+  return bytes.buffer instanceof ArrayBuffer
+    ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    : new Uint8Array(bytes);
 }
 
 /**
