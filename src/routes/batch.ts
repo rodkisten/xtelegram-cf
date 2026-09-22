@@ -1,3 +1,4 @@
+import { storedCaptionHasAccessNotice } from "../lib/social-caption";
 import {
   checkStoredMediaDeliveries,
   requireRelayDb,
@@ -310,7 +311,9 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     const preSkipped: BatchSkip[] = [];
 
     const presentationRequested = !item.force &&
-      ["caption", "metadata", "hashtags", "hashtag"].some((key) => hasProvidedField(item.payload, key));
+      (["caption", "metadata", "hashtags", "hashtag"].some((key) => hasProvidedField(item.payload, key)) ||
+        (existing.get(item.identity.key)?.deliveries || []).some((delivery) =>
+          item.channels.includes(delivery.channelId) && storedCaptionHasAccessNotice(delivery.presentationJson)));
     for (const channelId of item.channels) {
       if (existingChannels.has(channelId) && !presentationRequested) {
         preSkipped.push({ channelId, reason: "already_sent" });
