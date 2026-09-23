@@ -10,6 +10,7 @@ import {
   withRelayTraceResponse,
 } from "../lib/debug";
 import type { Env } from "../types";
+import { withMediaVariants } from "../lib/media-variants-response";
 
 const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -23,7 +24,10 @@ const worker = {
       hasAuthorization: Boolean(tracedRequest.headers.get("Authorization")),
     });
     try {
-      const response = await routeRequest(tracedRequest, env);
+      const routedResponse = await routeRequest(tracedRequest, env);
+      const response = isMediaResponsePath(new URL(tracedRequest.url).pathname)
+        ? await withMediaVariants(routedResponse)
+        : routedResponse;
       relayDebug(env, traceId, "request.completed", {
         status: response.status,
         durationMs: Date.now() - startedAt,
@@ -46,5 +50,14 @@ const worker = {
     }
   },
 };
+
+function isMediaResponsePath(pathname: string): boolean {
+  return pathname === "/send" ||
+    pathname === "/resolve" ||
+    pathname === "/resolve-and-send" ||
+    pathname === "/batch" ||
+    pathname === "/media/check" ||
+    pathname === "/media/register";
+}
 
 export default worker;

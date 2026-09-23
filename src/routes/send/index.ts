@@ -7,6 +7,7 @@ import { handleMultipartSend } from "./multipart";
 import { handleSingleSend } from "./single";
 import { relayDebug, relayTraceId } from "../../lib/debug";
 import { cpuHeavyRequestValue, resolveCpuHeavyEnabled } from "../../lib/cpu-policy";
+import { withMediaVariants } from "../../lib/media-variants-response";
 
 export async function handleSend(request: Request, env: Env): Promise<Response> {
   const traceId = relayTraceId(request);
@@ -21,7 +22,7 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     relayDebug(env, traceId, "send.multipart.received", { contentType });
     const response = await handleMultipartSend(request, env);
     relayDebug(env, traceId, "send.multipart.completed", { status: response.status });
-    return response;
+    return withMediaVariants(response);
   }
 
   let body: unknown;
@@ -53,7 +54,21 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     });
     const response = await handleJsonAlbumSend(albumValidation.value, env, traceId);
     relayDebug(env, traceId, "send.album-completed", { status: response.status });
-    return response;
+    return withMediaVariants(
+      response,
+      albumValidation.value.items.flatMap((item) => [
+        {
+          mediaUrl: item.mediaUrl,
+          quality: item.metadata?.resolvedQuality || null,
+          width: item.metadata?.resolvedWidth || null,
+          height: item.metadata?.resolvedHeight || null,
+          contentLength: item.metadata?.resolvedContentLength || null,
+          bitrate: item.metadata?.resolvedBitrate || null,
+          mediaHeaders: item.mediaHeaders,
+        },
+        ...item.mediaVariants,
+      ]),
+    );
   }
   const validation = validateRequestBody(body);
   if (!validation.ok) {
@@ -74,5 +89,16 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
   });
   const response = await handleSingleSend(request, validation.value, env);
   relayDebug(env, traceId, "send.single-completed", { status: response.status });
-  return response;
+  return withMediaVariants(response, [
+    {
+      mediaUrl: validation.value.mediaUrl,
+      quality: validation.value.metadata?.resolvedQuality || null,
+      width: validation.value.metadata?.resolvedWidth || null,
+      height: validation.value.metadata?.resolvedHeight || null,
+      contentLength: validation.value.metadata?.resolvedContentLength || null,
+      bitrate: validation.value.metadata?.resolvedBitrate || null,
+      mediaHeaders: validation.value.mediaHeaders,
+    },
+    ...validation.value.mediaVariants,
+  ]);
 }

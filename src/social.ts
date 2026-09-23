@@ -1177,12 +1177,15 @@ function mediaVariant(
   const explicitWidth = numberOrNull(item?.width);
   const explicitHeight = numberOrNull(item?.height);
   const fromUrl = resolutionFromUrl(url);
-  const width = explicitWidth || fromUrl.width;
-  const height = explicitHeight || fromUrl.height;
+  // CDN rendition URLs are authoritative for per-quality dimensions. Some
+  // providers repeat the original 1080p metadata on every 720p/480p/320p URL.
+  const width = fromUrl.width || explicitWidth;
+  const height = fromUrl.height || explicitHeight;
   return {
     url,
     type,
-    quality: firstString(item?.quality, item?.resolution, width && height ? `${width}x${height}` : null),
+    quality: firstString(fromUrl.label, item?.quality, item?.resolution,
+      width && height ? `${width}x${height}` : null),
     width,
     height,
     thumbnail: firstString(item?.thumbnail, item?.thumbnail_url, item?.thumb, item?.poster, item?.cover),
