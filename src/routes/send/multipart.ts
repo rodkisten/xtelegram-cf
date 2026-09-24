@@ -26,6 +26,7 @@ import {
 import {
   buildDeliveryConflict,
   createDeliveryPlan,
+  getAlreadySentTelegramMessageLinkFields,
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
@@ -34,6 +35,7 @@ import { getTelegramMethodName } from "../../services/telegram-delivery";
 import { resolveSocialDeliveryContent } from "../../services/social-metadata";
 import { reconcileExistingMediaPresentation } from "../../services/presentation-reconciliation";
 import { sendTelegramUpload } from "../../telegram";
+import { buildTelegramMessageLinkFields } from "../../lib/telegram-message-links";
 import type { Env, MediaType, TelegramApiResult, TelegramMessage, VideoMetadata } from "../../types";
 import {
   normalizeCaption,
@@ -507,6 +509,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       const changed = presentationSync.summary.changed;
       return json({
         ok: failed === 0,
+        ...getAlreadySentTelegramMessageLinkFields(plan),
         partial: failed > 0,
         conflict: false,
         action: changed > 0 ? "presentation_reconciled" : "presentation_unchanged",
@@ -616,6 +619,15 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     const deliveries = deliveriesByChannel.flat();
     const failed = deliveries.filter((entry) => !entry.result.ok);
     const succeeded = deliveries.filter((entry) => entry.result.ok);
+    const messageLinks = buildTelegramMessageLinkFields(
+      deliveries.map((entry) => ({
+        requestedChatId: entry.requestedChatId,
+        telegramChatId: entry.result.result?.chat?.id ?? null,
+        telegramUsername: entry.result.result?.chat?.username ?? null,
+        messageThreadId: entry.result.result?.message_thread_id ?? null,
+        messageId: entry.result.result?.message_id ?? null,
+      })),
+    );
     const completedChannels = plan.channelsToSend.filter((chatId) => {
       const channelDeliveries = deliveries.filter((entry) => entry.requestedChatId === chatId);
       return (
@@ -691,6 +703,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       return json(
         {
           ok: false,
+          ...messageLinks,
           error: getErrorMessage(error),
           stage: "persist-delivery",
           warning:
@@ -774,6 +787,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
       return json(
         {
           ok: completedChannels.length > 0,
+          ...messageLinks,
           partial: completedChannels.length > 0,
           error:
             completedChannels.length > 0
@@ -817,6 +831,7 @@ export async function handleMultipartSend(request: Request, env: Env): Promise<R
     });
     return json({
       ok: true,
+      ...messageLinks,
       message:
         uploadedFiles.length === 1
           ? "Uploaded file forwarded to Telegram"
