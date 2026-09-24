@@ -17,6 +17,11 @@ import { getErrorMessage } from "../lib/errors";
 import { resolveCpuHeavyEnabled } from "../lib/cpu-policy";
 import { debugError, relayDebug, relayTraceId } from "../lib/debug";
 import {
+  buildThumbnailResponseFromUrl,
+  emptyThumbnailResponse,
+  firstThumbnailResponseFields,
+} from "../lib/thumbnail-response";
+import {
   aggregateTelegramMessageLinkFields,
   buildStoredTelegramMessageLinkFields,
 } from "../lib/telegram-message-links";
@@ -46,6 +51,10 @@ interface BatchBody {
   parseMode?: unknown;
   metadata?: unknown;
   concurrency?: unknown;
+  include_thumbnail?: unknown;
+  includeThumbnail?: unknown;
+  thumbnail_max_bytes?: unknown;
+  thumbnailMaxBytes?: unknown;
 }
 
 type BatchSkip = {
@@ -218,6 +227,14 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         parseMode: item.parseMode ?? body.parseMode,
         metadata: hasProvidedField(item, "metadata") ? item.metadata : body.metadata,
         usernames: item.usernames ?? item.username ?? body.usernames ?? body.username,
+        // Base64 thumbnails can make a 50-item batch enormous. Keep them opt-in
+        // for batch while normal /resolve and /resolve-and-send calls default on.
+        include_thumbnail:
+          item.include_thumbnail ?? item.includeThumbnail ??
+          body.include_thumbnail ?? body.includeThumbnail ?? false,
+        thumbnail_max_bytes:
+          item.thumbnail_max_bytes ?? item.thumbnailMaxBytes ??
+          body.thumbnail_max_bytes ?? body.thumbnailMaxBytes,
       };
       delete payload.channel;
 
@@ -361,10 +378,28 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
           .filter((entry) => entry.reason === "already_sent")
           .map((entry) => entry.channelId),
       );
+      const existingRecord = existing.get(item.identity.key);
       const preflightMessageLinks = buildStoredTelegramMessageLinkFields(
-        (existing.get(item.identity.key)?.deliveries ?? []).filter((delivery) =>
+        (existingRecord?.deliveries ?? []).filter((delivery) =>
           alreadySentChannels.has(delivery.channelId)),
       );
+      const storedMetadata = existingRecord?.media.metadata &&
+        typeof existingRecord.media.metadata === "object"
+        ? existingRecord.media.metadata as Record<string, unknown>
+        : null;
+      const storedThumbnailUrl = typeof storedMetadata?.socialThumbnailUrl === "string"
+        ? storedMetadata.socialThumbnailUrl
+        : "";
+      const thumbnail = parseBooleanLike(item.payload.include_thumbnail, false) && storedThumbnailUrl
+        ? await buildThumbnailResponseFromUrl(storedThumbnailUrl, env, {
+            includeBase64: true,
+            maxBytes: positiveIntegerOrNull(item.payload.thumbnail_max_bytes),
+            source: "stored_metadata",
+          })
+        : emptyThumbnailResponse({
+            thumbnail_url: storedThumbnailUrl || null,
+            thumbnail_source: storedThumbnailUrl ? "stored_metadata" : null,
+          });
 
       relayDebug(env, traceId, "batch.item-conflict", {
         itemIndex: item.index,
@@ -375,6 +410,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         index: item.index,
         ok: false,
         ...preflightMessageLinks,
+        ...thumbnail,
         partial: false,
         conflict: true,
         status: 409,
@@ -470,9 +506,11 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   }).length;
   const processingDurationMs = Date.now() - processingStartedAt;
   const status = resolveBatchStatus(results, succeeded, conflicts);
-  const messageLinks = aggregateTelegramMessageLinkFields(
-    (succeeded > 0 ? results.filter((item) => item.ok === true) : results),
-  );
+  const successfulOrAllResults = succeeded > 0
+    ? results.filter((item) => item.ok === true)
+    : results;
+  const messageLinks = aggregateTelegramMessageLinkFields(successfulOrAllResults);
+  const thumbnail = firstThumbnailResponseFields(successfulOrAllResults);
 
   relayDebug(env, traceId, "batch.completed", {
     status,
@@ -492,6 +530,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     {
       ok: succeeded > 0,
       ...messageLinks,
+      ...thumbnail,
       partial: succeeded > 0 && failed > 0,
       summary: {
         requested: results.length,
@@ -517,6 +556,21 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     },
     status,
   );
+}
+
+function parseBooleanLike(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function positiveIntegerOrNull(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
 }
 
 function normalizeBatchConcurrency(value: unknown): number {
