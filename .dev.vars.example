@@ -11,3 +11,6 @@ RELAY_DEBUG=false
 
 # CPU-heavy parsing/remux/hashing is disabled by default.
 ENABLE_CPU_HEAVY=false
+
+# Optional: max binary thumbnail bytes encoded into Base64 responses (default 384 KiB).
+THUMBNAIL_BASE64_MAX_BYTES=393216
