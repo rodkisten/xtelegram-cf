@@ -28,6 +28,7 @@ import {
   buildDeliveryConflict,
   createDeliveryPlan,
   getAlreadySentDeliveryDetails,
+  getAlreadySentTelegramMessageLinkFields,
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
@@ -55,6 +56,7 @@ import type {
 } from "../../types";
 import { isGenericMediaLabel } from "../../validation/common";
 import { resolveMultipartMaxTotalBytes } from "./multipart-utils";
+import { buildTelegramMessageLinkFields } from "../../lib/telegram-message-links";
 
 type AlbumTransport =
   | "url"
@@ -953,6 +955,7 @@ export async function handleJsonAlbumSend(
       const changed = presentationSync.summary.changed;
       return json({
         ok: failed === 0,
+        ...getAlreadySentTelegramMessageLinkFields(plan),
         partial: failed > 0,
         conflict: false,
         action: changed > 0 ? "presentation_reconciled" : "presentation_unchanged",
@@ -1082,6 +1085,20 @@ export async function handleJsonAlbumSend(
       processAlbumChannel,
     );
     const deliveries = deliveriesByChannel.flat();
+    const messageLinks = buildTelegramMessageLinkFields(
+      deliveries.flatMap((delivery) => {
+        const messages = Array.isArray(delivery.result.result) ? delivery.result.result : [];
+        const single = messages.length > 1;
+        return messages.map((message) => ({
+          requestedChatId: delivery.requestedChatId,
+          telegramChatId: message?.chat?.id ?? null,
+          telegramUsername: message?.chat?.username ?? null,
+          messageThreadId: message?.message_thread_id ?? null,
+          messageId: message?.message_id ?? null,
+          single,
+        }));
+      }),
+    );
 
     const formatted = deliveries.map((delivery) => ({
       requestedChatId: delivery.requestedChatId,
@@ -1188,6 +1205,7 @@ export async function handleJsonAlbumSend(
       return json(
         {
           ok: false,
+          ...messageLinks,
           error: getErrorMessage(error),
           stage: "persist-delivery",
           warning:
@@ -1218,6 +1236,7 @@ export async function handleJsonAlbumSend(
     );
     const payload = {
       ok: completedChannels.length > 0,
+      ...messageLinks,
       partial: notSent.length > 0,
       media: plan.identity,
       message:
