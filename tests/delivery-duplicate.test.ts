@@ -60,6 +60,12 @@ describe("Telegram duplicate delivery details", () => {
     const plan = createDuplicatePlan();
     assert.deepEqual(getAlreadySentDeliveryDetails(plan), [
       {
+        message_id: 84,
+        message_url: "https://t.me/c/1/84?thread=65",
+        message_deeplink: "tg://privatepost?channel=1&post=84&thread=65",
+        message_ids: [84],
+        message_urls: ["https://t.me/c/1/84?thread=65"],
+        message_deeplinks: ["tg://privatepost?channel=1&post=84&thread=65"],
         channelId: "-1001",
         telegramChatId: "-1001",
         messageThreadId: 65,
@@ -79,6 +85,12 @@ describe("Telegram duplicate delivery details", () => {
 
     assert.deepEqual(conflict.duplicates, [
       {
+        message_id: 84,
+        message_url: "https://t.me/c/1/84?thread=65",
+        message_deeplink: "tg://privatepost?channel=1&post=84&thread=65",
+        message_ids: [84],
+        message_urls: ["https://t.me/c/1/84?thread=65"],
+        message_deeplinks: ["tg://privatepost?channel=1&post=84&thread=65"],
         channelId: "-1001",
         telegramChatId: "-1001",
         messageThreadId: 65,
@@ -91,5 +103,8 @@ describe("Telegram duplicate delivery details", () => {
         lastSentAt: "2026-08-21T10:00:00.000Z",
       },
     ]);
+    assert.equal(conflict.message_id, 84);
+    assert.equal(conflict.message_url, "https://t.me/c/1/84?thread=65");
+    assert.equal(conflict.message_deeplink, "tg://privatepost?channel=1&post=84&thread=65");
   });
 });
