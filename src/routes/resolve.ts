@@ -14,6 +14,11 @@ import {
 } from "../lib/debug";
 import { normalizePublicHttpUrl } from "../lib/http";
 import { aggregateTelegramMessageLinkFields } from "../lib/telegram-message-links";
+import {
+  buildSocialThumbnailResponse,
+  buildThumbnailResponseFromUrl,
+  type ThumbnailResponseFields,
+} from "../lib/thumbnail-response";
 import { normalizeHashtags } from "../lib/hashtags";
 import {
   resolveSocialMedia,
@@ -48,6 +53,10 @@ interface ResolveRequestBody {
   force?: unknown;
   force_cpu?: unknown;
   forceCpu?: unknown;
+  include_thumbnail?: unknown;
+  includeThumbnail?: unknown;
+  thumbnail_max_bytes?: unknown;
+  thumbnailMaxBytes?: unknown;
 }
 
 export async function handleResolve(
@@ -80,6 +89,14 @@ export async function handleResolve(
     return json({ ok: false, error: "url/sourceUrl must be a public HTTP(S) URL" }, 400);
   }
 
+  const includeThumbnail = resolveIncludeThumbnail(
+    body.include_thumbnail ?? body.includeThumbnail,
+    true,
+  );
+  const thumbnailMaxBytes = resolveRequestedThumbnailMaxBytes(
+    body.thumbnail_max_bytes ?? body.thumbnailMaxBytes,
+  );
+
   // An existing delivery needs only a caption edit, even if the source CDN or
   // resolver is offline. Route through /send's normal dedupe before resolving.
   if (send && body.force !== true) {
@@ -95,10 +112,25 @@ export async function handleResolve(
         const records = await checkStoredMediaDeliveries(requireRelayDb(env), [identity], destinations);
         const record = records.get(identity.key);
         if (record && destinations.every((channel) => record.deliveries.some((d) => d.channelId === channel))) {
-          return handleSend(cloneAuthorizedJsonRequest(request, {
+          const response = await handleSend(cloneAuthorizedJsonRequest(request, {
             ...body, mediaUrl: normalized.href, sourceUrl: normalized.href,
             mediaKey: record.media.key, provider: record.media.provider, channels: destinations,
           }), env);
+
+          const storedMetadata = record.media.metadata && typeof record.media.metadata === "object"
+            ? record.media.metadata as Record<string, unknown>
+            : null;
+          const storedThumbnailUrl = typeof storedMetadata?.socialThumbnailUrl === "string"
+            ? storedMetadata.socialThumbnailUrl
+            : "";
+          if (!includeThumbnail || !storedThumbnailUrl) return response;
+
+          const thumbnail = await buildThumbnailResponseFromUrl(storedThumbnailUrl, env, {
+            includeBase64: true,
+            maxBytes: thumbnailMaxBytes,
+            source: "stored_metadata",
+          });
+          return mergeJsonResponse(response, thumbnail);
         }
       } catch (error) {
         return json({ ok: false, error: getErrorMessage(error), stage: "presentation-preflight" }, 500);
@@ -161,7 +193,20 @@ export async function handleResolve(
     mediaTypes: resolution.media.map((item) => item.type),
   });
 
-  if (!send) return json({ ok: true, ...resolution });
+  const thumbnail = await buildSocialThumbnailResponse(resolution, env, {
+    includeBase64: includeThumbnail,
+    maxBytes: thumbnailMaxBytes,
+  });
+  relayDebug(env, traceId, "resolve.thumbnail", {
+    requested: includeThumbnail,
+    available: Boolean(thumbnail.thumbnail_url),
+    included: thumbnail.thumbnail_included,
+    bytes: thumbnail.thumbnail_bytes,
+    source: thumbnail.thumbnail_source,
+    error: thumbnail.thumbnail_error,
+  });
+
+  if (!send) return json({ ok: true, ...thumbnail, ...resolution });
 
   const channelValidation = normalizeTelegramChannels(body.channel, body.channels);
   if (!channelValidation.ok) {
@@ -200,6 +245,7 @@ export async function handleResolve(
     ...(resolution.authorUsername ? { socialAuthorUsername: resolution.authorUsername } : {}),
     ...(resolution.caption ? { socialResolvedCaption: resolution.caption } : {}),
     ...(resolution.title ? { socialResolvedTitle: resolution.title } : {}),
+    ...(thumbnail.thumbnail_url ? { socialThumbnailUrl: thumbnail.thumbnail_url } : {}),
   };
   const common = {
     sourceUrl: resolution.sourceUrl,
@@ -258,7 +304,7 @@ export async function handleResolve(
       env,
     );
     relayDebug(env, traceId, "resolve.album-result", { status: response.status });
-    return mergeResolveResponse(response, resolution);
+    return mergeResolveResponse(response, resolution, thumbnail);
   }
 
   const parentIdentity =
@@ -375,6 +421,7 @@ export async function handleResolve(
         succeeded === deliveries.length
           ? `Resolved and sent ${deliveries.length} media item(s)`
           : `Resolved ${deliveries.length} media item(s); ${succeeded} delivery item(s) succeeded`,
+      ...thumbnail,
       resolution,
       deliveries,
       channels,
@@ -562,7 +609,31 @@ function resolvePerItemIdentity(options: {
 async function mergeResolveResponse(
   response: Response,
   resolution: SocialResolution,
+  thumbnail: ThumbnailResponseFields,
 ): Promise<Response> {
   const payload = (await response.json()) as Record<string, unknown>;
-  return json({ ...payload, resolution }, response.status);
+  return json({ ...payload, ...thumbnail, resolution }, response.status);
+}
+
+async function mergeJsonResponse(
+  response: Response,
+  fields: object,
+): Promise<Response> {
+  const payload = (await response.json()) as Record<string, unknown>;
+  return json({ ...payload, ...fields }, response.status);
+}
+
+function resolveIncludeThumbnail(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function resolveRequestedThumbnailMaxBytes(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
 }

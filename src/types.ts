@@ -32,6 +32,8 @@ export interface Env {
   YTDLP_API_TOKEN?: string;
   DELIVERY_CLAIM_TTL_SECONDS?: string;
   SOCIAL_METADATA_TIMEOUT_MS?: string;
+  /** Maximum binary thumbnail bytes encoded into response Base64. */
+  THUMBNAIL_BASE64_MAX_BYTES?: string;
   /** Enables privacy-safe structured pipeline logs. Disabled unless true. */
   RELAY_DEBUG?: string;
   /** Sample rate for non-error debug steps when RELAY_DEBUG is enabled. */

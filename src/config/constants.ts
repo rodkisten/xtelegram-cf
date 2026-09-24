@@ -1,5 +1,5 @@
 export const SERVICE_NAME = "generic-telegram-media-relay";
-export const SERVICE_VERSION = "2.18.5";
+export const SERVICE_VERSION = "2.18.6";
 export const SERVICE_RUNTIME =
   "typescript-hls-remux-photo-video-album-ordered-fallback-d1-atomic-claims-batch-send-social-metadata-modular";
 
@@ -67,6 +67,14 @@ export const RELAY_LIMITS = Object.freeze({
   // unknown sizes are resolved with HEAD/Range requests at controlled concurrency.
   qualityProbeConcurrency: 2,
   qualityProbeTimeoutMs: 6_000,
+
+  // Thumbnail responses are bounded because Base64 expands binary data by about 33%.
+  // Normal resolve/resolve-and-send calls opt in by default; batch disables them
+  // unless include_thumbnail=true is explicitly supplied.
+  thumbnailBase64DefaultBytes: 384 * 1024,
+  thumbnailBase64HardBytes: 768 * 1024,
+  thumbnailFetchTimeoutMs: 4_500,
+  thumbnailCandidateMax: 4,
 
   // CPU safety. Exact hashing is secondary to the provider/media identity and
   // becomes disproportionately expensive on large Worker-owned videos. Large

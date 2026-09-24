@@ -1,6 +1,56 @@
-# xtelegram-cf · Telegram Media Relay v2.18.5
+# xtelegram-cf · Telegram Media Relay v2.18.6
 
-Versão atual: **2.18.5**. Veja [IDs e links das mensagens Telegram](CHANGELOG-v2.18.5.md), [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
+Versão atual: **2.18.6**. Veja [thumbnail Base64](CHANGELOG-v2.18.6.md), [IDs e links das mensagens Telegram](CHANGELOG-v2.18.5.md), [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
+
+
+## Thumbnail Base64 (v2.18.6)
+
+`POST /resolve` e `POST /resolve-and-send` agora procuram a melhor thumbnail já
+exposta pelo resolver social e, quando ela cabe no limite seguro, devolvem no
+topo da resposta:
+
+```json
+{
+  "thumbnail_url": "https://.../cover.jpg",
+  "thumbnail_base64": "/9j/4AAQSk...",
+  "thumbnail_mime_type": "image/jpeg",
+  "thumbnail_bytes": 84231,
+  "thumbnail_source": "resolver_thumbnail",
+  "thumbnail_included": true,
+  "thumbnail_error": null
+}
+```
+
+O Base64 vem **sem** prefixo `data:image/...;base64,`, pronto para a ação
+`Base64 Decode` do Shortcuts. O URL continua disponível separadamente. Para
+fotos sem uma cover dedicada, a própria foto resolvida pode ser usada como
+thumbnail.
+
+O limite padrão do binário antes da codificação é **384 KiB** e o teto absoluto
+é **768 KiB**. Pode ser ajustado globalmente com
+`THUMBNAIL_BASE64_MAX_BYTES` ou por chamada com `thumbnail_max_bytes`. Se o
+thumbnail for grande demais, o envio não falha: `thumbnail_base64` fica `null`,
+`thumbnail_url` é preservado e `thumbnail_error` informa o motivo.
+
+Para chamadas sociais normais, Base64 é habilitado por padrão. Desabilite com:
+
+```json
+{ "include_thumbnail": false }
+```
+
+`POST /send` também aceita `thumbnail_url`/`thumbnailUrl` (e aliases de
+poster/cover). Para uma foto direta sem thumbnail explícito,
+`include_thumbnail: true` permite usar a própria `mediaUrl` como fallback.
+
+No `/batch`, Base64 fica desligado por padrão para impedir que dezenas de itens
+inchem a resposta; use `include_thumbnail: true` no batch ou no item desejado.
+O primeiro thumbnail disponível também é promovido para o topo da resposta do
+batch, enquanto cada item mantém seus próprios campos.
+
+Quando uma entrega já existente é encontrada no D1, o relay reaproveita
+`socialThumbnailUrl` persistido na metadata para reconstruir o Base64 sem
+precisar resolver novamente a publicação. Registros antigos, anteriores à
+v2.18.6, podem não ter esse URL salvo.
 
 ## Contrato flat de mensagem Telegram (v2.18.5)
 

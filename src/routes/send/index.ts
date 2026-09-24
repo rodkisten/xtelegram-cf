@@ -8,6 +8,7 @@ import { handleSingleSend } from "./single";
 import { relayDebug, relayTraceId } from "../../lib/debug";
 import { cpuHeavyRequestValue, resolveCpuHeavyEnabled } from "../../lib/cpu-policy";
 import { withMediaVariants } from "../../lib/media-variants-response";
+import { buildThumbnailResponseFromUrl } from "../../lib/thumbnail-response";
 
 export async function handleSend(request: Request, env: Env): Promise<Response> {
   const traceId = relayTraceId(request);
@@ -54,7 +55,7 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     });
     const response = await handleJsonAlbumSend(albumValidation.value, env, traceId);
     relayDebug(env, traceId, "send.album-completed", { status: response.status });
-    return withMediaVariants(
+    const variantsResponse = await withMediaVariants(
       response,
       albumValidation.value.items.flatMap((item) => [
         {
@@ -69,6 +70,7 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
         ...item.mediaVariants,
       ]),
     );
+    return withRequestedThumbnail(variantsResponse, bodyRecord, env);
   }
   const validation = validateRequestBody(body);
   if (!validation.ok) {
@@ -89,7 +91,7 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
   });
   const response = await handleSingleSend(request, validation.value, env);
   relayDebug(env, traceId, "send.single-completed", { status: response.status });
-  return withMediaVariants(response, [
+  const variantsResponse = await withMediaVariants(response, [
     {
       mediaUrl: validation.value.mediaUrl,
       quality: validation.value.metadata?.resolvedQuality || null,
@@ -101,4 +103,79 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     },
     ...validation.value.mediaVariants,
   ]);
+  return withRequestedThumbnail(variantsResponse, bodyRecord, env);
+}
+
+async function withRequestedThumbnail(
+  response: Response,
+  body: Record<string, unknown>,
+  env: Env,
+): Promise<Response> {
+  const explicitUrl = firstText(
+    body.thumbnail_url,
+    body.thumbnailUrl,
+    body.poster_url,
+    body.posterUrl,
+    body.cover_url,
+    body.coverUrl,
+  );
+  const includeValue = body.include_thumbnail ?? body.includeThumbnail;
+  const includeRequested = parseBooleanLike(includeValue, Boolean(explicitUrl));
+
+  let thumbnailUrl = explicitUrl;
+  if (!thumbnailUrl && includeRequested) {
+    const mediaType = String(body.mediaType || body.media_type || "").trim().toLowerCase();
+    if (mediaType === "photo") {
+      thumbnailUrl = firstText(body.mediaUrl, body.photoUrl, body.url);
+    }
+  }
+
+  if (!thumbnailUrl) return response;
+
+  const thumbnail = await buildThumbnailResponseFromUrl(thumbnailUrl, env, {
+    includeBase64: includeRequested,
+    maxBytes: positiveIntegerOrNull(body.thumbnail_max_bytes ?? body.thumbnailMaxBytes),
+    source: explicitUrl ? "request_thumbnail" : "resolved_photo",
+  });
+
+  const contentType = response.headers.get("Content-Type") || "";
+  if (!/application\/json/i.test(contentType)) return response;
+
+  let payload: unknown;
+  try { payload = await response.json(); } catch { return response; }
+  const merged = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? { ...(payload as Record<string, unknown>), ...thumbnail }
+    : { ok: response.ok, result: payload, ...thumbnail };
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Length");
+  headers.set("Content-Type", "application/json; charset=utf-8");
+  headers.set("Cache-Control", "no-store");
+  return new Response(JSON.stringify(merged, null, 2), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function parseBooleanLike(value: unknown, fallback: boolean): boolean {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function positiveIntegerOrNull(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
 }
