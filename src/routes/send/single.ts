@@ -28,6 +28,7 @@ import {
   buildDeliveryConflict,
   createDeliveryPlan,
   getAlreadySentDeliveryDetails,
+  getAlreadySentTelegramMessageLinkFields,
   applyContentDuplicateMatches,
   markChannelsPersisted,
   releasePendingDeliveryClaims,
@@ -45,6 +46,7 @@ import {
   sendPreparedMediaToChats,
 } from "../../services/telegram-delivery";
 import type { Env, PreparedMedia, RelayInput } from "../../types";
+import { buildTelegramMessageLinkFields } from "../../lib/telegram-message-links";
 
 export async function handleSingleSend(
   request: Request,
@@ -187,6 +189,7 @@ export async function handleSingleSend(
       const changed = presentationSync.summary.changed;
       return json({
         ok: failed === 0,
+        ...getAlreadySentTelegramMessageLinkFields(plan),
         partial: failed > 0,
         conflict: false,
         action: changed > 0 ? "presentation_reconciled" : "presentation_unchanged",
@@ -453,6 +456,15 @@ export async function handleSingleSend(
     });
     const failedDeliveries = deliveries.filter((entry) => !entry.result.ok);
     const successfulDeliveries = deliveries.filter((entry) => entry.result.ok);
+    const messageLinks = buildTelegramMessageLinkFields(
+      successfulDeliveries.map((entry) => ({
+        requestedChatId: entry.requestedChatId,
+        telegramChatId: entry.result.result?.chat?.id ?? null,
+        telegramUsername: entry.result.result?.chat?.username ?? null,
+        messageThreadId: entry.result.result?.message_thread_id ?? null,
+        messageId: entry.result.result?.message_id ?? null,
+      })),
+    );
 
     relayDebug(env, traceId, "single.telegram.completed", {
       attempted: deliveries.length,
@@ -509,6 +521,7 @@ export async function handleSingleSend(
       return json(
         {
           ok: false,
+          ...messageLinks,
           error: getErrorMessage(error),
           stage: "persist-delivery",
           warning:
@@ -544,6 +557,7 @@ export async function handleSingleSend(
     const firstMessage = successfulDeliveries[0]?.result.result;
     const payload = {
       ok: successfulDeliveries.length > 0,
+      ...messageLinks,
       partial: notSent.length > 0,
       conflict:
         successfulDeliveries.length === 0 &&

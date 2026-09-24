@@ -11,6 +11,7 @@ import { json } from "../../http/response";
 import { getErrorMessage } from "../../lib/errors";
 import { relayDebug, relayTraceId } from "../../lib/debug";
 import { normalizePublicHttpUrl } from "../../lib/http";
+import { buildTelegramMessageLinkFields } from "../../lib/telegram-message-links";
 import { parseTelegramDestination } from "../../services/channels";
 import {
   reconcileTelegramPresentation,
@@ -112,6 +113,15 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
   if (!messageIds.length) {
     return json({ ok: false, error: "messageId/messageIds from Telegram is required" }, 400);
   }
+  const messageLinks = buildTelegramMessageLinkFields(
+    messageIds.map((messageId) => ({
+      requestedChatId: destination.key,
+      telegramChatId: telegramChatId || destination.chatId,
+      messageThreadId: messageThreadId ?? destination.messageThreadId,
+      messageId,
+      single: messageIds.length > 1,
+    })),
+  );
 
   const identitySeed = sourceUrl || pageUrl || resolvedMediaUrl;
   if (!mediaKey && !mediaId && !identitySeed) {
@@ -178,6 +188,7 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
       const failed = summarizePresentationSync(presentationResults).failed;
       return json({
         ok: failed === 0,
+        ...messageLinks,
         partial: failed > 0,
         alreadyRegistered: true,
         media: identity,
@@ -223,6 +234,7 @@ export async function handleMediaRegister(request: Request, env: Env): Promise<R
 
     return json({
       ok: true,
+      ...messageLinks,
       alreadyRegistered: false,
       media: identity,
       channels: {

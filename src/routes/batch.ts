@@ -17,6 +17,10 @@ import { getErrorMessage } from "../lib/errors";
 import { resolveCpuHeavyEnabled } from "../lib/cpu-policy";
 import { debugError, relayDebug, relayTraceId } from "../lib/debug";
 import {
+  aggregateTelegramMessageLinkFields,
+  buildStoredTelegramMessageLinkFields,
+} from "../lib/telegram-message-links";
+import {
   resolveTelegramChatIdsForEnv,
 } from "../services/channels";
 import { detectSocialProvider } from "../social";
@@ -352,6 +356,16 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
       : item.channels;
 
     if (item.identity && channelsToSend.length === 0) {
+      const alreadySentChannels = new Set(
+        item.preSkipped
+          .filter((entry) => entry.reason === "already_sent")
+          .map((entry) => entry.channelId),
+      );
+      const preflightMessageLinks = buildStoredTelegramMessageLinkFields(
+        (existing.get(item.identity.key)?.deliveries ?? []).filter((delivery) =>
+          alreadySentChannels.has(delivery.channelId)),
+      );
+
       relayDebug(env, traceId, "batch.item-conflict", {
         itemIndex: item.index,
         direct: item.isDirect,
@@ -360,6 +374,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
       return {
         index: item.index,
         ok: false,
+        ...preflightMessageLinks,
         partial: false,
         conflict: true,
         status: 409,
@@ -455,6 +470,9 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   }).length;
   const processingDurationMs = Date.now() - processingStartedAt;
   const status = resolveBatchStatus(results, succeeded, conflicts);
+  const messageLinks = aggregateTelegramMessageLinkFields(
+    (succeeded > 0 ? results.filter((item) => item.ok === true) : results),
+  );
 
   relayDebug(env, traceId, "batch.completed", {
     status,
@@ -473,6 +491,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
   return json(
     {
       ok: succeeded > 0,
+      ...messageLinks,
       partial: succeeded > 0 && failed > 0,
       summary: {
         requested: results.length,

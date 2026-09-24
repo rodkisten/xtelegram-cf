@@ -9,6 +9,7 @@ import {
   type MediaIdentityInput,
 } from "../db";
 import type { Env } from "../types";
+import { buildStoredTelegramMessageLinkFields } from "../lib/telegram-message-links";
 
 export type DeliverySkip =
   | { channelId: string; reason: "already_sent" }
@@ -146,8 +147,10 @@ export function buildDeliveryConflict(plan: DeliveryPlan, subject = "Media") {
   const hasInProgress = plan.skippedInProgress.length > 0;
   const hasContentDuplicate = plan.skippedContentDuplicates.length > 0;
   const duplicateDeliveries = getAlreadySentDeliveryDetails(plan);
+  const messageLinks = getExistingTelegramMessageLinkFields(plan);
   return {
     ok: false,
+    ...messageLinks,
     conflict: true,
     error: hasInProgress
       ? `${subject} delivery is already in progress for the requested Telegram channel(s).`
@@ -189,6 +192,24 @@ export function getAlreadySentDeliveryDetails(plan: DeliveryPlan) {
     .map(formatDuplicateDelivery);
 }
 
+/** Flat Telegram message fields for D1-backed duplicates/presentation-only paths. */
+export function getAlreadySentTelegramMessageLinkFields(plan: DeliveryPlan) {
+  const skippedChannels = new Set(plan.skippedAlreadySent.map((entry) => entry.channelId));
+  return buildStoredTelegramMessageLinkFields(
+    plan.claim.alreadySentDeliveries.filter((delivery) => skippedChannels.has(delivery.channelId)),
+  );
+}
+
+/**
+ * Returns links for any existing Telegram message that caused a delivery conflict,
+ * including provider-key duplicates and content-level duplicates.
+ */
+export function getExistingTelegramMessageLinkFields(plan: DeliveryPlan) {
+  const alreadySent = plan.claim.alreadySentDeliveries.filter((delivery) =>
+    plan.skippedAlreadySent.some((entry) => entry.channelId === delivery.channelId));
+  const contentDuplicates = plan.contentDuplicates.flatMap((match) => match.deliveries);
+  return buildStoredTelegramMessageLinkFields([...alreadySent, ...contentDuplicates]);
+}
 
 /** Formats content-level duplicate evidence for clients such as Scriptable and Shortcuts. */
 function formatContentDuplicate(match: ContentDuplicateMatch) {
@@ -206,7 +227,9 @@ function formatContentDuplicate(match: ContentDuplicateMatch) {
 }
 
 function formatDuplicateDelivery(delivery: DeliveryClaimResult["alreadySentDeliveries"][number]) {
+  const messageLinks = buildStoredTelegramMessageLinkFields([delivery]);
   return {
+    ...messageLinks,
     channelId: delivery.channelId,
     telegramChatId: delivery.telegramChatId,
     messageThreadId: delivery.messageThreadId,

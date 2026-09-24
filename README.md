@@ -1,6 +1,23 @@
-# xtelegram-cf · Telegram Media Relay v2.18.4
+# xtelegram-cf · Telegram Media Relay v2.18.5
 
-Versão atual: **2.18.4**. Veja [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
+Versão atual: **2.18.5**. Veja [IDs e links das mensagens Telegram](CHANGELOG-v2.18.5.md), [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
+
+## Contrato flat de mensagem Telegram (v2.18.5)
+
+Sempre que uma operação conhece uma mensagem Telegram criada ou já persistida no D1, a resposta expõe no topo:
+
+```json
+{
+  "message_id": 12345,
+  "message_url": "https://t.me/c/1234567890/12345",
+  "message_deeplink": "tg://privatepost?channel=1234567890&post=12345",
+  "message_ids": [12345],
+  "message_urls": ["https://t.me/c/1234567890/12345"],
+  "message_deeplinks": ["tg://privatepost?channel=1234567890&post=12345"]
+}
+```
+
+Os campos singulares apontam para a primeira mensagem; os arrays preservam todos os IDs/links de álbuns, multipart e múltiplos destinos. Em chats que não possuem formato de message link suportado pelo Telegram, o ID continua disponível e os campos de URL podem ser `null`/arrays vazios.
 
 
 
