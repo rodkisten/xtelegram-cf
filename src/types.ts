@@ -167,10 +167,12 @@ export interface TelegramUpdate {
 
 export interface TelegramMessage {
   message_id?: number;
+  message_thread_id?: number;
   caption?: string;
   chat?: {
     id?: number | string;
     title?: string;
+    username?: string;
   };
 }
 
