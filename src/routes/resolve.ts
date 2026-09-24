@@ -13,6 +13,7 @@ import {
   relayTraceId,
 } from "../lib/debug";
 import { normalizePublicHttpUrl } from "../lib/http";
+import { aggregateTelegramMessageLinkFields } from "../lib/telegram-message-links";
 import { normalizeHashtags } from "../lib/hashtags";
 import {
   resolveSocialMedia,
@@ -334,6 +335,9 @@ export async function handleResolve(
     deliveries,
     channelValidation.value,
   );
+  const messageLinks = aggregateTelegramMessageLinkFields(
+    deliveries.map((delivery) => delivery.result),
+  );
   const succeeded = deliveries.filter((delivery) => delivery.status >= 200 && delivery.status < 300).length;
   const allConflicts = deliveries.length > 0 && deliveries.every((delivery) => delivery.status === 409);
   const allRequestedCovered =
@@ -365,6 +369,7 @@ export async function handleResolve(
   return json(
     {
       ok: succeeded > 0,
+      ...messageLinks,
       partial,
       message:
         succeeded === deliveries.length
