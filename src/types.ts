@@ -47,6 +47,7 @@ export interface Env {
 export type ParseMode = "HTML" | "MarkdownV2";
 export type MediaType = "video" | "audio" | "document" | "photo";
 export type AlbumMediaType = "video" | "photo";
+export type RelayForceMode = "resend" | "forward" | null;
 
 
 export interface RelayMediaVariant {
@@ -83,6 +84,8 @@ export interface RelayInput {
   mediaId: string | null;
   mediaKey: string | null;
   force: boolean;
+  /** `resend` re-fetches/re-sends media; `forward` copies the latest stored Telegram message(s). */
+  forceMode: RelayForceMode;
   /** Enables CPU-heavy processing for this request only. */
   forceCpu: boolean;
 }
@@ -119,6 +122,8 @@ export interface RelayAlbumInput {
   mediaId: string | null;
   mediaKey: string | null;
   force: boolean;
+  /** `resend` re-fetches/re-sends media; `forward` copies the latest stored Telegram message(s). */
+  forceMode: RelayForceMode;
   /** Enables CPU-heavy processing for this request only. */
   forceCpu: boolean;
 }
