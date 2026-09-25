@@ -11,17 +11,25 @@ export interface ThumbnailResponseFields {
   thumbnail_source: string | null;
   thumbnail_included: boolean;
   thumbnail_error: string | null;
+  thumbnail_width: number | null;
+  thumbnail_height: number | null;
+  thumbnail_source_width: number | null;
+  thumbnail_source_height: number | null;
+  thumbnail_resized: boolean;
 }
 
 interface ThumbnailCandidate {
   url: string;
   source: string;
   headers: Record<string, string>;
+  sourceWidth: number | null;
+  sourceHeight: number | null;
 }
 
 interface ThumbnailOptions {
   includeBase64?: boolean;
   maxBytes?: number | null;
+  maxWidth?: number | null;
 }
 
 interface ThumbnailFetchSuccess {
@@ -30,6 +38,9 @@ interface ThumbnailFetchSuccess {
   base64: string;
   mimeType: string;
   bytes: number;
+  width: number | null;
+  height: number | null;
+  resized: boolean;
 }
 
 interface ThumbnailFetchFailure {
@@ -52,6 +63,11 @@ export function emptyThumbnailResponse(
     thumbnail_source: null,
     thumbnail_included: false,
     thumbnail_error: null,
+    thumbnail_width: null,
+    thumbnail_height: null,
+    thumbnail_source_width: null,
+    thumbnail_source_height: null,
+    thumbnail_resized: false,
     ...overrides,
   };
 }
@@ -72,6 +88,11 @@ export function firstThumbnailResponseFields(values: unknown[]): ThumbnailRespon
       thumbnail_source: cleanString(record.thumbnail_source),
       thumbnail_included: record.thumbnail_included === true || Boolean(base64),
       thumbnail_error: cleanString(record.thumbnail_error),
+      thumbnail_width: positiveInteger(record.thumbnail_width),
+      thumbnail_height: positiveInteger(record.thumbnail_height),
+      thumbnail_source_width: positiveInteger(record.thumbnail_source_width),
+      thumbnail_source_height: positiveInteger(record.thumbnail_source_height),
+      thumbnail_resized: record.thumbnail_resized === true,
     };
   }
   return emptyThumbnailResponse();
@@ -84,6 +105,15 @@ export function resolveThumbnailMaxBytes(
   const configured = positiveInteger(env.THUMBNAIL_BASE64_MAX_BYTES);
   const desired = positiveInteger(requested) ?? configured ?? RELAY_LIMITS.thumbnailBase64DefaultBytes;
   return Math.min(RELAY_LIMITS.thumbnailBase64HardBytes, Math.max(1, desired));
+}
+
+export function resolveThumbnailMaxWidth(
+  env: Env,
+  requested?: number | null,
+): number {
+  const configured = positiveInteger(env.THUMBNAIL_MAX_WIDTH);
+  const desired = positiveInteger(requested) ?? configured ?? RELAY_LIMITS.thumbnailMaxWidthDefault;
+  return Math.min(RELAY_LIMITS.thumbnailMaxWidthHard, Math.max(1, desired));
 }
 
 export function firstSocialThumbnailUrl(resolution: SocialResolution): string | null {
@@ -118,6 +148,8 @@ export async function buildThumbnailResponseFromUrl(
       url: normalized.href,
       source: options.source || "stored_metadata",
       headers: thumbnailHeadersForUrl(normalized.href),
+      sourceWidth: null,
+      sourceHeight: null,
     },
   ], env, options);
 }
@@ -129,11 +161,14 @@ async function buildThumbnailResponse(
 ): Promise<ThumbnailResponseFields> {
   const first = candidates[0]!;
   const includeBase64 = options.includeBase64 !== false;
+  const maxWidth = resolveThumbnailMaxWidth(env, options.maxWidth);
 
   if (!includeBase64) {
     return emptyThumbnailResponse({
       thumbnail_url: first.url,
       thumbnail_source: first.source,
+      thumbnail_source_width: first.sourceWidth,
+      thumbnail_source_height: first.sourceHeight,
     });
   }
 
@@ -141,7 +176,7 @@ async function buildThumbnailResponse(
   let lastError: string | null = null;
 
   for (const candidate of candidates.slice(0, RELAY_LIMITS.thumbnailCandidateMax)) {
-    const fetched = await fetchThumbnail(candidate, maxBytes);
+    const fetched = await fetchThumbnail(candidate, maxBytes, maxWidth);
     if (!fetched.ok) {
       lastError = fetched.error;
       continue;
@@ -155,6 +190,11 @@ async function buildThumbnailResponse(
       thumbnail_source: candidate.source,
       thumbnail_included: true,
       thumbnail_error: null,
+      thumbnail_width: fetched.width,
+      thumbnail_height: fetched.height,
+      thumbnail_source_width: candidate.sourceWidth,
+      thumbnail_source_height: candidate.sourceHeight,
+      thumbnail_resized: fetched.resized,
     };
   }
 
@@ -162,6 +202,8 @@ async function buildThumbnailResponse(
     thumbnail_url: first.url,
     thumbnail_source: first.source,
     thumbnail_error: lastError || "thumbnail_fetch_failed",
+    thumbnail_source_width: first.sourceWidth,
+    thumbnail_source_height: first.sourceHeight,
   });
 }
 
@@ -175,6 +217,8 @@ function collectSocialThumbnailCandidates(
     rawUrl: string | null | undefined,
     source: string,
     headers?: Record<string, string>,
+    sourceWidth?: number | null,
+    sourceHeight?: number | null,
   ) => {
     const normalized = normalizePublicHttpUrl(rawUrl);
     if (!normalized || seen.has(normalized.href)) return;
@@ -185,13 +229,15 @@ function collectSocialThumbnailCandidates(
       headers: headers && Object.keys(headers).length
         ? headers
         : thumbnailHeadersForUrl(normalized.href),
+      sourceWidth: positiveInteger(sourceWidth),
+      sourceHeight: positiveInteger(sourceHeight),
     });
   };
 
   for (const item of resolution.media) {
-    add(item.thumbnail, "resolver_thumbnail");
+    add(item.thumbnail, "resolver_thumbnail", undefined, item.width, item.height);
     for (const variant of item.variants || []) {
-      add(variant.thumbnail, "resolver_variant_thumbnail");
+      add(variant.thumbnail, "resolver_variant_thumbnail", undefined, variant.width, variant.height);
     }
   }
 
@@ -199,7 +245,7 @@ function collectSocialThumbnailCandidates(
   // when the provider does not expose a dedicated poster/cover URL.
   for (const item of resolution.media) {
     if (item.type === "photo") {
-      add(item.url, "resolved_photo", item.mediaHeaders);
+      add(item.url, "resolved_photo", item.mediaHeaders, item.width, item.height);
     }
   }
 
@@ -209,6 +255,7 @@ function collectSocialThumbnailCandidates(
 async function fetchThumbnail(
   candidate: ThumbnailCandidate,
   maxBytes: number,
+  maxWidth: number,
 ): Promise<ThumbnailFetchSuccess | ThumbnailFetchFailure> {
   const controller = new AbortController();
   const timer = setTimeout(
@@ -217,14 +264,7 @@ async function fetchThumbnail(
   );
 
   try {
-    const response = await fetchPublic(candidate.url, {
-      method: "GET",
-      headers: {
-        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        ...candidate.headers,
-      },
-      signal: controller.signal,
-    });
+    const response = await fetchThumbnailWithResize(candidate, maxWidth, controller.signal);
 
     if (!response.ok) {
       try { await response.body?.cancel(); } catch {}
@@ -249,12 +289,24 @@ async function fetchThumbnail(
     const bytes = await readBoundedBody(response, maxBytes);
     if (!bytes) return { ok: false, error: "thumbnail_too_large" };
 
+    const dimensions = extractImageDimensions(bytes, mimeType);
+    const resized = inferThumbnailResized(
+      candidate.sourceWidth,
+      candidate.sourceHeight,
+      dimensions.width,
+      dimensions.height,
+      maxWidth,
+    );
+
     return {
       ok: true,
       url: response.url || candidate.url,
       base64: bytesToBase64(bytes),
       mimeType,
       bytes: bytes.byteLength,
+      width: dimensions.width,
+      height: dimensions.height,
+      resized,
     };
   } catch (error) {
     return {
@@ -265,6 +317,39 @@ async function fetchThumbnail(
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function fetchThumbnailWithResize(
+  candidate: ThumbnailCandidate,
+  maxWidth: number,
+  signal: AbortSignal,
+): Promise<Response> {
+  const baseInit = {
+    method: "GET",
+    headers: {
+      Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+      ...candidate.headers,
+    },
+    signal,
+  } as RequestInit;
+
+  try {
+    return await fetchPublic(candidate.url, {
+      ...baseInit,
+      cf: {
+        image: {
+          width: maxWidth,
+          fit: "scale-down",
+          quality: RELAY_LIMITS.thumbnailResizeQuality,
+          format: "jpeg",
+          metadata: "none",
+          anim: false,
+        },
+      },
+    } as RequestInit & { cf: unknown });
+  } catch {
+    return fetchPublic(candidate.url, baseInit);
   }
 }
 
@@ -335,6 +420,128 @@ function normalizeImageMimeType(
   if (/\.gif$/.test(pathname)) return "image/gif";
   if (/\.avif$/.test(pathname)) return "image/avif";
   return null;
+}
+
+function extractImageDimensions(
+  bytes: Uint8Array,
+  mimeType: string,
+): { width: number | null; height: number | null } {
+  try {
+    if (mimeType === "image/png") return extractPngDimensions(bytes);
+    if (mimeType === "image/gif") return extractGifDimensions(bytes);
+    if (mimeType === "image/webp") return extractWebpDimensions(bytes);
+    if (mimeType === "image/jpeg" || mimeType === "image/jpg") {
+      return extractJpegDimensions(bytes);
+    }
+  } catch {}
+  return { width: null, height: null };
+}
+
+function extractPngDimensions(bytes: Uint8Array): { width: number | null; height: number | null } {
+  if (bytes.byteLength < 24) return { width: null, height: null };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (
+    bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47 ||
+    bytes[4] !== 0x0d || bytes[5] !== 0x0a || bytes[6] !== 0x1a || bytes[7] !== 0x0a
+  ) {
+    return { width: null, height: null };
+  }
+  return {
+    width: view.getUint32(16),
+    height: view.getUint32(20),
+  };
+}
+
+function extractGifDimensions(bytes: Uint8Array): { width: number | null; height: number | null } {
+  if (bytes.byteLength < 10) return { width: null, height: null };
+  const header = String.fromCharCode(...bytes.subarray(0, 6));
+  if (header !== "GIF87a" && header !== "GIF89a") return { width: null, height: null };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return {
+    width: view.getUint16(6, true),
+    height: view.getUint16(8, true),
+  };
+}
+
+function extractJpegDimensions(bytes: Uint8Array): { width: number | null; height: number | null } {
+  if (bytes.byteLength < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    return { width: null, height: null };
+  }
+
+  let offset = 2;
+  while (offset + 9 < bytes.byteLength) {
+    while (offset < bytes.byteLength && bytes[offset] !== 0xff) offset += 1;
+    while (offset < bytes.byteLength && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.byteLength) break;
+    const marker = bytes[offset]!;
+    offset += 1;
+    if (marker === 0xd9 || marker === 0xda) break;
+    if (offset + 1 >= bytes.byteLength) break;
+    const length = (bytes[offset]! << 8) | bytes[offset + 1]!;
+    if (length < 2 || offset + length > bytes.byteLength) break;
+    const isSof = (
+      (marker >= 0xc0 && marker <= 0xc3) ||
+      (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb) ||
+      (marker >= 0xcd && marker <= 0xcf)
+    );
+    if (isSof && length >= 7) {
+      const height = (bytes[offset + 3]! << 8) | bytes[offset + 4]!;
+      const width = (bytes[offset + 5]! << 8) | bytes[offset + 6]!;
+      return { width, height };
+    }
+    offset += length;
+  }
+
+  return { width: null, height: null };
+}
+
+function extractWebpDimensions(bytes: Uint8Array): { width: number | null; height: number | null } {
+  if (bytes.byteLength < 30) return { width: null, height: null };
+  const riff = String.fromCharCode(...bytes.subarray(0, 4));
+  const webp = String.fromCharCode(...bytes.subarray(8, 12));
+  if (riff !== "RIFF" || webp !== "WEBP") return { width: null, height: null };
+
+  const chunk = String.fromCharCode(...bytes.subarray(12, 16));
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  if (chunk === "VP8X" && bytes.byteLength >= 30) {
+    const width = 1 + bytes[24]! + (bytes[25]! << 8) + (bytes[26]! << 16);
+    const height = 1 + bytes[27]! + (bytes[28]! << 8) + (bytes[29]! << 16);
+    return { width, height };
+  }
+
+  if (chunk === "VP8 " && bytes.byteLength >= 30) {
+    return {
+      width: view.getUint16(26, true) & 0x3fff,
+      height: view.getUint16(28, true) & 0x3fff,
+    };
+  }
+
+  if (chunk === "VP8L" && bytes.byteLength >= 25) {
+    const b0 = bytes[21]!;
+    const b1 = bytes[22]!;
+    const b2 = bytes[23]!;
+    const b3 = bytes[24]!;
+    const width = 1 + (((b1 & 0x3f) << 8) | b0);
+    const height = 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6));
+    return { width, height };
+  }
+
+  return { width: null, height: null };
+}
+
+function inferThumbnailResized(
+  sourceWidth: number | null,
+  sourceHeight: number | null,
+  finalWidth: number | null,
+  finalHeight: number | null,
+  maxWidth: number,
+): boolean {
+  if (sourceWidth && finalWidth && sourceWidth > finalWidth) return true;
+  if (sourceHeight && finalHeight && sourceHeight > finalHeight) return true;
+  if (finalWidth && finalWidth > maxWidth) return true;
+  return false;
 }
 
 function thumbnailHeadersForUrl(url: string): Record<string, string> {
