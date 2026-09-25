@@ -20,6 +20,7 @@ import {
   buildThumbnailResponseFromUrl,
   emptyThumbnailResponse,
   firstThumbnailResponseFields,
+  resolveThumbnailMaxWidth,
 } from "../lib/thumbnail-response";
 import {
   aggregateTelegramMessageLinkFields,
@@ -55,6 +56,8 @@ interface BatchBody {
   includeThumbnail?: unknown;
   thumbnail_max_bytes?: unknown;
   thumbnailMaxBytes?: unknown;
+  thumbnail_max_width?: unknown;
+  thumbnailMaxWidth?: unknown;
 }
 
 type BatchSkip = {
@@ -235,6 +238,9 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         thumbnail_max_bytes:
           item.thumbnail_max_bytes ?? item.thumbnailMaxBytes ??
           body.thumbnail_max_bytes ?? body.thumbnailMaxBytes,
+        thumbnail_max_width:
+          item.thumbnail_max_width ?? item.thumbnailMaxWidth ??
+          body.thumbnail_max_width ?? body.thumbnailMaxWidth,
       };
       delete payload.channel;
 
@@ -394,6 +400,10 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         ? await buildThumbnailResponseFromUrl(storedThumbnailUrl, env, {
             includeBase64: true,
             maxBytes: positiveIntegerOrNull(item.payload.thumbnail_max_bytes),
+            maxWidth: resolveThumbnailMaxWidth(
+              env,
+              positiveIntegerOrNull(item.payload.thumbnail_max_width),
+            ),
             source: "stored_metadata",
           })
         : emptyThumbnailResponse({

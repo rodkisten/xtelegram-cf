@@ -34,6 +34,8 @@ export interface Env {
   SOCIAL_METADATA_TIMEOUT_MS?: string;
   /** Maximum binary thumbnail bytes encoded into response Base64. */
   THUMBNAIL_BASE64_MAX_BYTES?: string;
+  /** Maximum width used when auto-resizing response thumbnails. */
+  THUMBNAIL_MAX_WIDTH?: string;
   /** Enables privacy-safe structured pipeline logs. Disabled unless true. */
   RELAY_DEBUG?: string;
   /** Sample rate for non-error debug steps when RELAY_DEBUG is enabled. */

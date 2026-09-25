@@ -17,6 +17,7 @@ import { aggregateTelegramMessageLinkFields } from "../lib/telegram-message-link
 import {
   buildSocialThumbnailResponse,
   buildThumbnailResponseFromUrl,
+  resolveThumbnailMaxWidth,
   type ThumbnailResponseFields,
 } from "../lib/thumbnail-response";
 import { normalizeHashtags } from "../lib/hashtags";
@@ -57,6 +58,8 @@ interface ResolveRequestBody {
   includeThumbnail?: unknown;
   thumbnail_max_bytes?: unknown;
   thumbnailMaxBytes?: unknown;
+  thumbnail_max_width?: unknown;
+  thumbnailMaxWidth?: unknown;
 }
 
 export async function handleResolve(
@@ -96,6 +99,10 @@ export async function handleResolve(
   const thumbnailMaxBytes = resolveRequestedThumbnailMaxBytes(
     body.thumbnail_max_bytes ?? body.thumbnailMaxBytes,
   );
+  const thumbnailMaxWidth = resolveRequestedThumbnailMaxWidth(
+    env,
+    body.thumbnail_max_width ?? body.thumbnailMaxWidth,
+  );
 
   // An existing delivery needs only a caption edit, even if the source CDN or
   // resolver is offline. Route through /send's normal dedupe before resolving.
@@ -128,6 +135,7 @@ export async function handleResolve(
           const thumbnail = await buildThumbnailResponseFromUrl(storedThumbnailUrl, env, {
             includeBase64: true,
             maxBytes: thumbnailMaxBytes,
+            maxWidth: thumbnailMaxWidth,
             source: "stored_metadata",
           });
           return mergeJsonResponse(response, thumbnail);
@@ -196,6 +204,7 @@ export async function handleResolve(
   const thumbnail = await buildSocialThumbnailResponse(resolution, env, {
     includeBase64: includeThumbnail,
     maxBytes: thumbnailMaxBytes,
+    maxWidth: thumbnailMaxWidth,
   });
   relayDebug(env, traceId, "resolve.thumbnail", {
     requested: includeThumbnail,
@@ -636,4 +645,9 @@ function resolveIncludeThumbnail(value: unknown, fallback: boolean): boolean {
 function resolveRequestedThumbnailMaxBytes(value: unknown): number | null {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
+}
+
+function resolveRequestedThumbnailMaxWidth(env: Env, value: unknown): number {
+  const number = Number(value);
+  return resolveThumbnailMaxWidth(env, Number.isFinite(number) && number > 0 ? Math.floor(number) : null);
 }
