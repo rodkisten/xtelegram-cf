@@ -1,7 +1,7 @@
 import { sanitizeDeliveryCaption } from "../lib/social-caption";
 import { normalizeOptionalSourceUrl, normalizePublicHttpUrl } from "../lib/http";
 import { normalizeHashtags } from "../lib/hashtags";
-import type { AlbumMediaType, RelayAlbumInput, RelayInput, RelayMediaVariant } from "../types";
+import type { AlbumMediaType, RelayAlbumInput, RelayForceMode, RelayInput, RelayMediaVariant } from "../types";
 import {
   normalizeCaption,
   hasProvidedField,
@@ -62,6 +62,8 @@ export function validateRequestBody(body: unknown): SendValidationResult {
   const hashtagValidation = normalizeHashtags(record.hashtags ?? record.hashtag);
   if (!hashtagValidation.ok) return { ok: false, error: hashtagValidation.error };
 
+  const forceMode = normalizeRelayForceMode(record.force);
+
   return {
     ok: true,
     value: {
@@ -86,7 +88,8 @@ export function validateRequestBody(body: unknown): SendValidationResult {
         ? record.presentationMetadata : record.metadata),
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),
-      force: record.force === true,
+      force: forceMode !== null,
+      forceMode,
       forceCpu: record.force_cpu === true || record.forceCpu === true,
     },
   };
@@ -205,6 +208,7 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
   const explicitCaption = normalizeCaption(record.caption);
   const hashtagValidation = normalizeHashtags(record.hashtags ?? record.hashtag);
   if (!hashtagValidation.ok) return { kind: "invalid", error: hashtagValidation.error };
+  const forceMode = normalizeRelayForceMode(record.force);
 
   return {
     kind: "valid",
@@ -227,10 +231,22 @@ export function validateAlbumRequestBody(body: unknown): AlbumValidationResult {
         ? record.presentationMetadata : record.metadata),
       mediaId: normalizeNullableText(record.mediaId, 240),
       mediaKey: normalizeNullableText(record.mediaKey, 300),
-      force: record.force === true,
+      force: forceMode !== null,
+      forceMode,
       forceCpu: record.force_cpu === true || record.forceCpu === true,
     },
   };
+}
+
+export function normalizeRelayForceMode(value: unknown): RelayForceMode {
+  if (value === true) return "resend";
+  if (typeof value === "string" && value.trim().toLowerCase() === "forward") return "forward";
+  return null;
+}
+
+export function normalizeRelayForceValue(value: unknown): boolean | "forward" {
+  const mode = normalizeRelayForceMode(value);
+  return mode === "forward" ? "forward" : mode === "resend";
 }
 
 function normalizeRelayMediaVariants(
