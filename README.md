@@ -1,23 +1,29 @@
-# xtelegram-cf · Telegram Media Relay v2.18.6
+# xtelegram-cf · Telegram Media Relay v2.18.7
 
-Versão atual: **2.18.6**. Veja [thumbnail Base64](CHANGELOG-v2.18.6.md), [IDs e links das mensagens Telegram](CHANGELOG-v2.18.5.md), [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
+Versão atual: **2.18.7**. Veja [thumbnail Base64](CHANGELOG-v2.18.7.md), [IDs e links das mensagens Telegram](CHANGELOG-v2.18.5.md), [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
 
 
-## Thumbnail Base64 (v2.18.6)
+## Thumbnail Base64 com auto-resize (v2.18.7)
 
-`POST /resolve` e `POST /resolve-and-send` agora procuram a melhor thumbnail já
-exposta pelo resolver social e, quando ela cabe no limite seguro, devolvem no
-topo da resposta:
+`POST /resolve`, `POST /resolve-and-send` e os anexos opcionais de `/send` agora
+redimensionam automaticamente a thumbnail antes de codificá-la em Base64. O
+padrão é **320 px de largura máxima**, com `fit=scale-down`, então previews para
+Shortcuts ficam muito menores sem perder utilidade.
 
 ```json
 {
   "thumbnail_url": "https://.../cover.jpg",
   "thumbnail_base64": "/9j/4AAQSk...",
   "thumbnail_mime_type": "image/jpeg",
-  "thumbnail_bytes": 84231,
+  "thumbnail_bytes": 18422,
   "thumbnail_source": "resolver_thumbnail",
   "thumbnail_included": true,
-  "thumbnail_error": null
+  "thumbnail_error": null,
+  "thumbnail_width": 320,
+  "thumbnail_height": 180,
+  "thumbnail_source_width": 1280,
+  "thumbnail_source_height": 720,
+  "thumbnail_resized": true
 }
 ```
 
@@ -26,11 +32,22 @@ O Base64 vem **sem** prefixo `data:image/...;base64,`, pronto para a ação
 fotos sem uma cover dedicada, a própria foto resolvida pode ser usada como
 thumbnail.
 
-O limite padrão do binário antes da codificação é **384 KiB** e o teto absoluto
-é **768 KiB**. Pode ser ajustado globalmente com
-`THUMBNAIL_BASE64_MAX_BYTES` ou por chamada com `thumbnail_max_bytes`. Se o
-thumbnail for grande demais, o envio não falha: `thumbnail_base64` fica `null`,
-`thumbnail_url` é preservado e `thumbnail_error` informa o motivo.
+O limite padrão do binário antes da codificação continua **384 KiB** e o teto
+absoluto é **768 KiB**. Pode ser ajustado globalmente com
+`THUMBNAIL_BASE64_MAX_BYTES` ou por chamada com `thumbnail_max_bytes`.
+
+A largura máxima do auto-resize pode ser ajustada globalmente com
+`THUMBNAIL_MAX_WIDTH` ou por chamada com `thumbnail_max_width` /
+`thumbnailMaxWidth`.
+
+Exemplo:
+
+```json
+{ "include_thumbnail": true, "thumbnail_max_width": 160 }
+```
+
+Se o thumbnail for grande demais, o envio não falha: `thumbnail_base64` fica
+`null`, `thumbnail_url` é preservado e `thumbnail_error` informa o motivo.
 
 Para chamadas sociais normais, Base64 é habilitado por padrão. Desabilite com:
 
