@@ -36,6 +36,7 @@ import {
   normalizeTelegramChannels,
 } from "../validation/common";
 import { handleSend } from "./send";
+import { normalizeRelayForceValue } from "../validation/send";
 
 interface ResolveRequestBody {
   url?: unknown;
@@ -83,6 +84,7 @@ export async function handleResolve(
         ? body.sourceUrl.trim()
         : "";
   const forceCpu = resolveCpuHeavyEnabled(env, request, body.force_cpu ?? body.forceCpu);
+  const forceValue = normalizeRelayForceValue(body.force);
   const normalized = normalizePublicHttpUrl(sourceUrl);
   if (!normalized) {
     relayDebug(env, traceId, "resolve.invalid-source-url", {
@@ -106,7 +108,7 @@ export async function handleResolve(
 
   // An existing delivery needs only a caption edit, even if the source CDN or
   // resolver is offline. Route through /send's normal dedupe before resolving.
-  if (send && body.force !== true) {
+  if (send && forceValue === false) {
     const channels = normalizeTelegramChannels(body.channel, body.channels);
     const usernames = normalizeRoutingUsernames(body.username, body.usernames);
     if (!channels.ok) return json({ ok: false, error: channels.error }, 400);
@@ -158,6 +160,7 @@ export async function handleResolve(
     requestedChannelCount: Array.isArray(body.channels) ? body.channels.length : body.channel ? 1 : 0,
     metadataKeys: Object.keys(requestMetadata || {}).slice(0, 24),
     hasTwitterHandleHint: Boolean(twitterHandleHint),
+    force: forceValue,
     forceCpu,
   });
 
@@ -268,7 +271,7 @@ export async function handleResolve(
     usernames: usernameValidation.value,
     mediaId: explicitMediaId || undefined,
     mediaKey: explicitMediaKey || undefined,
-    force: body.force === true,
+    force: forceValue,
     force_cpu: forceCpu,
     metadata,
     metadataProvided: hasProvidedField(body, "metadata"),
