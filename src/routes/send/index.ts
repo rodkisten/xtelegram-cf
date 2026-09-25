@@ -8,7 +8,7 @@ import { handleSingleSend } from "./single";
 import { relayDebug, relayTraceId } from "../../lib/debug";
 import { cpuHeavyRequestValue, resolveCpuHeavyEnabled } from "../../lib/cpu-policy";
 import { withMediaVariants } from "../../lib/media-variants-response";
-import { buildThumbnailResponseFromUrl } from "../../lib/thumbnail-response";
+import { buildThumbnailResponseFromUrl, resolveThumbnailMaxWidth } from "../../lib/thumbnail-response";
 
 export async function handleSend(request: Request, env: Env): Promise<Response> {
   const traceId = relayTraceId(request);
@@ -135,6 +135,10 @@ async function withRequestedThumbnail(
   const thumbnail = await buildThumbnailResponseFromUrl(thumbnailUrl, env, {
     includeBase64: includeRequested,
     maxBytes: positiveIntegerOrNull(body.thumbnail_max_bytes ?? body.thumbnailMaxBytes),
+    maxWidth: resolveThumbnailMaxWidth(
+      env,
+      positiveIntegerOrNull(body.thumbnail_max_width ?? body.thumbnailMaxWidth),
+    ),
     source: explicitUrl ? "request_thumbnail" : "resolved_photo",
   });
 
