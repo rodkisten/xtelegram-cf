@@ -682,6 +682,66 @@ export async function sendTelegramMediaGroupUpload(options: {
   });
 }
 
+export async function copyTelegramMessage(options: {
+  botToken: string;
+  chatId: string | number;
+  messageThreadId?: number | null;
+  fromChatId: string | number;
+  messageId: number;
+  caption: string;
+  parseMode: ParseMode | null;
+}): Promise<TelegramApiResult<{ message_id?: number }>> {
+  const payload: Record<string, unknown> = {
+    chat_id: options.chatId,
+    from_chat_id: options.fromChatId,
+    message_id: options.messageId,
+    // Explicitly send the current caption, including an empty string, so the
+    // copied message never inherits stale presentation from the original.
+    caption: options.caption,
+  };
+  if (options.messageThreadId != null) payload.message_thread_id = options.messageThreadId;
+  if (options.caption && options.parseMode) payload.parse_mode = options.parseMode;
+
+  return requestTelegram<{ message_id?: number }>(options.botToken, "copyMessage", {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function copyTelegramMessages(options: {
+  botToken: string;
+  chatId: string | number;
+  messageThreadId?: number | null;
+  fromChatId: string | number;
+  messageIds: number[];
+  removeCaption?: boolean;
+}): Promise<TelegramApiResult<Array<{ message_id?: number }>>> {
+  const messageIds = [...new Set(options.messageIds)]
+    .filter((messageId) => Number.isSafeInteger(messageId) && messageId > 0)
+    .sort((left, right) => left - right);
+  if (!messageIds.length) {
+    return {
+      ok: false,
+      httpStatus: 400,
+      requestMethod: "copyMessages",
+      description: "copyMessages requires at least one positive Telegram message id.",
+    };
+  }
+
+  const payload: Record<string, unknown> = {
+    chat_id: options.chatId,
+    from_chat_id: options.fromChatId,
+    message_ids: messageIds,
+    remove_caption: options.removeCaption === true,
+  };
+  if (options.messageThreadId != null) payload.message_thread_id = options.messageThreadId;
+
+  return requestTelegram<Array<{ message_id?: number }>>(options.botToken, "copyMessages", {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function editTelegramMessageCaption(options: {
   botToken: string;
   chatId: string | number;
