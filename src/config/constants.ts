@@ -1,5 +1,5 @@
 export const SERVICE_NAME = "generic-telegram-media-relay";
-export const SERVICE_VERSION = "2.18.6";
+export const SERVICE_VERSION = "2.18.7";
 export const SERVICE_RUNTIME =
   "typescript-hls-remux-photo-video-album-ordered-fallback-d1-atomic-claims-batch-send-social-metadata-modular";
 
@@ -73,6 +73,9 @@ export const RELAY_LIMITS = Object.freeze({
   // unless include_thumbnail=true is explicitly supplied.
   thumbnailBase64DefaultBytes: 384 * 1024,
   thumbnailBase64HardBytes: 768 * 1024,
+  thumbnailMaxWidthDefault: 320,
+  thumbnailMaxWidthHard: 1024,
+  thumbnailResizeQuality: 75,
   thumbnailFetchTimeoutMs: 4_500,
   thumbnailCandidateMax: 4,
 
