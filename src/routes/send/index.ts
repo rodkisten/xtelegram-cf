@@ -54,9 +54,10 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
       forceCpu: albumValidation.value.forceCpu,
     });
     const response = await handleJsonAlbumSend(albumValidation.value, env, traceId);
-    relayDebug(env, traceId, "send.album-completed", { status: response.status });
+    const forwardResponse = await normalizeForwardResponse(response, bodyRecord);
+    relayDebug(env, traceId, "send.album-completed", { status: forwardResponse.status });
     const variantsResponse = await withMediaVariants(
-      response,
+      forwardResponse,
       albumValidation.value.items.flatMap((item) => [
         {
           mediaUrl: item.mediaUrl,
@@ -90,8 +91,9 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     forceCpu: validation.value.forceCpu,
   });
   const response = await handleSingleSend(request, validation.value, env);
-  relayDebug(env, traceId, "send.single-completed", { status: response.status });
-  const variantsResponse = await withMediaVariants(response, [
+  const forwardResponse = await normalizeForwardResponse(response, bodyRecord);
+  relayDebug(env, traceId, "send.single-completed", { status: forwardResponse.status });
+  const variantsResponse = await withMediaVariants(forwardResponse, [
     {
       mediaUrl: validation.value.mediaUrl,
       quality: validation.value.metadata?.resolvedQuality || null,
@@ -104,6 +106,74 @@ export async function handleSend(request: Request, env: Env): Promise<Response> 
     ...validation.value.mediaVariants,
   ]);
   return withRequestedThumbnail(variantsResponse, bodyRecord, env);
+}
+
+async function normalizeForwardResponse(
+  response: Response,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  if (!isForwardForce(body.force)) return response;
+
+  const contentType = response.headers.get("Content-Type") || "";
+  if (!/application\/json/i.test(contentType)) return response;
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return response;
+  }
+
+  const record = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : { ok: response.ok, result: payload };
+
+  const reasons = collectChannelFailureReasons(record);
+  let status = response.status;
+
+  // Scriptable treats HTTP 409 as an ordinary duplicate and converts it into
+  // `requires_force`. That is never correct for force=forward: the caller has
+  // already explicitly selected the forward/copy operation.
+  if (status === 409) {
+    status = reasons.includes("delivery_in_progress") ? 423 : 422;
+  }
+
+  const normalized = {
+    ...record,
+    action: status >= 200 && status < 300 ? "forward" : (record.action ?? "error"),
+    force_mode: "forward",
+    requires_force: false,
+    ...(status === 409 || response.status === 409 ? { conflict: false } : {}),
+  };
+
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Length");
+  headers.set("Content-Type", "application/json; charset=utf-8");
+  headers.set("Cache-Control", "no-store");
+
+  return new Response(JSON.stringify(normalized, null, 2), {
+    status,
+    statusText: status === response.status ? response.statusText : undefined,
+    headers,
+  });
+}
+
+function isForwardForce(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === "forward";
+}
+
+function collectChannelFailureReasons(payload: Record<string, unknown>): string[] {
+  const channels = payload.channels;
+  if (!channels || typeof channels !== "object" || Array.isArray(channels)) return [];
+
+  const notSent = (channels as Record<string, unknown>).notSent;
+  if (!Array.isArray(notSent)) return [];
+
+  return notSent
+    .map((item) => item && typeof item === "object" && !Array.isArray(item)
+      ? String((item as Record<string, unknown>).reason || "").trim().toLowerCase()
+      : "")
+    .filter(Boolean);
 }
 
 async function withRequestedThumbnail(
