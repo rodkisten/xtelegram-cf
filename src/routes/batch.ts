@@ -35,6 +35,7 @@ import { hasProvidedField, normalizeRoutingUsernames, normalizeTelegramChannels 
 import { normalizeMediaIdentityInput } from "../validation/media-identity";
 import { handleResolve } from "./resolve";
 import { handleSend } from "./send";
+import { normalizeRelayForceValue } from "../validation/send";
 
 interface BatchBody {
   links?: unknown;
@@ -144,7 +145,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
     itemCount: rawItems.length,
     sharedChannelCount: sharedChannels.length,
     requestedConcurrency: body.concurrency ?? null,
-    force: body.force === true,
+    force: normalizeRelayForceValue(body.force),
     forceCpu: batchForceCpu,
   });
 
@@ -214,7 +215,10 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
         return;
       }
 
-      const force = item.force === true || (item.force === undefined && body.force === true);
+      const forceValue = normalizeRelayForceValue(
+        item.force === undefined ? body.force : item.force,
+      );
+      const force = forceValue !== false;
       const forceCpu = resolveCpuHeavyEnabled(
         env,
         request,
@@ -223,7 +227,7 @@ export async function handleBatch(request: Request, env: Env): Promise<Response>
       const payload: Record<string, unknown> = {
         ...item,
         channels,
-        force,
+        force: forceValue,
         force_cpu: forceCpu,
         caption: hasProvidedField(item, "caption") ? item.caption : body.caption,
         hashtags: item.hashtags ?? item.hashtag ?? body.hashtags ?? body.hashtag,

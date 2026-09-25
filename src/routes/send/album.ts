@@ -32,6 +32,7 @@ import {
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
+  type DeliveryPlan,
 } from "../../services/delivery-plan";
 import {
   parseTelegramDestination,
@@ -57,6 +58,7 @@ import type {
 import { isGenericMediaLabel } from "../../validation/common";
 import { resolveMultipartMaxTotalBytes } from "./multipart-utils";
 import { buildTelegramMessageLinkFields } from "../../lib/telegram-message-links";
+import { copyStoredTelegramDeliveries } from "../../services/telegram-forward";
 
 type AlbumTransport =
   | "url"
@@ -124,6 +126,7 @@ function albumItemToRelayInput(
     mediaId: input.mediaId,
     mediaKey: input.mediaKey,
     force: input.force,
+    forceMode: input.forceMode,
     forceCpu: input.forceCpu,
   };
 }
@@ -837,6 +840,7 @@ export async function handleJsonAlbumSend(
     requestedChannelCount: input.channels.length,
     routingUsernames: input.usernames,
     force: input.force,
+    forceMode: input.forceMode,
   });
   const chatIds = resolveTelegramChatIdsForEnv(env, input.channels, input.usernames);
 
@@ -991,6 +995,18 @@ export async function handleJsonAlbumSend(
       captionLength: socialContent.caption.length,
       socialMetadataStrategy: socialContent.social?.strategy || null,
     });
+
+    if (input.forceMode === "forward") {
+      return await handleAlbumForwardCopy({
+        input,
+        env,
+        db,
+        plan,
+        chatIds,
+        socialContent,
+        traceId,
+      });
+    }
 
     await persistKnownMedia(db, {
       identity: plan.identity,
@@ -1333,4 +1349,172 @@ function chunkTelegramAlbum(
   }
 
   return batches;
+}
+
+
+async function handleAlbumForwardCopy(options: {
+  input: RelayAlbumInput;
+  env: Env;
+  db: D1Database;
+  plan: DeliveryPlan;
+  chatIds: string[];
+  socialContent: Awaited<ReturnType<typeof resolveSocialDeliveryContent>>;
+  traceId: string;
+}): Promise<Response> {
+  const { input, env, db, plan, chatIds, socialContent, traceId } = options;
+  relayDebug(env, traceId, "album.forward.started", {
+    channelCount: plan.channelsToSend.length,
+    storedDeliveryCount: plan.claim.alreadySentDeliveries.length,
+    captionLength: socialContent.caption.length,
+  });
+
+  const deliveries = await copyStoredTelegramDeliveries({
+    botToken: env.TELEGRAM_BOT_TOKEN,
+    channels: plan.channelsToSend,
+    storedDeliveries: plan.claim.alreadySentDeliveries,
+    caption: socialContent.caption,
+    parseMode: socialContent.parseMode,
+    messagePresentations: buildForwardAlbumPresentations(input, socialContent),
+  });
+  const successfulDeliveries = deliveries.filter((delivery) => delivery.ok);
+  const failedDeliveries = deliveries.filter((delivery) => !delivery.ok);
+  const externalSideEffectChannels = deliveries
+    .filter((delivery) => delivery.hadExternalSideEffect)
+    .map((delivery) => delivery.requestedChatId);
+  retainSuccessfulClaimsUntilPersistence(plan, externalSideEffectChannels);
+
+  const messageLinks = buildTelegramMessageLinkFields(
+    successfulDeliveries.flatMap((delivery) =>
+      delivery.messageIds.map((messageId) => ({
+        requestedChatId: delivery.requestedChatId,
+        telegramChatId: delivery.telegramChatId,
+        messageThreadId: delivery.messageThreadId,
+        messageId,
+        single: delivery.messageIds.length > 1,
+      }))),
+  );
+
+  let insertedChannelIds: string[] = [];
+  if (successfulDeliveries.length) {
+    try {
+      insertedChannelIds = await persistSuccessfulDeliveries(db, {
+        identity: plan.identity,
+        sourceUrl: input.sourceUrl,
+        pageUrl: input.pageUrl,
+        mediaType: "album",
+        mediaCount: input.items.length,
+        metadata: socialContent.metadata,
+        presentationMetadata: input.metadataProvided
+          ? (input.presentationMetadata !== undefined ? input.presentationMetadata : input.metadata)
+          : null,
+        caption: socialContent.caption,
+        parseMode: socialContent.parseMode,
+        mediaStatus: "sent",
+        deliveries: successfulDeliveries.map((delivery) => ({
+          requestedChatId: delivery.requestedChatId,
+          telegramChatId: delivery.telegramChatId,
+          telegramChatTitle: delivery.telegramChatTitle,
+          messageIds: delivery.messageIds,
+        })),
+      });
+      markChannelsPersisted(plan, insertedChannelIds);
+    } catch (error) {
+      relayDebug(env, traceId, "album.forward.persist-failed", {
+        error: debugError(error),
+        successfulTelegramDeliveries: successfulDeliveries.length,
+      });
+      return json({
+        ok: false,
+        ...messageLinks,
+        action: "forward",
+        force_mode: "forward",
+        error: getErrorMessage(error),
+        stage: "persist-delivery",
+        warning:
+          "Telegram copied one or more stored album messages but D1 history could not be committed. Claims are retained until TTL to reduce duplicate retries.",
+        media: plan.identity,
+        telegram: {
+          method: "copyMessages+editMessageCaption",
+          deliveries,
+        },
+      }, 500);
+    }
+  }
+
+  const failedChannels = failedDeliveries.map((delivery) => ({
+    channelId: delivery.requestedChatId,
+    reason: delivery.sourceMessageIds.length ? "telegram_error" : "forward_source_missing",
+    error: delivery.error,
+    httpStatus: delivery.httpStatus,
+    hadExternalSideEffect: delivery.hadExternalSideEffect,
+    messageIds: delivery.messageIds,
+  }));
+  const notSent = [...plan.skippedInProgress, ...failedChannels];
+  const status = successfulDeliveries.length
+    ? notSent.length ? 207 : 200
+    : failedChannels.every((delivery) => delivery.reason === "forward_source_missing")
+      ? 409
+      : 502;
+
+  relayDebug(env, traceId, "album.forward.completed", {
+    status,
+    succeeded: successfulDeliveries.length,
+    failed: failedDeliveries.length,
+    inserted: insertedChannelIds.length,
+  });
+
+  return json({
+    ok: successfulDeliveries.length > 0,
+    ...messageLinks,
+    action: "forward",
+    force_mode: "forward",
+    partial: successfulDeliveries.length > 0 && notSent.length > 0,
+    conflict: successfulDeliveries.length === 0 && status === 409,
+    message: successfulDeliveries.length
+      ? `Stored Telegram album copied as ${successfulDeliveries.length} new delivery(s) with the current caption.`
+      : "No stored Telegram album could be copied for force=forward.",
+    media: plan.identity,
+    mode: "telegram-forward-copy",
+    source: { sourceUrl: input.sourceUrl, pageUrl: input.pageUrl },
+    channels: {
+      requested: chatIds,
+      attempted: plan.channelsToSend,
+      inserted: insertedChannelIds,
+      notSent,
+    },
+    telegram: {
+      method: "copyMessages+editMessageCaption",
+      deliveries,
+    },
+    metadata: socialContent.metadata,
+    socialMetadata: socialContent.social,
+    metrics: {
+      identityAliasQueries: plan.identityAliasQueries,
+      claimQueries: plan.claim.queryCount,
+      claimedChannels: plan.channelsToSend.length,
+      telegramAttempts: deliveries.length,
+      successfulTelegramAttempts: successfulDeliveries.length,
+    },
+  }, status);
+}
+
+
+function buildForwardAlbumPresentations(
+  input: RelayAlbumInput,
+  socialContent: Awaited<ReturnType<typeof resolveSocialDeliveryContent>>,
+): Array<{ caption: string; parseMode: RelayAlbumInput["parseMode"] }> {
+  const effectiveItems = socialContent.social
+    ? input.items.map((item) => ({ ...item, caption: "", parseMode: null }))
+    : input.items;
+
+  return chunkTelegramAlbum(effectiveItems).flatMap((batch) =>
+    batch.map((item, index) => ({
+      caption: item.caption || (index === 0 ? socialContent.caption : ""),
+      parseMode: item.caption
+        ? item.parseMode ?? socialContent.parseMode
+        : index === 0
+          ? socialContent.parseMode
+          : null,
+    })),
+  );
 }

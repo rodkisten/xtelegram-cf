@@ -33,6 +33,7 @@ import {
   markChannelsPersisted,
   releasePendingDeliveryClaims,
   retainSuccessfulClaimsUntilPersistence,
+  type DeliveryPlan,
 } from "../../services/delivery-plan";
 import {
   resolveTelegramChatIdsForEnv,
@@ -47,6 +48,7 @@ import {
 } from "../../services/telegram-delivery";
 import type { Env, PreparedMedia, RelayInput } from "../../types";
 import { buildTelegramMessageLinkFields } from "../../lib/telegram-message-links";
+import { copyStoredTelegramDeliveries } from "../../services/telegram-forward";
 
 export async function handleSingleSend(
   request: Request,
@@ -62,6 +64,7 @@ export async function handleSingleSend(
     requestedChannelCount: input.channels.length,
     routingUsernames: input.usernames,
     force: input.force,
+    forceMode: input.forceMode,
     forceCpu: input.forceCpu,
     hasMediaHeaders: Object.keys(input.mediaHeaders || {}).length > 0,
   });
@@ -216,6 +219,22 @@ export async function handleSingleSend(
   }
 
   try {
+    if (input.forceMode === "forward") {
+      if (!socialPromise) {
+        throw new Error("Internal error: social content promise was not initialized for force=forward.");
+      }
+      const socialContent = reconciledSocialContent || await socialPromise;
+      return await handleSingleForwardCopy({
+        input,
+        env,
+        db,
+        plan,
+        chatIds,
+        socialContent,
+        traceId,
+      });
+    }
+
     const configuredMaxMediaBytes = resolveMaxMediaBytes(env.MAX_MEDIA_BYTES);
     const maxMediaBytes = configuredMaxMediaBytes;
     const workerBufferedMaxBytes = resolveWorkerBufferedMediaBytes(
@@ -720,4 +739,153 @@ export async function handleSingleSend(
       identityKey: plan.identity.key,
     });
   }
+}
+
+
+async function handleSingleForwardCopy(options: {
+  input: RelayInput;
+  env: Env;
+  db: D1Database;
+  plan: DeliveryPlan;
+  chatIds: string[];
+  socialContent: Awaited<ReturnType<typeof resolveSocialDeliveryContent>>;
+  traceId: string;
+}): Promise<Response> {
+  const { input, env, db, plan, chatIds, socialContent, traceId } = options;
+  relayDebug(env, traceId, "single.forward.started", {
+    channelCount: plan.channelsToSend.length,
+    storedDeliveryCount: plan.claim.alreadySentDeliveries.length,
+    captionLength: socialContent.caption.length,
+  });
+
+  const deliveries = await copyStoredTelegramDeliveries({
+    botToken: env.TELEGRAM_BOT_TOKEN,
+    channels: plan.channelsToSend,
+    storedDeliveries: plan.claim.alreadySentDeliveries,
+    caption: socialContent.caption,
+    parseMode: socialContent.parseMode,
+  });
+  const successfulDeliveries = deliveries.filter((delivery) => delivery.ok);
+  const failedDeliveries = deliveries.filter((delivery) => !delivery.ok);
+  const externalSideEffectChannels = deliveries
+    .filter((delivery) => delivery.hadExternalSideEffect)
+    .map((delivery) => delivery.requestedChatId);
+  retainSuccessfulClaimsUntilPersistence(plan, externalSideEffectChannels);
+
+  const messageLinks = buildTelegramMessageLinkFields(
+    successfulDeliveries.flatMap((delivery) =>
+      delivery.messageIds.map((messageId) => ({
+        requestedChatId: delivery.requestedChatId,
+        telegramChatId: delivery.telegramChatId,
+        messageThreadId: delivery.messageThreadId,
+        messageId,
+        single: delivery.messageIds.length > 1,
+      }))),
+  );
+
+  let insertedChannelIds: string[] = [];
+  if (successfulDeliveries.length) {
+    try {
+      const mediaType = input.mediaType || inferTelegramMediaType(input.mediaUrl.href, "");
+      insertedChannelIds = await persistSuccessfulDeliveries(db, {
+        identity: plan.identity,
+        sourceUrl: input.sourceUrl,
+        pageUrl: input.pageUrl,
+        mediaType,
+        mediaCount: 1,
+        metadata: socialContent.metadata,
+        presentationMetadata: input.metadataProvided
+          ? (input.presentationMetadata !== undefined ? input.presentationMetadata : input.metadata)
+          : null,
+        caption: socialContent.caption,
+        parseMode: socialContent.parseMode,
+        mediaStatus: "sent",
+        deliveries: successfulDeliveries.map((delivery) => ({
+          requestedChatId: delivery.requestedChatId,
+          telegramChatId: delivery.telegramChatId,
+          telegramChatTitle: delivery.telegramChatTitle,
+          messageIds: delivery.messageIds,
+        })),
+      });
+      markChannelsPersisted(plan, insertedChannelIds);
+    } catch (error) {
+      relayDebug(env, traceId, "single.forward.persist-failed", {
+        error: debugError(error),
+        successfulTelegramDeliveries: successfulDeliveries.length,
+      });
+      return json({
+        ok: false,
+        ...messageLinks,
+        action: "forward",
+        force_mode: "forward",
+        error: getErrorMessage(error),
+        stage: "persist-delivery",
+        warning:
+          "Telegram copied one or more stored messages but D1 history could not be committed. Claims are retained until TTL to reduce duplicate retries.",
+        media: plan.identity,
+        telegram: {
+          method: "copyMessage/copyMessages",
+          deliveries,
+        },
+      }, 500);
+    }
+  }
+
+  const failedChannels = failedDeliveries.map((delivery) => ({
+    channelId: delivery.requestedChatId,
+    reason: delivery.sourceMessageIds.length ? "telegram_error" : "forward_source_missing",
+    error: delivery.error,
+    httpStatus: delivery.httpStatus,
+    hadExternalSideEffect: delivery.hadExternalSideEffect,
+    messageIds: delivery.messageIds,
+  }));
+  const notSent = [...plan.skippedInProgress, ...failedChannels];
+  const status = successfulDeliveries.length
+    ? notSent.length ? 207 : 200
+    : failedChannels.every((delivery) => delivery.reason === "forward_source_missing")
+      ? 409
+      : 502;
+
+  relayDebug(env, traceId, "single.forward.completed", {
+    status,
+    succeeded: successfulDeliveries.length,
+    failed: failedDeliveries.length,
+    inserted: insertedChannelIds.length,
+  });
+
+  return json({
+    ok: successfulDeliveries.length > 0,
+    ...messageLinks,
+    action: "forward",
+    force_mode: "forward",
+    partial: successfulDeliveries.length > 0 && notSent.length > 0,
+    conflict: successfulDeliveries.length === 0 && status === 409,
+    message: successfulDeliveries.length
+      ? `Stored Telegram media copied as ${successfulDeliveries.length} new delivery(s) with the current caption.`
+      : "No stored Telegram message could be copied for force=forward.",
+    media: plan.identity,
+    source: {
+      inputUrl: input.mediaUrl.href,
+      sourceUrl: input.sourceUrl,
+    },
+    channels: {
+      requested: chatIds,
+      attempted: plan.channelsToSend,
+      inserted: insertedChannelIds,
+      notSent,
+    },
+    telegram: {
+      method: "copyMessage/copyMessages",
+      deliveries,
+    },
+    metadata: socialContent.metadata,
+    socialMetadata: socialContent.social,
+    metrics: {
+      identityAliasQueries: plan.identityAliasQueries,
+      claimQueries: plan.claim.queryCount,
+      claimedChannels: plan.channelsToSend.length,
+      telegramAttempts: deliveries.length,
+      successfulTelegramAttempts: successfulDeliveries.length,
+    },
+  }, status);
 }

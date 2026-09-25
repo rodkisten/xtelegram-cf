@@ -1,6 +1,32 @@
-# xtelegram-cf · Telegram Media Relay v2.18.7
+# xtelegram-cf · Telegram Media Relay v2.18.8
 
-Versão atual: **2.18.7**. Veja [thumbnail Base64](CHANGELOG-v2.18.7.md), [IDs e links das mensagens Telegram](CHANGELOG-v2.18.5.md), [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
+Versão atual: **2.18.8**. Veja [`force: "forward"`](CHANGELOG-v2.18.8.md), [thumbnail Base64](CHANGELOG-v2.18.7.md), [IDs e links das mensagens Telegram](CHANGELOG-v2.18.5.md), [variantes em todas as respostas](CHANGELOG-v2.18.4.md), [propagação do fallback de tamanho](CHANGELOG-v2.18.3.md), [correção de avisos do X nas legendas](CHANGELOG-v2.18.2.md) e [de-para e instalação](CHANGELOG-v2.18.1.md).
+
+
+## `force: "forward"` (v2.18.8)
+
+Além de `force: true`, que mantém o reenvio normal da mídia, o relay aceita:
+
+```json
+{ "force": "forward" }
+```
+
+Nesse modo o relay procura a última entrega Telegram armazenada no D1 e cria
+uma **nova mensagem a partir da mensagem já existente**, sem baixar e reenviar
+o arquivo de mídia. Tecnicamente o Bot API usa `copyMessage` / `copyMessages`,
+porque `forwardMessage` não permite substituir o caption.
+
+O caption não é reaproveitado da mensagem antiga: o relay executa a mesma
+resolução/enriquecimento atual de caption do fluxo normal e aplica esse caption
+à nova cópia. Para álbuns, `copyMessages` preserva o agrupamento; os captions
+antigos são removidos e os captions atuais são reaplicados aos itens
+correspondentes.
+
+A resposta expõe `action: "forward"` e `force_mode: "forward"`, além dos novos
+`message_id`, `message_url`, `message_deeplink` e respectivos arrays. O D1 é
+atualizado com os novos IDs em `last_message_ids_json` e incrementa
+`send_count`. Se não existir mensagem anterior para o destino, o relay não
+faz fallback silencioso para upload e responde conflito para esse destino.
 
 
 ## Thumbnail Base64 com auto-resize (v2.18.7)
