@@ -14,3 +14,14 @@ ENABLE_CPU_HEAVY=false
 
 # Optional: max binary thumbnail bytes encoded into Base64 responses (default 384 KiB).
 THUMBNAIL_BASE64_MAX_BYTES=393216
+
+# Instagram resolver chain (all keys are optional; NEVER commit real values).
+# sssInstagram v2 story endpoint is undocumented. The HMAC signing scheme
+# is inferred from legacy /api/convert, and may not work for the current v2.
+# Enable only with a validated current key + matching browser bundle _ts.
+# SSSINSTAGRAM_HMAC_KEY=replace-with-current-signing-key
+# SSSINSTAGRAM_BUILD_TS=replace-with-current-bundle-timestamp
+#
+# Optional paid, documented API fallbacks, used only after free/self-hosted ones.
+# EASYDOWN_API_KEY=replace-me
+# GETINSAVER_API_KEY=replace-me

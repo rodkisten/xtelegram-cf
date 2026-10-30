@@ -3,6 +3,7 @@ import type { Env, MediaType } from "./types";
 import { debugError, debugUrl, relayDebug } from "./lib/debug";
 import { RELAY_LIMITS } from "./config/constants";
 import { mapWithConcurrency } from "./lib/concurrency";
+import { resolveSssInstagramStory, supportsSssInstagramStory, resolveEasyDownInstagram, resolveGetInSaverInstagram } from "./resolvers/instagram";
 
 export type SocialProvider = "instagram" | "twitter" | "tiktok" | "reddit" | "youtube";
 export type ResolvedSocialMediaType = "video" | "photo" | "audio";
@@ -250,9 +251,18 @@ function resolverRegistry(source: SocialProvider, sourceUrl: string, env: Env): 
   }
 
   return [
+    // sssInstagram v2 is an undocumented signed API. Only attempt it when
+    // the current browser-bundle signing parameters are explicitly configured.
+    { id: "sssinstagram-v2-story", enabled: () => supportsSssInstagramStory(sourceUrl, env),
+      run: () => resolveSssInstagramStory(sourceUrl, env) },
     { id: "zoraahub", run: () => resolveZoraaHub(sourceUrl) },
     cobalt,
     ytdlp,
+    // Paid API fallbacks are opt-in and deliberately last.
+    { id: "easydown", enabled: () => Boolean(env.EASYDOWN_API_KEY?.trim()),
+      run: () => resolveEasyDownInstagram(sourceUrl, env) },
+    { id: "getinsaver", enabled: () => Boolean(env.GETINSAVER_API_KEY?.trim()),
+      run: () => resolveGetInSaverInstagram(sourceUrl, env) },
   ];
 }
 
