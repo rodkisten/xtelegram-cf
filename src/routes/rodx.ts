@@ -158,11 +158,12 @@ export async function handleRodx(request: Request, env: Env): Promise<Response> 
       if (method === "GET") {
         const since = int(url.searchParams.get("since"), 0, 0, 9000000000000000);
         const limit = int(url.searchParams.get("limit"), 500, 1, 1000);
+        const offset = int(url.searchParams.get("offset"), 0, 0, 1000000);
         const rows = await env.RELAY_DB.prepare(
           `SELECT tweet_id AS id,seen_at AS at FROM rodx_seen
            WHERE user_id=?1 AND account=?2 AND seen_at>=?3
-           ORDER BY seen_at ASC, tweet_id ASC LIMIT ?4`
-        ).bind(actor.id, account, since, limit).all();
+           ORDER BY seen_at ASC, tweet_id ASC LIMIT ?4 OFFSET ?5`
+        ).bind(actor.id, account, since, limit, offset).all();
         return json({ ok: true, account, entries: rows.results ?? [] });
       }
       if (method === "POST") {
