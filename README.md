@@ -1603,3 +1603,46 @@ When fast mode cannot safely continue, for example an HLS URL or a video with no
 ```
 
 `force_cpu=true` does not bypass Worker memory or Telegram file-size safety limits.
+
+## Instagram resolver chain (Story v2 + fallbacks)
+
+`POST /resolve` and `POST /resolve-and-send` use the existing social resolver registry.
+No client payload changes are required. The first resolver that returns valid
+media wins; `resolution.resolver` and `resolution.attempts` report how it went.
+
+Instagram priority:
+
+1. `sssinstagram-v2-story`: only for specific `/stories/{username}/{numeric-id}/`
+   URLs, and only when both `SSSINSTAGRAM_HMAC_KEY` and
+   `SSSINSTAGRAM_BUILD_TS` are configured. The current v2 signing algorithm
+   has **not been independently verified**: the HMAC SHA-256 recipe
+   (`url + Date.now()`) is documented for the legacy /api/convert endpoint,
+   not the captured /api/v2/instagram/story endpoint. Keep this disabled until
+   validated with a fresh DevTools capture. Failure falls through safely.
+2. `zoraahub`: existing public downloader, no configuration.
+3. `cobalt`: optional self-hosted `COBALT_API_URL` (+ `COBALT_API_KEY`).
+4. `yt-dlp`: optional external `YTDLP_API_URL` (+ `YTDLP_API_TOKEN`).
+5. `easydown`: optional paid `EASYDOWN_API_KEY`, documented Instagram parse
+   endpoint with nested `data.media` (videos, images, audios).
+6. `getinsaver`: optional paid `GETINSAVER_API_KEY`, documented
+   `POST /v1/resolve` with distinct post/story/highlight service IDs.
+   Reserves up to 10 results for posts or 1 result for an individual Story.
+
+Set secrets using `npx wrangler secret put NAME`; never commit tokens,
+cookies, captured signatures or API keys. The service-specific keys are
+optional. If unset, those resolvers are skipped, preserving the original
+ZoraaHub/Cobalt/yt-dlp behavior. The relay will not purchase credits, and
+paid APIs are never contacted unless their API keys are configured.
+
+Each provider returns original CDN URLs, preserving album order and media types.
+`/resolve-and-send` still owns Telegram delivery, quality ladders, D1 history
+and channel-level deduplication. Reels do not accept still-image-only results.
+
+For diagnostics, enable `RELAY_DEBUG=true` temporarily and inspect the
+`social.resolver.*` steps or the resolver `attempts` returned by `/resolve`.
+Do not log response bodies or HMAC parameters. These third-party services
+cannot access private content without authorized credentials, and links to
+expired Stories will not resolve.
+
+See: https://easydown.org/docs/en/api/instagram and
+https://developers.getinsaver.com/docs.
