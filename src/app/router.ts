@@ -1,3 +1,4 @@
+import { handleRodx } from "../routes/rodx";
 import { authorizeRequest } from "../http/auth";
 import { handleOptions, json } from "../http/response";
 import { handleBatch } from "../routes/batch";
@@ -34,6 +35,11 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
       return authorizationError;
     }
     return handleChannels(request, env);
+  }
+
+  if (url.pathname.startsWith("/rodx/v1/")) {
+    relayDebug(env, traceId, "router.dispatch", { handler: "rodx" });
+    return handleRodx(request, env);
   }
 
   const authorizationError = authorizeRequest(request, env);
