@@ -4,7 +4,7 @@ const JSON_HEADERS = {
 
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
   "Access-Control-Expose-Headers": "X-Relay-Trace-Id",
   "Access-Control-Max-Age": "86400",
