@@ -30,6 +30,14 @@ export interface Env {
   YTDLP_API_URL?: string;
   /** Optional bearer token for the external yt-dlp resolver endpoint. */
   YTDLP_API_TOKEN?: string;
+  /** Optional HMAC key extracted from the current sssInstagram browser bundle. */
+  SSSINSTAGRAM_HMAC_KEY?: string;
+  /** Browser bundle _ts constant paired with SSSINSTAGRAM_HMAC_KEY. */
+  SSSINSTAGRAM_BUILD_TS?: string;
+  /** Optional paid EasyDown API token. */
+  EASYDOWN_API_KEY?: string;
+  /** Optional paid GetInSaver API token. */
+  GETINSAVER_API_KEY?: string;
   DELIVERY_CLAIM_TTL_SECONDS?: string;
   SOCIAL_METADATA_TIMEOUT_MS?: string;
   /** Maximum binary thumbnail bytes encoded into response Base64. */
