@@ -39,3 +39,6 @@ GITHUB_WEBHOOK_CHAT_ID=-1001234567890
 
 # Optional filter: completed (default), or requested,in_progress,completed
 GITHUB_NOTIFY_ACTIONS=completed
+
+# Required to use POST /notifications/send; separate from RELAY_TOKEN.
+# NOTIFICATION_API_TOKEN=replace-with-long-random-secret
