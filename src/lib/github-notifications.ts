@@ -47,7 +47,7 @@ function statusInfo(action: string, conclusion: string): { icon: string; title: 
   if (action === "requested") return { icon: "📥", title: "Workflow solicitado" };
   if (action === "in_progress") return { icon: "🔄", title: "Workflow em execução" };
   const statuses: Record<string, { icon: string; title: string }> = {
-    success: { icon: "✅", title: "Workflow concluído com sucesso" },
+    success: { icon: "✅", title: "Workflow: sucesso" },
     failure: { icon: "❌", title: "Workflow falhou" },
     cancelled: { icon: "🛑", title: "Workflow cancelado" },
     timed_out: { icon: "⏱️", title: "Workflow excedeu o tempo" },
@@ -89,10 +89,9 @@ export function formatGithubWorkflowRun(payload: unknown): NotificationMessage |
   const { icon, title } = statusInfo(action, conclusion);
 
   const lines = [
-    icon + " <b>" + escapeTelegramHtml(title) + "</b>",
+    icon + " <b>" + escapeTelegramHtml(title) + ":" + escapeTelegramHtml(workflow) + "</b>",
     "",
    // "📦 <b>" + escapeTelegramHtml(fullName) + "</b>",
-    "⚙️ <b>" + escapeTelegramHtml(workflow) + "</b>" +
       (Number.isSafeInteger(runNumber) && runNumber > 0 ? "  #" + runNumber : "") +
       (Number.isSafeInteger(attempt) && attempt > 1 ? " · tentativa " + attempt : ""),
   ];
