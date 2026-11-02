@@ -990,3 +990,31 @@ export async function sendTelegramText(options: {
     body: JSON.stringify(payload),
   });
 }
+
+/** Edit the same Telegram notification rather than publishing a new bubble. */
+export async function editTelegramText(options: {
+  botToken: string;
+  chatId: string;
+  messageId: number;
+  text: string;
+  parseMode?: ParseMode | null;
+  buttons?: { text: string; url: string }[][];
+}): Promise<TelegramApiResult<TelegramMessage | true>> {
+  const payload: Record<string, unknown> = {
+    chat_id: options.chatId,
+    message_id: options.messageId,
+    text: options.text,
+    link_preview_options: { is_disabled: true },
+    // Explicitly clear obsolete Sentry buttons when a run recovers.
+    reply_markup: {
+      inline_keyboard: options.buttons?.map((row) =>
+        row.map((button) => ({ text: button.text, url: button.url }))
+      ) ?? [],
+    },
+  };
+  if (options.parseMode) payload.parse_mode = options.parseMode;
+  return requestTelegram<TelegramMessage | true>(options.botToken, "editMessageText", {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}

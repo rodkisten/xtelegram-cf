@@ -116,3 +116,66 @@ If native webhooks are unavailable, add NOTIFICATION_API_TOKEN to the repo's Act
           --data-binary @notification.json
 
 Prefer the native webhook for consistent results across all workflow files without editing every workflow YAML.
+
+
+## Editar mensagens sem poluir o Telegram
+
+O relay permite **uma única mensagem por execução**. A primeira chamada
+envia `sendMessage`, e as próximas atualizam o mesmo `message_id` via
+`editMessageText` automaticamente:
+
+```json
+{
+  "notification_key": "workflow:rodkisten/photointel:41476496429",
+  "sequence": 100102,
+  "body": "🔄 Workflow em execução: 2/5",
+  "chat_id": "-1001234567890:73",
+  "parse_mode": "HTML",
+  "buttons": [[{"text":"Ver workflow","url":"https://github.com/rodkisten/photointel/actions"}]]
+}
+```
+
+Faça `POST /notifications/send` com `Authorization: Bearer NOTIFICATION_API_TOKEN`.
+Envie a mesma chave nas atualizações e aumente `sequence` progressivamente;
+o relay ignora versões atrasadas e retorna `stale: true`. A API devolve
+`message_id` e `edited` para cada chamada. Uma chave não identifica apenas
+uma mensagem entre todos os chats: a unicidade é por **chat, tópico e chave**.
+
+Se já tiver o ID do Telegram e não precisar de persistência por chave,
+`POST /notifications/edit` aceita `message_id` + `chat_id` + `body`.
+A API também aceita esse formato em `POST /notifications/send`.
+Ambas exigem o mesmo bearer token do endpoint de envio.
+
+É possível testar e gerar `curl`/`fetch` para envio, upsert e edição na UI
+**/notifications**.
+
+### Proteções e implantação
+
+- D1 `notification_messages` guarda `message_id`, versão e um lease contra
+  atualizações concorrentes entre múltiplos Workers.
+- `GET /notifications/capabilities`, autenticado, responde
+  `version: editable-v1`; o PhotoIntel consulta antes de enviar mensagens
+  editáveis, evitando que um relay antigo ignore a chave e crie duplicatas.
+- O webhook assinado do GitHub e a action `Notify` do PhotoIntel compartilham
+  `notification_key = workflow:<owner>/<repo>:<run_id>`.
+- Falhas temporárias não substituem mensagens; uma mensagem apagada no Telegram
+  só é recriada se a Bot API retornar explicitamente erro de mensagem inexistente.
+- Os dados do D1 persistem após reiniciar Worker. A entrega continua *at-least-once*
+  em caso de ACK de rede ambíguo.
+
+**Ordem obrigatória de ativação:** aplique a migração de produção primeiro:
+
+```sh
+npm ci
+npm run db:migrate:remote
+npm run build
+npm run deploy
+```
+
+O deploy do Worker exige credenciais Cloudflare válidas e o segredo
+`NOTIFICATION_API_TOKEN` devidamente provisionado. Publique o relay
+**antes de atualizar os containers do PhotoIntel**.
+
+⚠️ Tokens de bot e outros segredos não devem ficar em `wrangler.toml` nem
+ser impressos em logs; configure-os com `wrangler secret put` e rotacione
+quaisquer valores que já tenham sido comitados.

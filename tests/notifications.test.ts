@@ -6,6 +6,7 @@ import { handleNotificationSend } from "../src/routes/notifications.ts";
 import { routeRequest } from "../src/app/router.ts";
 import { handleGithubWebhook } from "../src/routes/github-webhook.ts";
 import type { Env } from "../src/types.ts";
+import { createTestDb } from "./helpers/d1.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -46,33 +47,8 @@ function signedRequest(payload: object, secret: string, deliveryId = "abcdef12-3
 }
 
 function fakeDb() {
-  const state = new Map<string, string>();
-  return {
-    state,
-    prepare(sql: string) {
-      return {
-        bind(...params: unknown[]) {
-          return {
-            async run() {
-              const id = String(params[0]);
-              if (sql.startsWith("INSERT")) {
-                if (state.get(id) === "sent" || state.get(id) === "processing") {
-                  return { meta: { changes: 0 } };
-                }
-                state.set(id, "processing");
-                return { meta: { changes: 1 } };
-              }
-              if (sql.startsWith("UPDATE")) {
-                state.set(id, String(params[1]));
-                return { meta: { changes: 1 } };
-              }
-              throw new Error("Unexpected SQL statement");
-            },
-          };
-        },
-      };
-    },
-  };
+  const { db, sqlite } = createTestDb();
+  return { ...db, state: new Map<string, string>(), sqlite };
 }
 
 describe("Telegram notification sender", () => {
@@ -181,10 +157,12 @@ describe("GitHub workflow webhook", () => {
     assert.equal(response2.status, 200);
     assert.equal((await response2.json() as { duplicate: boolean }).duplicate, true);
     assert.equal(sends, 1);
-    assert.equal(db.state.get("abcdef12-3456-4789-8765-abcdef123456"), "sent");
+    assert.equal(db.sqlite.prepare(
+      "SELECT state FROM github_notification_deliveries WHERE delivery_id=?"
+    ).get("abcdef12-3456-4789-8765-abcdef123456")?.state, "sent");
   });
 
-  it("filters requested/in_progress by default and accepts them if configured", async () => {
+  it("accepts requested/in_progress by default and filters them when configured", async () => {
     const db = fakeDb();
     const env = {
       GITHUB_WEBHOOK_SECRET: "secret",
@@ -192,17 +170,20 @@ describe("GitHub workflow webhook", () => {
       GITHUB_WEBHOOK_CHAT_ID: "42",
       RELAY_DB: db as unknown as D1Database,
     } as Env;
-    const ignored = await handleGithubWebhook(signedRequest(webhookPayload("requested", ""), "secret"), env);
-    assert.equal(ignored.status, 202);
     let sends = 0;
     globalThis.fetch = async () => {
       sends++;
       return Response.json({ ok: true, result: { message_id: 2 } });
     };
-    const accepted = await handleGithubWebhook(signedRequest(webhookPayload("requested", ""), "secret"), {
-      ...env, GITHUB_NOTIFY_ACTIONS: "requested,in_progress,completed",
-    });
+    const accepted = await handleGithubWebhook(signedRequest(webhookPayload("requested", ""), "secret"), env);
     assert.equal(accepted.status, 200);
+    assert.equal(sends, 1);
+
+    const filtered = await handleGithubWebhook(signedRequest(webhookPayload("in_progress", ""), "secret",
+      "bcdefa12-3456-4789-8765-abcdef123456"), {
+      ...env, GITHUB_NOTIFY_ACTIONS: "completed",
+    });
+    assert.equal(filtered.status, 202);
     assert.equal(sends, 1);
   });
 });

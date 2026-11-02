@@ -1,14 +1,14 @@
 import { json } from "../http/response";
 import { formatGithubWorkflowRun, verifyGithubSignature } from "../lib/github-notifications";
 import { parseTelegramDestination, resolveDefaultTelegramChatId } from "../services/channels";
-import { sendTelegramText } from "../telegram";
+import { deliverMutableNotification } from "../lib/mutable-notifications";
 import type { Env } from "../types";
 
 const MAX_WEBHOOK_BYTES = 512 * 1024;
 const DELIVERY_ID_PATTERN = /^[a-f0-9-]{32,64}$/i;
 
 function allowedActions(value?: string): Set<string> {
-  const selected = value?.trim() || "completed";
+  const selected = value?.trim() || "requested,in_progress,completed";
   return new Set(selected.split(",").map((item) => item.trim()).filter(Boolean));
 }
 
@@ -71,7 +71,7 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     return json({ ok: false, error: "Invalid workflow_run payload" }, 400);
   }
   const action = (payload as Record<string, unknown>).action;
-  if (typeof action !== "string") { // || !allowedActions(env.GITHUB_NOTIFY_ACTIONS).has(action)) {
+  if (typeof action !== "string" || !allowedActions(env.GITHUB_NOTIFY_ACTIONS).has(action)) {
     return json({ ok: true, ignored: true, reason: "action_filtered", action }, 202);
   }
 
@@ -106,10 +106,18 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
   if (!claimed) return json({ ok: true, duplicate: true, delivery_id: deliveryId });
 
   try {
-    const result = await sendTelegramText({
-      botToken: env.TELEGRAM_BOT_TOKEN,
+    const root = payload as Record<string, unknown>;
+    const run = root.workflow_run as Record<string, unknown>;
+    const repository = root.repository as Record<string, unknown>;
+    const attempt = typeof run.run_attempt === "number" && Number.isSafeInteger(run.run_attempt) &&
+      run.run_attempt > 0 && run.run_attempt < 1000 ? run.run_attempt : 1;
+    const stage = action === "requested" ? 1 : action === "in_progress" ? 2 : 99999;
+    const key = "workflow:" + String(repository.full_name) + ":" + String(run.id);
+    const result = await deliverMutableNotification(env, {
       chatId: destination.chatId,
-      messageThreadId: destination.messageThreadId,
+      threadId: destination.messageThreadId,
+      notificationKey: key,
+      sequence: attempt * 100000 + stage,
       text: message.text,
       parseMode: "HTML",
       buttons: message.buttons,
@@ -118,11 +126,11 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       await setDeliveryState(env.RELAY_DB, deliveryId, "failed");
       return json({
         ok: false,
-        stage: "telegram",
+        stage: result.busy ? "in_progress" : "telegram",
         error: result.description || "Telegram rejected the message",
-        telegramStatus: result.httpStatus ?? null,
+        telegramStatus: result.telegramStatus ?? null,
         delivery_id: deliveryId,
-      }, 502);
+      }, result.busy ? 409 : 502);
     }
     await setDeliveryState(env.RELAY_DB, deliveryId, "sent");
     return json({
@@ -130,7 +138,9 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       delivery_id: deliveryId,
       event,
       action,
-      message_id: result.result?.message_id ?? null,
+      message_id: result.messageId,
+      edited: result.edited,
+      stale: result.stale ?? false,
     });
   } catch (error) {
     // A network failure can have an ambiguous outcome; re-delivery is
