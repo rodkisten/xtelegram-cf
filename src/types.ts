@@ -1,6 +1,16 @@
 export interface Env {
   RELAY_DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
+  /** Default destination for text notifications. Numeric chat IDs may contain a :topic suffix. */
+  NOTIFICATION_CHAT_ID?: string;
+  /** Independent bearer secret required by POST /notifications/send. */
+  NOTIFICATION_API_TOKEN?: string;
+  /** HMAC-SHA256 secret supplied to GitHub repository/organization webhook settings. */
+  GITHUB_WEBHOOK_SECRET?: string;
+  /** Destination for GitHub Actions alerts (falls back to NOTIFICATION_CHAT_ID). */
+  GITHUB_WEBHOOK_CHAT_ID?: string;
+  /** Comma-separated workflow_run actions; default completed. */
+  GITHUB_NOTIFY_ACTIONS?: string;
   TELEGRAM_CHAT_ID?: string;
   /** @deprecated Use TELEGRAM_CHAT_ID. Kept for backwards compatibility. */
   TELEGRAM_CHANNEL_ID?: string;
