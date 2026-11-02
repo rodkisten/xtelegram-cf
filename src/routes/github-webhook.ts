@@ -71,7 +71,7 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     return json({ ok: false, error: "Invalid workflow_run payload" }, 400);
   }
   const action = (payload as Record<string, unknown>).action;
-  if (typeof action !== "string" || !allowedActions(env.GITHUB_NOTIFY_ACTIONS).has(action)) {
+  if (typeof action !== "string") { // || !allowedActions(env.GITHUB_NOTIFY_ACTIONS).has(action)) {
     return json({ ok: true, ignored: true, reason: "action_filtered", action }, 202);
   }
 
