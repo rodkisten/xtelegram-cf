@@ -2,10 +2,26 @@
 
 The relay now supports text notifications independently from media uploads.
 
+## Notification Studio (interface visual)
+
+Abra **GET /notifications** no mesmo domínio do Worker (também aceita /notifications/).
+É uma página HTML responsiva servida diretamente pelo relay, sem build de frontend e sem autenticação para a prévia.
+
+- Editor Markdown com barra de formatação, tipos de evento, título, chat ID, tópico e modo silencioso.
+- Conversão local do Markdown para as tags HTML aceitas pela Telegram Bot API, com escapes de texto/URLs.
+- Mockup interativo de uma conversa do Telegram para iOS, com bolha do bot e botões inline.
+- Até 3 linhas de 3 botões HTTPS, com validação de URL e tamanho da mensagem.
+- Geradores com syntax highlighting e botão de copiar: cURL, Fetch para Node.js e JSON body.
+- Exemplos de cURL/Fetch usam NOTIFICATION_API_TOKEN do **ambiente de execução**, nunca um valor do Worker.
+- O editor não envia mensagens, não lê secrets e não persiste o conteúdo. O envio real continua exclusivamente pelo POST /notifications/send autenticado.
+
+A prévia é uma simulação visual e não reproduz fielmente cada versão do Telegram nem todas as particularidades do parser da Bot API. ESMs de Marked/Highlight.js são carregados via esm.sh, com fallback para texto simples caso o CDN esteja indisponível.
+
 ## Endpoints
 
 | Endpoint | Authentication | Purpose |
 | --- | --- | --- |
+| GET /notifications | Nenhuma (HTML público, sem tokens) | Compor e visualizar mensagens e gerar cURL/Fetch |
 | POST /notifications/send | Authorization: Bearer NOTIFICATION_API_TOKEN | Deliver text to a Telegram chat or forum topic |
 | POST /webhooks/github | X-Hub-Signature-256 (GitHub HMAC SHA-256) | Format and send GitHub Actions workflow_run status notifications |
 
