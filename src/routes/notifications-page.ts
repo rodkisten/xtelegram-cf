@@ -163,7 +163,7 @@ const PAGE = String.raw`<!doctype html>
           <h1>Uma mensagem. Mil possibilidades.</h1>
           <p>Escreva em Markdown, visualize no Telegram para iOS e gere a requisição da API.</p>
         </div>
-        <div class="endpoint"><b>POST</b> /notifications/send</div>
+        <div class="endpoint"><b>POST</b> <span id="endpoint-path">/notifications/send</span></div>
       </section>
 
       <main>
@@ -174,6 +174,33 @@ const PAGE = String.raw`<!doctype html>
               <button class="ghost" id="reset" type="button">Restaurar exemplo</button>
             </div>
             <div class="form">
+              <div class="row">
+                <div>
+                  <label for="delivery-mode">Entrega da mensagem</label>
+                  <select id="delivery-mode">
+                    <option value="upsert">🔄 Criar ou atualizar por chave</option>
+                    <option value="edit">✏️ Editar por message_id</option>
+                    <option value="send">📨 Enviar nova mensagem</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="notification-key">Chave da execução (upsert)</label>
+                  <input id="notification-key" value="workflow:photointel:deploy" placeholder="workflow:repo:123" spellcheck="false" autocomplete="off">
+                  <span class="hint">Reutilize a mesma chave para editar a mensagem existente.</span>
+                </div>
+              </div>
+              <div class="row" id="edit-properties">
+                <div>
+                  <label for="message-id">Message ID (edição direta)</label>
+                  <input id="message-id" inputmode="numeric" placeholder="123456" autocomplete="off">
+                  <span class="hint">Disponível na resposta da primeira chamada.</span>
+                </div>
+                <div>
+                  <label for="sequence">Versão da atualização</label>
+                  <input id="sequence" type="number" min="0" step="1" value="1" inputmode="numeric">
+                  <span class="hint">Versões menores não sobrescrevem atualizações recentes.</span>
+                </div>
+              </div>
               <div class="row">
                 <div>
                   <label for="status">Tipo de evento</label>
@@ -367,6 +394,17 @@ Deploy realizado na branch &#96;main&#96; e todos os serviços estão operaciona
         const thread = $("thread").value.trim();
         if (thread && (!/^[1-9]\d*$/.test(thread) || !Number.isSafeInteger(Number(thread)))) errors.push("O tópico precisa ser um inteiro positivo.");
         if (chat.includes(":") && thread) errors.push("Informe o tópico no Chat ID ou no campo de tópico, nunca em ambos.");
+        const mode = $("delivery-mode").value;
+        const key = $("notification-key").value.trim();
+        const messageId = $("message-id").value.trim();
+        const sequence = $("sequence").value.trim();
+        if (mode === "upsert") {
+          if (!/^[a-zA-Z0-9_:./-]{1,180}$/.test(key)) errors.push("Use uma chave de 1-180 caracteres, sem espaços.");
+          if (!/^\d+$/.test(sequence) || !Number.isSafeInteger(Number(sequence))) errors.push("Sequence precisa ser um inteiro positivo ou zero.");
+        }
+        if (mode === "edit" && (!/^[1-9]\d*$/.test(messageId) || !Number.isSafeInteger(Number(messageId)))) {
+          errors.push("Para editar, informe um message_id positivo retornado pelo Telegram.");
+        }
         const count = [0,0,0];
         state.buttons.forEach((b) => {
           count[Number(b.row) - 1] += 1;
@@ -382,13 +420,21 @@ Deploy realizado na branch &#96;main&#96; e todos os serviços estão operaciona
         if (chat) data.chat_id = chat;
         const thread = $("thread").value.trim();
         if (thread && /^[1-9]\d*$/.test(thread) && Number.isSafeInteger(Number(thread))) data.message_thread_id = Number(thread);
+        const mode = $("delivery-mode").value;
+        if (mode === "upsert") {
+          data.notification_key = $("notification-key").value.trim();
+          data.sequence = Number($("sequence").value || "0");
+        } else if (mode === "edit") {
+          const messageId = Number($("message-id").value);
+          if (Number.isSafeInteger(messageId) && messageId > 0) data.message_id = messageId;
+        }
         const rows = buttonRows();
         if (rows.length) data.buttons = rows;
         return data;
       }
       function shQuote(value) { return "'" + value.replace(/'/g, "'\"'\"'") + "'"; }
       function snippets(data) {
-        const url = new URL("/notifications/send", location.origin).toString();
+        const url = new URL($("delivery-mode").value === "edit" ? "/notifications/edit" : "/notifications/send", location.origin).toString();
         const compact = JSON.stringify(data);
         return {
           curl: [
@@ -427,6 +473,10 @@ Deploy realizado na branch &#96;main&#96; e todos os serviços estão operaciona
       function refresh() {
         const html = compose();
         const data = payload(html);
+        $("endpoint-path").textContent = $("delivery-mode").value === "edit" ? "/notifications/edit" : "/notifications/send";
+        $("notification-key").disabled = $("delivery-mode").value !== "upsert";
+        $("message-id").disabled = $("delivery-mode").value !== "edit";
+        $("sequence").disabled = $("delivery-mode").value !== "upsert";
         state.errors = validate(html, data);
         const alerts = $("alert");
         alerts.hidden = !state.errors.length;
@@ -529,11 +579,15 @@ Deploy realizado na branch &#96;main&#96; e todos os serviços estão operaciona
         $("chat").value = "";
         $("thread").value = "";
         $("silent").checked = false;
+        $("delivery-mode").value = "upsert";
+        $("notification-key").value = "workflow:photointel:deploy";
+        $("message-id").value = "";
+        $("sequence").value = "1";
         $("body").value = "**PhotoIntel API** está disponível.\n\nDeploy realizado na branch " + String.fromCharCode(96) + "main" + String.fromCharCode(96) + " e todos os serviços estão operacionais.\n\n> Nenhum erro detectado no pipeline.";
         state.buttons = [{ ...defaultButton }];
         renderButtons(); refresh();
       }
-      document.querySelectorAll("#status,#title,#chat,#thread,#silent,#body").forEach((item) => {
+      document.querySelectorAll("#status,#title,#chat,#thread,#silent,#body,#delivery-mode,#notification-key,#message-id,#sequence").forEach((item) => {
         item.addEventListener("input",refresh);
         item.addEventListener("change",refresh);
       });
