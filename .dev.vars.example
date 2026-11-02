@@ -25,3 +25,17 @@ THUMBNAIL_BASE64_MAX_BYTES=393216
 # Optional paid, documented API fallbacks, used only after free/self-hosted ones.
 # EASYDOWN_API_KEY=replace-me
 # GETINSAVER_API_KEY=replace-me
+
+
+# Optional: default chat for POST /notifications/send (numeric ID, @channel, or ID:topic).
+NOTIFICATION_CHAT_ID=-1001234567890
+
+# Required to use POST /webhooks/github. Must match GitHub's Webhook Secret.
+# Create a separate strong random secret via: npx wrangler secret put GITHUB_WEBHOOK_SECRET
+# GITHUB_WEBHOOK_SECRET=replace-with-long-random-secret
+
+# Destination for GitHub Actions status notifications (supports ID:topic).
+GITHUB_WEBHOOK_CHAT_ID=-1001234567890
+
+# Optional filter: completed (default), or requested,in_progress,completed
+GITHUB_NOTIFY_ACTIONS=completed
