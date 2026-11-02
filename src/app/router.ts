@@ -53,6 +53,19 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
     return handleGithubWebhook(request, env);
   }
 
+  if (method === "GET" && url.pathname === "/notifications/capabilities") {
+    const token = String(env.NOTIFICATION_API_TOKEN || "").trim();
+    if (!token) return json({ ok: false, error: "Missing NOTIFICATION_API_TOKEN", stage: "configuration" }, 500);
+    if (!isAuthorized(request, token)) {
+      return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+    }
+    return json({
+      ok: true, version: "editable-v1",
+      features: ["send", "edit_message_id", "upsert_notification_key", "sequence"],
+      storage: "D1",
+    });
+  }
+
   if (method === "POST" && (url.pathname === "/notifications/send" || url.pathname === "/notifications/edit")) {
     const token = String(env.NOTIFICATION_API_TOKEN || "").trim();
     if (!token) return json({ ok: false, error: "Missing NOTIFICATION_API_TOKEN", stage: "configuration" }, 500);
