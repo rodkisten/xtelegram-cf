@@ -362,7 +362,7 @@ Deploy realizado na branch &#96;main&#96; e todos os serviços estão operaciona
         if (!body.trim()) errors.push("Escreva um título ou uma mensagem.");
         if (body.length > 4096) errors.push("A mensagem excede 4096 caracteres no HTML gerado.");
         const chat = $("chat").value.trim();
-        if (chat && !/^(?:-?\d+(?::[1-9]\d*)?|@[A-Za-z0-9_]{5,32})$/.test(chat)) errors.push("Chat ID inválido: use um ID numérico, @canal ou ID:tópico.");
+        if (chat && !/^(?:-?\d+(?::[1-9]\d*)?|@[A-Za-z0-9_]{1,64})$/.test(chat)) errors.push("Chat ID inválido: use um ID numérico, @canal ou ID:tópico.");
         const thread = $("thread").value.trim();
         if (thread && (!/^[1-9]\d*$/.test(thread) || !Number.isSafeInteger(Number(thread)))) errors.push("O tópico precisa ser um inteiro positivo.");
         if (chat.includes(":") && thread) errors.push("Informe o tópico no Chat ID ou no campo de tópico, nunca em ambos.");
