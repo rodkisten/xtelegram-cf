@@ -53,14 +53,14 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
     return handleGithubWebhook(request, env);
   }
 
-  if (method === "POST" && url.pathname === "/notifications/send") {
+  if (method === "POST" && (url.pathname === "/notifications/send" || url.pathname === "/notifications/edit")) {
     const token = String(env.NOTIFICATION_API_TOKEN || "").trim();
     if (!token) return json({ ok: false, error: "Missing NOTIFICATION_API_TOKEN", stage: "configuration" }, 500);
     if (!isAuthorized(request, token)) {
       return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
     }
     relayDebug(env, traceId, "router.dispatch", { handler: "notification-send" });
-    return handleNotificationSend(request, env);
+    return handleNotificationSend(request, env, url.pathname === "/notifications/edit");
   }
 
   const authorizationError = authorizeRequest(request, env);
