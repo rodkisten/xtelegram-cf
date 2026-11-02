@@ -4,7 +4,7 @@
  * No Worker secrets are interpolated into this page. The generated examples
  * deliberately read NOTIFICATION_API_TOKEN from the caller's environment.
  */
-const PAGE = String.raw\`<!doctype html>
+const PAGE = String.raw`<!doctype html>
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8">
@@ -217,7 +217,7 @@ const PAGE = String.raw\`<!doctype html>
                 </div>
                 <textarea id="body" spellcheck="true">**PhotoIntel API** está disponível.
 
-Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
+Deploy realizado na branch &#96;main&#96; e todos os serviços estão operacionais.
 
 > Nenhum erro detectado no pipeline.</textarea>
                 <span class="hint">Markdown é convertido para HTML compatível com o Telegram. HTML digitado é tratado como texto.</span>
@@ -309,7 +309,7 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
           if (t.type === "em") return "<i>" + inline(t.tokens) + "</i>";
           if (t.type === "del") return "<s>" + inline(t.tokens) + "</s>";
           if (t.type === "codespan") return "<code>" + escapeHtml(t.text) + "</code>";
-          if (t.type === "br") return "\\n";
+          if (t.type === "br") return "\n";
           if (t.type === "link") {
             const label = inline(t.tokens) || escapeHtml(t.text || t.href);
             return validUrl(t.href) ? '<a href="' + escapeHtml(t.href) + '">' + label + "</a>" : label;
@@ -327,15 +327,15 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
           if (t.type === "code") return "<pre><code>" + escapeHtml(t.text || "") + "</code></pre>";
           if (t.type === "blockquote") return "<blockquote>" + blocks(t.tokens) + "</blockquote>";
           if (t.type === "list") {
-            return (t.items || []).map((item,index) => (t.ordered ? (Number(t.start || 1) + index) + "." : "•") + " " + blocks(item.tokens).trim()).join("\\n");
+            return (t.items || []).map((item,index) => (t.ordered ? (Number(t.start || 1) + index) + "." : "•") + " " + blocks(item.tokens).trim()).join("\n");
           }
           if (t.type === "hr") return "────────────";
           if (t.type === "table") {
             const row = (cells) => cells.map((c) => inline(c.tokens)).join("  |  ");
-            return [row(t.header),...(t.rows || []).map(row)].join("\\n");
+            return [row(t.header),...(t.rows || []).map(row)].join("\n");
           }
           return escapeHtml(t.text || t.raw || "");
-        }).filter(Boolean).join("\\n\\n");
+        }).filter(Boolean).join("\n\n");
       }
       function asTelegramHtml(markdown) {
         if (!markedParser) return escapeHtml(markdown);
@@ -347,7 +347,7 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
         const icon = statusIcons[$("status").value] || "";
         const heading = title ? (icon ? icon + " " : "") + "<b>" + escapeHtml(title) + "</b>" : "";
         const content = asTelegramHtml($("body").value.trim());
-        return [heading,content].filter(Boolean).join("\\n\\n");
+        return [heading,content].filter(Boolean).join("\n\n");
       }
       function buttonRows() {
         const rows = [[],[],[]];
@@ -362,9 +362,9 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
         if (!body.trim()) errors.push("Escreva um título ou uma mensagem.");
         if (body.length > 4096) errors.push("A mensagem excede 4096 caracteres no HTML gerado.");
         const chat = $("chat").value.trim();
-        if (chat && !/^(?:-?\\d+(?::[1-9]\\d*)?|@[A-Za-z0-9_]{5,32})$/.test(chat)) errors.push("Chat ID inválido: use um ID numérico, @canal ou ID:tópico.");
+        if (chat && !/^(?:-?\d+(?::[1-9]\d*)?|@[A-Za-z0-9_]{5,32})$/.test(chat)) errors.push("Chat ID inválido: use um ID numérico, @canal ou ID:tópico.");
         const thread = $("thread").value.trim();
-        if (thread && (!/^[1-9]\\d*$/.test(thread) || !Number.isSafeInteger(Number(thread)))) errors.push("O tópico precisa ser um inteiro positivo.");
+        if (thread && (!/^[1-9]\d*$/.test(thread) || !Number.isSafeInteger(Number(thread)))) errors.push("O tópico precisa ser um inteiro positivo.");
         if (chat.includes(":") && thread) errors.push("Informe o tópico no Chat ID ou no campo de tópico, nunca em ambos.");
         const count = [0,0,0];
         state.buttons.forEach((b) => {
@@ -380,22 +380,22 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
         const chat = $("chat").value.trim();
         if (chat) data.chat_id = chat;
         const thread = $("thread").value.trim();
-        if (thread && /^[1-9]\\d*$/.test(thread) && Number.isSafeInteger(Number(thread))) data.message_thread_id = Number(thread);
+        if (thread && /^[1-9]\d*$/.test(thread) && Number.isSafeInteger(Number(thread))) data.message_thread_id = Number(thread);
         const rows = buttonRows();
         if (rows.length) data.buttons = rows;
         return data;
       }
-      function shQuote(value) { return "'" + value.replace(/'/g, "'\\"'\\"'") + "'"; }
+      function shQuote(value) { return "'" + value.replace(/'/g, "'\"'\"'") + "'"; }
       function snippets(data) {
         const url = new URL("/notifications/send", location.origin).toString();
         const compact = JSON.stringify(data);
         return {
           curl: [
-            "curl --fail-with-body -X POST " + shQuote(url) + " \\\\",
-            "  -H \\"Authorization: Bearer \\u0024NOTIFICATION_API_TOKEN\\" \\\\",
-            "  -H \\"Content-Type: application/json\\" \\\\",
+            "curl --fail-with-body -X POST " + shQuote(url) + " \\",
+            "  -H \"Authorization: Bearer \u0024NOTIFICATION_API_TOKEN\" \\",
+            "  -H \"Content-Type: application/json\" \\",
             "  --data-raw " + shQuote(compact)
-          ].join("\\n"),
+          ].join("\n"),
           fetch: [
             "const payload = " + JSON.stringify(data,null,2) + ";",
             "",
@@ -411,7 +411,7 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
             "const result = await response.json();",
             "if (!response.ok) throw new Error(JSON.stringify(result));",
             "console.log(result);"
-          ].join("\\n"),
+          ].join("\n"),
           json: JSON.stringify(data,null,2)
         };
       }
@@ -528,7 +528,7 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
         $("chat").value = "";
         $("thread").value = "";
         $("silent").checked = false;
-        $("body").value = "**PhotoIntel API** está disponível.\\n\\nDeploy realizado na branch " + String.fromCharCode(96) + "main" + String.fromCharCode(96) + " e todos os serviços estão operacionais.\\n\\n> Nenhum erro detectado no pipeline.";
+        $("body").value = "**PhotoIntel API** está disponível.\n\nDeploy realizado na branch " + String.fromCharCode(96) + "main" + String.fromCharCode(96) + " e todos os serviços estão operacionais.\n\n> Nenhum erro detectado no pipeline.";
         state.buttons = [{ ...defaultButton }];
         renderButtons(); refresh();
       }
@@ -580,7 +580,7 @@ Deploy realizado na branch \`main\` e todos os serviços estão operacionais.
       }).catch(() => { /* uncolored, copyable code still works */ });
     </script>
   </body>
-</html>\`;
+</html>`;
 
 export function handleNotificationsPage(): Response {
   return new Response(PAGE, {
