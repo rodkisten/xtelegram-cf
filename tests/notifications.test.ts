@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
 import { formatGithubWorkflowRun, verifyGithubSignature } from "../src/lib/github-notifications.ts";
 import { handleNotificationSend } from "../src/routes/notifications.ts";
+import { routeRequest } from "../src/app/router.ts";
 import { handleGithubWebhook } from "../src/routes/github-webhook.ts";
 import type { Env } from "../src/types.ts";
 
@@ -203,5 +204,37 @@ describe("GitHub workflow webhook", () => {
     });
     assert.equal(accepted.status, 200);
     assert.equal(sends, 1);
+  });
+});
+
+describe("Notification Studio HTML page", () => {
+  it("serves the composer on both /notifications URLs without exposing Worker secrets", async () => {
+    const env = {
+      RELAY_TOKEN: "secret-relay-token",
+      NOTIFICATION_API_TOKEN: "secret-notification-token",
+      TELEGRAM_BOT_TOKEN: "secret-bot-token",
+    } as Env;
+    for (const path of ["/notifications", "/notifications/"]) {
+      const response = await routeRequest(new Request("https://relay.example" + path), env);
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") || "", /text\/html/);
+      assert.match(response.headers.get("content-security-policy") || "", /frame-ancestors 'none'/);
+      const page = await response.text();
+      assert.match(page, /Telegram para iOS/);
+      assert.match(page, /\/notifications\/send/);
+      assert.match(page, /generated-code/);
+      assert.match(page, /Copiar código/);
+      assert.match(page, /Markdown/);
+      assert.doesNotMatch(page, /secret-relay-token|secret-notification-token|secret-bot-token/);
+    }
+  });
+
+  it("keeps POST /notifications/send private even though the editor is public", async () => {
+    const response = await routeRequest(new Request("https://relay.example/notifications/send", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: "Hello", chat_id: "123" }),
+    }), { NOTIFICATION_API_TOKEN: "private-token" } as Env);
+    assert.equal(response.status, 401);
   });
 });
