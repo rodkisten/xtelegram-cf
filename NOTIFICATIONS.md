@@ -44,13 +44,17 @@ The destination supports numeric IDs, Telegram @channel usernames or -100...:73 
 
 GITHUB_WEBHOOK_CHAT_ID falls back to NOTIFICATION_CHAT_ID, then the legacy TELEGRAM_CHAT_ID. Set an explicit GitHub destination to avoid notifications in a media-only channel.
 
-Apply the D1 migration BEFORE deployment:
+Production deployments **automatically migrate remote D1 before building**.
+Use one command after installing dependencies (only when you intend to publish):
 
     npm ci
-    npm run db:migrate:remote
     npm run typecheck
     npm test
-    npx wrangler deploy
+    npm run deploy
+
+`npm run deploy` executes `db:migrate:remote → build → wrangler deploy`.
+If a D1 migration fails, the build and Worker publication stop immediately.
+Wrangler records successful migrations; subsequent deploys apply only pending files.
 
 Do not place real API tokens in wrangler.toml or GitHub files. Rotate previously committed credentials and replace them with Wrangler secrets.
 
@@ -163,14 +167,29 @@ Ambas exigem o mesmo bearer token do endpoint de envio.
 - Os dados do D1 persistem após reiniciar Worker. A entrega continua *at-least-once*
   em caso de ACK de rede ambíguo.
 
-**Ordem obrigatória de ativação:** aplique a migração de produção primeiro:
+**Ordem automática de ativação:** execute um único comando de produção:
 
 ```sh
 npm ci
-npm run db:migrate:remote
-npm run build
 npm run deploy
 ```
+
+O script `build:release` aplica todas as migrations remotas pendentes **antes**
+de chamar `npm run build`. `npm run deploy` executa esse script e só então
+publica o Worker. Não é necessário rodar migrations manualmente a cada deploy.
+
+Para usar a mesma ordem no GitHub Actions, execute manualmente o workflow
+**🚀 Relay · Migrate → Build → Deploy** em `main`. Ele instala dependências,
+valida o projeto, aplica migrations D1 remotas, roda o build e só depois
+publica. Se quiser automatizar nos pushes da `main`, habilite a variável de
+repositório `RELAY_AUTO_DEPLOY=true`. O workflow requer os segredos
+`CLOUDFLARE_API_TOKEN` e `CLOUDFLARE_ACCOUNT_ID` com permissões
+**D1 Edit** e **Workers Scripts Edit**.
+
+`npm run build` continua sendo **somente validação (dry-run)**, sem mexer no
+banco remoto: é usado nos PRs. A CI valida migrations em uma base **local**
+antes desse build, sem risco de alterar produção. `npm run dev` também aplica
+migrations locais automaticamente antes de iniciar o Wrangler.
 
 O deploy do Worker exige credenciais Cloudflare válidas e o segredo
 `NOTIFICATION_API_TOKEN` devidamente provisionado. Publique o relay
