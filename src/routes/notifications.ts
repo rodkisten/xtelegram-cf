@@ -1,6 +1,7 @@
 import { json } from "../http/response";
 import { parseTelegramDestination, resolveDefaultTelegramChatId } from "../services/channels";
 import { sendTelegramText } from "../telegram";
+import { deliverMutableNotification, editDirectNotification, validNotificationKey, validNotificationSequence } from "../lib/mutable-notifications";
 import type { Env, ParseMode } from "../types";
 import type { NotificationButton } from "../lib/github-notifications";
 
@@ -34,7 +35,7 @@ function buttonsFrom(value: unknown): NotificationButton[][] | null {
 }
 
 /** POST /notifications/send: an authenticated text-only Telegram sender. */
-export async function handleNotificationSend(request: Request, env: Env): Promise<Response> {
+export async function handleNotificationSend(request: Request, env: Env, requireEdit = false): Promise<Response> {
   if (request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
     return json({ ok: false, error: "Expected application/json" }, 415);
   }
@@ -87,6 +88,51 @@ export async function handleNotificationSend(request: Request, env: Env): Promis
   if (!buttons) return json({ ok: false, error: "Invalid buttons; expected up to 3 rows of HTTPS links" }, 422);
   if (!env.TELEGRAM_BOT_TOKEN) {
     return json({ ok: false, error: "Missing TELEGRAM_BOT_TOKEN", stage: "configuration" }, 500);
+  }
+
+  const messageId = data.message_id ?? data.messageId;
+  const notificationKey = data.notification_key ?? data.notificationKey;
+  const sequence = data.sequence ?? 0;
+  if (messageId !== undefined && messageId !== null &&
+      (typeof messageId !== "number" || !Number.isSafeInteger(messageId) || messageId <= 0)) {
+    return json({ ok: false, error: "message_id must be a positive integer" }, 422);
+  }
+  if (requireEdit && (messageId === undefined || messageId === null) && notificationKey === undefined) {
+    return json({ ok: false, error: "Edit requires message_id or notification_key" }, 422);
+  }
+  if (notificationKey !== undefined && !validNotificationKey(notificationKey)) {
+    return json({ ok: false, error: "notification_key must be 1-180 safe characters" }, 422);
+  }
+  if (notificationKey !== undefined && (messageId !== undefined && messageId !== null)) {
+    return json({ ok: false, error: "Provide notification_key OR message_id, not both" }, 422);
+  }
+  if (!validNotificationSequence(sequence)) {
+    return json({ ok: false, error: "sequence must be a nonnegative safe integer" }, 422);
+  }
+  if (notificationKey !== undefined || messageId !== undefined && messageId !== null) {
+    const options = {
+      chatId: destination.chatId, threadId: messageThreadId,
+      text: body, parseMode: parseMode as ParseMode | null, buttons,
+      disableNotification: data.disable_notification === true,
+    };
+    const receipt = notificationKey !== undefined
+      ? await deliverMutableNotification(env, {
+          ...options, notificationKey, sequence,
+        })
+      : await editDirectNotification(env, { ...options, messageId: messageId as number });
+    if (!receipt.ok) {
+      return json({
+        ok: false, stage: receipt.busy ? "in_progress" : "telegram",
+        error: receipt.description || "Notification update failed",
+        telegramStatus: receipt.telegramStatus ?? null,
+      }, receipt.busy ? 409 : receipt.description?.includes("migration 0010") ? 503 : 502);
+    }
+    return json({
+      ok: true, chat_id: destination.chatId,
+      message_thread_id: messageThreadId, message_id: receipt.messageId,
+      edited: receipt.edited, unchanged: receipt.unchanged ?? false,
+      stale: receipt.stale ?? false, notification_key: notificationKey ?? null,
+    });
   }
 
   const result = await sendTelegramText({
