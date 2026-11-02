@@ -1,7 +1,7 @@
 import { handleRodx } from "../routes/rodx";
 import { handleGithubWebhook } from "../routes/github-webhook";
 import { handleNotificationSend } from "../routes/notifications";
-import { authorizeRequest } from "../http/auth";
+import { authorizeRequest, isAuthorized } from "../http/auth";
 import { handleOptions, json } from "../http/response";
 import { handleBatch } from "../routes/batch";
 import { handleChannels } from "../routes/channels";
@@ -49,15 +49,20 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
     return handleGithubWebhook(request, env);
   }
 
+  if (method === "POST" && url.pathname === "/notifications/send") {
+    const token = String(env.NOTIFICATION_API_TOKEN || "").trim();
+    if (!token) return json({ ok: false, error: "Missing NOTIFICATION_API_TOKEN", stage: "configuration" }, 500);
+    if (!isAuthorized(request, token)) {
+      return json({ ok: false, error: "Unauthorized", stage: "authorization" }, 401);
+    }
+    relayDebug(env, traceId, "router.dispatch", { handler: "notification-send" });
+    return handleNotificationSend(request, env);
+  }
+
   const authorizationError = authorizeRequest(request, env);
   if (authorizationError) {
     relayDebug(env, traceId, "router.authorization-rejected", { status: authorizationError.status });
     return authorizationError;
-  }
-
-  if (method === "POST" && url.pathname === "/notifications/send") {
-    relayDebug(env, traceId, "router.dispatch", { handler: "notification-send" });
-    return handleNotificationSend(request, env);
   }
 
   if (method === "POST" && url.pathname === "/media/check") {
