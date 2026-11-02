@@ -1,6 +1,7 @@
 import { handleRodx } from "../routes/rodx";
 import { handleGithubWebhook } from "../routes/github-webhook";
 import { handleNotificationSend } from "../routes/notifications";
+import { handleNotificationsPage } from "../routes/notifications-page";
 import { authorizeRequest, isAuthorized } from "../http/auth";
 import { handleOptions, json } from "../http/response";
 import { handleBatch } from "../routes/batch";
@@ -24,6 +25,9 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   if (method === "OPTIONS") {
     relayDebug(env, traceId, "router.options", {});
     return handleOptions();
+  }
+  if (method === "GET" && (url.pathname === "/notifications" || url.pathname === "/notifications/")) {
+    return handleNotificationsPage();
   }
   if (method === "GET" && url.pathname === "/health") {
     relayDebug(env, traceId, "router.health", {});
