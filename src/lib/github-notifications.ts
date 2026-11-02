@@ -91,26 +91,26 @@ export function formatGithubWorkflowRun(payload: unknown): NotificationMessage |
   const lines = [
     icon + " <b>" + escapeTelegramHtml(title) + "</b>",
     "",
-    "📦 <b>" + escapeTelegramHtml(fullName) + "</b>",
+   // "📦 <b>" + escapeTelegramHtml(fullName) + "</b>",
     "⚙️ <b>" + escapeTelegramHtml(workflow) + "</b>" +
       (Number.isSafeInteger(runNumber) && runNumber > 0 ? "  #" + runNumber : "") +
       (Number.isSafeInteger(attempt) && attempt > 1 ? " · tentativa " + attempt : ""),
   ];
   if (displayTitle && displayTitle !== workflow) lines.push("📝 " + escapeTelegramHtml(displayTitle));
-  if (branch) lines.push("🌿 <b>Branch:</b> <code>" + escapeTelegramHtml(branch) + "</code>");
+  if (branch) lines.push("", "🌿 <b>Branch:</b> <code>" + escapeTelegramHtml(branch) + "</code>");
   if (sha) lines.push("🔖 <b>Commit:</b> <code>" + escapeTelegramHtml(sha.slice(0, 10)) + "</code>");
-  if (subject && subject !== displayTitle) lines.push("💬 " + escapeTelegramHtml(subject));
+  if (subject && subject !== displayTitle) lines.push("💬 <i>" + escapeTelegramHtml(subject) + "</i>");
   if (actorName) lines.push("👤 <b>Por:</b> " + escapeTelegramHtml(actorName));
   if (action === "completed" && conclusion) {
-    lines.push("📌 <b>Resultado:</b> " + escapeTelegramHtml(conclusion));
+    lines.push("", "📌 <b>Resultado:</b> " + escapeTelegramHtml(conclusion));
   }
 
   const buttons: NotificationButton[][] = [[
-    { text: "🔎 Abrir execução", url: runUrl },
-    { text: "📁 Repositório", url: repoUrl },
+    { text: " 🔎 Abrir execução ", url: runUrl },
+    { text: " 📁 Repositório ", url: repoUrl },
   ]];
   if (sha && /^[a-f0-9]{40}$/i.test(sha)) {
-    buttons.push([{ text: "🔖 Ver commit", url: repoUrl + "/commit/" + sha }]);
+    buttons.push([{ text: " 🔖 Ver commit ", url: repoUrl + "/commit/" + sha }]);
   }
   return { text: lines.join("\n"), buttons };
 }
