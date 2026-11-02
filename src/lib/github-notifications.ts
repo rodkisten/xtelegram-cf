@@ -89,16 +89,15 @@ export function formatGithubWorkflowRun(payload: unknown): NotificationMessage |
   const { icon, title } = statusInfo(action, conclusion);
 
   const lines = [
-    icon + " <b>" + escapeTelegramHtml(title) + " : " + escapeTelegramHtml(workflow) + "</b>",
-    "",
+    icon + " <b>" + escapeTelegramHtml(title) + " : " + escapeTelegramHtml(workflow.replace(/^\p{Extended_Pictographic}+/u, "")) + "</b>",
    // "📦 <b>" + escapeTelegramHtml(fullName) + "</b>",
-      (Number.isSafeInteger(runNumber) && runNumber > 0 ? "  #" + runNumber : "") +
-      (Number.isSafeInteger(attempt) && attempt > 1 ? " · tentativa " + attempt : ""),
+      (Number.isSafeInteger(runNumber) && runNumber > 0 ? "  #" + runNumber + " • ") +
+      (Number.isSafeInteger(attempt) && attempt > 1 ? " · tentativa " + attempt),
   ];
   if (displayTitle && displayTitle !== workflow) lines.push("📝 " + escapeTelegramHtml(displayTitle));
   if (branch) lines.push("", "🌿 <b>Branch:</b> <code>" + escapeTelegramHtml(branch) + "</code>");
   if (sha) lines.push("🔖 <b>Commit:</b> <code>" + escapeTelegramHtml(sha.slice(0, 10)) + "</code>");
-  if (subject && subject !== displayTitle) lines.push("💬 <blockquote>" + escapeTelegramHtml(subject) + "</blockquote>");
+  if (subject && subject !== displayTitle) lines.push("<blockquote>" + escapeTelegramHtml(subject) + "</blockquote>");
   if (actorName) lines.push("👤 <b>Por:</b> " + escapeTelegramHtml(actorName));
   if (action === "completed" && conclusion) {
     lines.push("", "📌 <b>Resultado:</b> " + escapeTelegramHtml(conclusion));
