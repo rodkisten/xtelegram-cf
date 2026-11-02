@@ -1,4 +1,6 @@
 import { handleRodx } from "../routes/rodx";
+import { handleGithubWebhook } from "../routes/github-webhook";
+import { handleNotificationSend } from "../routes/notifications";
 import { authorizeRequest } from "../http/auth";
 import { handleOptions, json } from "../http/response";
 import { handleBatch } from "../routes/batch";
@@ -42,10 +44,20 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
     return handleRodx(request, env);
   }
 
+  if (method === "POST" && url.pathname === "/webhooks/github") {
+    relayDebug(env, traceId, "router.dispatch", { handler: "github-webhook" });
+    return handleGithubWebhook(request, env);
+  }
+
   const authorizationError = authorizeRequest(request, env);
   if (authorizationError) {
     relayDebug(env, traceId, "router.authorization-rejected", { status: authorizationError.status });
     return authorizationError;
+  }
+
+  if (method === "POST" && url.pathname === "/notifications/send") {
+    relayDebug(env, traceId, "router.dispatch", { handler: "notification-send" });
+    return handleNotificationSend(request, env);
   }
 
   if (method === "POST" && url.pathname === "/media/check") {
