@@ -26,6 +26,26 @@ function send(env: Env, body: Record<string, unknown>, path = "/notifications/se
   }), env);
 }
 
+describe("Relay editable capability handshake", () => {
+  it("requires the notification bearer and advertises durable upsert", async () => {
+    const { env } = fixture();
+    const unauthenticated = await routeRequest(
+      new Request("https://relay.example/notifications/capabilities"), env,
+    );
+    assert.equal(unauthenticated.status, 401);
+    const response = await routeRequest(new Request(
+      "https://relay.example/notifications/capabilities", {
+        headers: { Authorization: "Bearer my-token" },
+      }), env);
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      version: string; features: string[];
+    };
+    assert.equal(body.version, "editable-v1");
+    assert.ok(body.features.includes("upsert_notification_key"));
+  });
+});
+
 describe("Edit-in-place Telegram notifications", () => {
   it("creates once then edits same message on every progress update", async () => {
     const { env, sqlite } = fixture();
