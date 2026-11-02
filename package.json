@@ -6,14 +6,17 @@
   "scripts": {
     "build": "wrangler deploy --dry-run",
     "typecheck": "tsc --noEmit",
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
+    "deploy": "npm run build:release && wrangler deploy",
+    "dev": "npm run db:migrate:local && wrangler dev",
     "lockfile:refresh": "npm install --package-lock-only --ignore-scripts",
     "db:create": "wrangler d1 create xtelegram-relay",
     "db:migrate:local": "wrangler d1 migrations apply RELAY_DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply RELAY_DB --remote",
     "db:migrations:list": "wrangler d1 migrations list RELAY_DB",
-    "test": "node --import ./tests/register-loader.mjs --experimental-transform-types --test tests/*.test.ts"
+    "test": "node --import ./tests/register-loader.mjs --experimental-transform-types --test tests/*.test.ts",
+    "build:release": "npm run db:migrate:remote && npm run build",
+    "db:migrate:check:local": "wrangler d1 migrations list RELAY_DB --local",
+    "db:migrate:check:remote": "wrangler d1 migrations list RELAY_DB --remote"
   },
   "dependencies": {
     "mux.js": "7.1.0"
