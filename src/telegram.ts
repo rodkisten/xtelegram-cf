@@ -953,3 +953,40 @@ async function requestTelegram<T>(
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+
+/**
+ * Text-only notification delivery. Reuses the same Telegram Bot API
+ * transport and error reporting as media delivery.
+ */
+export async function sendTelegramText(options: {
+  botToken: string;
+  chatId: string;
+  messageThreadId?: number | null;
+  text: string;
+  parseMode?: ParseMode | null;
+  disableNotification?: boolean;
+  buttons?: { text: string; url: string }[][];
+}): Promise<TelegramApiResult<TelegramMessage>> {
+  const payload: Record<string, unknown> = {
+    chat_id: options.chatId,
+    text: options.text,
+    link_preview_options: { is_disabled: true },
+  };
+  if (options.messageThreadId != null) {
+    payload.message_thread_id = options.messageThreadId;
+  }
+  if (options.parseMode) payload.parse_mode = options.parseMode;
+  if (options.disableNotification) payload.disable_notification = true;
+  if (options.buttons?.length) {
+    payload.reply_markup = {
+      inline_keyboard: options.buttons.map((row) =>
+        row.map((button) => ({ text: button.text, url: button.url }))
+      ),
+    };
+  }
+  return requestTelegram<TelegramMessage>(options.botToken, "sendMessage", {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
