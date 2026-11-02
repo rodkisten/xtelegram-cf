@@ -357,10 +357,11 @@ Deploy realizado na branch &#96;main&#96; e todos os serviços estão operaciona
         });
         return rows.filter((r) => r.length);
       }
-      function validate(body) {
+      function validate(body, data) {
         const errors = [];
         if (!body.trim()) errors.push("Escreva um título ou uma mensagem.");
         if (body.length > 4096) errors.push("A mensagem excede 4096 caracteres no HTML gerado.");
+        if (new TextEncoder().encode(JSON.stringify(data)).byteLength > 16384) errors.push("Payload maior que o limite de 16 KiB aceito pela API.");
         const chat = $("chat").value.trim();
         if (chat && !/^(?:-?\d+(?::[1-9]\d*)?|@[A-Za-z0-9_]{1,64})$/.test(chat)) errors.push("Chat ID inválido: use um ID numérico, @canal ou ID:tópico.");
         const thread = $("thread").value.trim();
@@ -426,7 +427,7 @@ Deploy realizado na branch &#96;main&#96; e todos os serviços estão operaciona
       function refresh() {
         const html = compose();
         const data = payload(html);
-        state.errors = validate(html);
+        state.errors = validate(html, data);
         const alerts = $("alert");
         alerts.hidden = !state.errors.length;
         alerts.textContent = state.errors.join(" ");
