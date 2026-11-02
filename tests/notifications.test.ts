@@ -225,6 +225,9 @@ describe("Notification Studio HTML page", () => {
       assert.match(page, /generated-code/);
       assert.match(page, /Copiar código/);
       assert.match(page, /Markdown/);
+      const moduleScript = page.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
+      assert.ok(moduleScript);
+      assert.doesNotThrow(() => new Function(moduleScript));
       assert.doesNotMatch(page, /secret-relay-token|secret-notification-token|secret-bot-token/);
     }
   });
