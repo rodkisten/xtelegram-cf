@@ -34,8 +34,8 @@ async function askSetting(title, message, secure = false) {
 }
 
 async function configForMode() {
-  let endpoint = getStored(KEYS.endpoint);
-  let token = getStored(KEYS.token);
+  let endpoint = getStored(KEYS.endpoint) || "https://xtelegram-cf.migos.club";
+  let token = getStored(KEYS.token) || getStored("xtelegram-relay-token");
 
   if (mode === "check" && (!endpoint || !token)) return null;
   if (!endpoint) {
