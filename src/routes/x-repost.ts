@@ -127,8 +127,11 @@ async function putXRepostMedia(request: Request, env: Env, id: string): Promise<
 
 /** Optional Telegram reminder. Does not publish on X or trigger iOS apps remotely. */
 export async function notifyDueXReposts(env: Env): Promise<void> {
-  const chatId = String(env.X_REPOST_NOTIFY_CHAT_ID || "").trim();
-  if (!chatId || !env.TELEGRAM_BOT_TOKEN) return;
+  const destination = String(env.X_REPOST_NOTIFY_CHAT_ID || "").trim();
+  if (!destination || !env.TELEGRAM_BOT_TOKEN) return;
+  const [chatId, topic] = destination.split(":");
+  if (!chatId) return;
+  const threadId = topic && /^\\d+$/.test(topic) ? Number(topic) : null;
 
   const now = Math.floor(Date.now() / 1000);
   const rows = (await repostDb(env).prepare(`
@@ -147,7 +150,12 @@ export async function notifyDueXReposts(env: Env): Promise<void> {
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: message, disable_web_page_preview: true }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        ...(threadId ? { message_thread_id: threadId } : {}),
+        text: message,
+        disable_web_page_preview: true,
+      }),
     });
     if (response.ok) {
       await repostDb(env).prepare(`
