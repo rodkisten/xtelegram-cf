@@ -1646,3 +1646,13 @@ expired Stories will not resolve.
 
 See: https://easydown.org/docs/en/api/instagram and
 https://developers.getinsaver.com/docs.
+
+## Agendamento de reposts no X via Scriptable
+
+O Relay enfileira posts de vídeo do X após entregá-los ao Telegram (ativado por
+`X_REPOST_AUTO_QUEUE=true`, ou pelo sinal `x_repost:true` por requisição).
+É compatível com os modos `send`, `fallback` e `register_compressed` do
+Scriptable XTelegram 3.5.5. Não utiliza a API oficial do X. A publicação é
+concluída pelo usuário na interface do iPhone.
+
+Guia de configuração: [Scriptable e fila X](docs/X-REPOST-SCRIPTABLE.md).
