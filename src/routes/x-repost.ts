@@ -49,7 +49,7 @@ export async function handleXRepost(request: Request, env: Env): Promise<Respons
 
     const match = path.match(/^\/x\/repost\/queue\/([A-Za-z0-9-]+)(?:\/(media))?$/);
     if (!match) return json({ ok: false, error: "Route not found" }, 404);
-    const id = match[1];
+    const id = match[1]!;
 
     if (match[2] === "media") {
       if (method === "GET") return getXRepostMedia(env, id);
