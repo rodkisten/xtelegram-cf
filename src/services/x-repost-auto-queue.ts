@@ -38,6 +38,9 @@ export async function queueXRepostAfterRelay(
   const resolution = record(result.resolution);
   const media = Array.isArray(resolution.media) ? resolution.media.map(record) : [];
   const video = media.find(item => item.type === "video");
+  // A repost account for videos must never silently queue still-photo posts.
+  if (media.length && !video) return null;
+  if (request.mediaType === "photo" || request.mediaType === "audio") return null;
   const sourceUrl = firstString(
     request.sourceUrl, request.url, resolution.sourceUrl,
     request.pageUrl,
@@ -45,7 +48,7 @@ export async function queueXRepostAfterRelay(
   const caption = firstString(request.x_caption, request.caption, resolution.caption, request.text);
   const hashtags = Array.isArray(request.hashtags) || typeof request.hashtags === "string"
     ? request.hashtags as string[] | string : [];
-  const videoUrl = firstString(request.x_media_url, video?.url, request.mediaUrl);
+  const videoUrl = firstString(request.x_media_url, video?.url, request.resolvedMediaUrl, request.mediaUrl);
   const telegramUrl = firstString(result.message_url, request.telegramMessageUrl);
 
   try {
