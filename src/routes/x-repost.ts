@@ -131,7 +131,7 @@ export async function notifyDueXReposts(env: Env): Promise<void> {
   if (!destination || !env.TELEGRAM_BOT_TOKEN) return;
   const [chatId, topic] = destination.split(":");
   if (!chatId) return;
-  const threadId = topic && /^\\d+$/.test(topic) ? Number(topic) : null;
+  const threadId = topic && /^\d+$/.test(topic) ? Number(topic) : null;
 
   const now = Math.floor(Date.now() / 1000);
   const rows = (await repostDb(env).prepare(`
