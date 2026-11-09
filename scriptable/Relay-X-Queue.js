@@ -40,8 +40,7 @@ async function configForMode() {
   if (mode === "check" && (!endpoint || !token)) return null;
   if (!endpoint) {
     endpoint = await askSetting("Relay", "Informe a URL HTTPS do seu Worker, sem a barra final.");
-    const parsed = new URL(endpoint);
-    if (parsed.protocol !== "https:") throw new Error("A URL precisa ser HTTPS.");
+    if (!/^https:\/\//i.test(endpoint)) throw new Error("A URL precisa ser HTTPS.");
     endpoint = endpoint.replace(/\/+$/, "");
     Keychain.set(KEYS.endpoint, endpoint);
   }
@@ -195,7 +194,7 @@ async function processNext(config) {
       }
       await finishItem(config, item);
     } else if (choice === 1) {
-      Safari.open("https://x.com/compose/post?text=" + encodeURIComponent(item.caption));
+      Safari.open("https://x.com/intent/post?text=" + encodeURIComponent(item.caption));
       await finishItem(config, item);
     } else {
       const extra = choice === 2 ? 3600 : 1800;
