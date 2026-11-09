@@ -1,4 +1,10 @@
 export interface Env {
+  /** Explicit opt-in to queue successful X/Twitter Relay deliveries without request flags. */
+  X_REPOST_AUTO_QUEUE?: string;
+  /** Optional Telegram chat for due-time Scriptable reminders. */
+  X_REPOST_NOTIFY_CHAT_ID?: string;
+  /** Optional R2 bucket with a durable copy of the video, for deferred iPhone sharing. */
+  X_REPOST_MEDIA?: R2Bucket;
   RELAY_DB: D1Database;
   TELEGRAM_BOT_TOKEN: string;
   /** Default destination for text notifications. Numeric chat IDs may contain a :topic suffix. */
