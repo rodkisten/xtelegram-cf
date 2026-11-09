@@ -191,7 +191,7 @@ export async function transitionXRepost(
   if (action === "posted" || action === "release") {
     if (!claimToken) return null;
     const post = action === "posted" ? "posted" : "queued";
-    const url = action === "posted" && identifyXSource(postUrl || "") ? postUrl : null;
+    const url = action === "posted" && identifyXSource(postUrl || "") ? String(postUrl) : null;
     return (await db.prepare(`
       UPDATE x_repost_queue SET
         status = ?, post_url = ?, posted_at = ?, claim_token = NULL, lease_until = 0,
