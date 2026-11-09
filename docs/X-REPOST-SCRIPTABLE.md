@@ -9,8 +9,9 @@ cookies do X, interceptar endpoints privados, nem manter a interface aberta.
 
 1. Userscript/Shortcut chama a rota normal do Relay para enviar vídeo ao Telegram.
 2. Com `x_repost: true` no JSON, o Relay insere automaticamente um item após a entrega
-   bem-sucedida. Alternativamente, configure `X_REPOST_AUTO_QUEUE = "true"` nas variáveis
-   do Worker para enfileirar todo vídeo do X entregue ao Telegram.
+   bem-sucedida. A configuração padrão desta branch é `X_REPOST_AUTO_QUEUE = "true"`,
+   portanto **não precisa alterar o Scriptable XTelegram v3.5.5 existente**, nem o
+   fluxo do Shortcut que chama `/resolve-and-send` ou `/media/register`.
 3. O registro é deduplicado pelo ID do post original no X; a legenda usa `@/usuario`
    e preserva hashtags. Intervalos iniciais ficam entre 45 e 75 minutos. A fila não
    publica vários posts simultaneamente.
@@ -30,8 +31,9 @@ Sem R2, o Scriptable tenta usar a URL original temporária.
 
 - Execute `npm run db:migrate:remote` **antes** do deploy do Worker.
 - O repositório já usa Wrangler e migrações D1; mantenha esse fluxo de publicação.
-- Comente ou defina `X_REPOST_AUTO_QUEUE = "false"` na primeira implantação. Troque
-  para `"true"` quando quiser que toda entrega de um post X crie um item na fila.
+- Esta branch define `X_REPOST_AUTO_QUEUE = "true"`, conforme solicitado.
+  Para desativar a captura automática, troque para `"false"`.
+  Isso não automatiza publicações no X, apenas cria itens na fila.
 - Opcional: configure um segredo/variável `X_REPOST_NOTIFY_CHAT_ID` para receber
   aviso no Telegram a cada item que venceu seu horário. O cron roda a cada 10 min.
 - Para guardar vídeos de forma durável, crie um bucket R2 e adicione ao wrangler.toml:
@@ -47,18 +49,23 @@ porque o projeto não deve falhar ao publicar quando o recurso ainda não existe
 
 ## Setup no Scriptable
 
-1. Crie um script chamado **Relay X Queue** com o conteúdo
+1. **Preserve seu cliente XTelegram Scriptable v3.5.5** e o atalho existente,
+   com os modos `route`, `send`, `fallback` e `register_compressed`. O Relay
+   detecta automaticamente a entrega e enfileira o post do X pelo backend.
+2. Crie um script auxiliar chamado **Relay X Queue** com o conteúdo
    de `scriptable/Relay-X-Queue.js`.
-2. Execute uma vez no aplicativo. Informe a URL HTTPS do Worker e seu `RELAY_TOKEN`.
+3. Execute uma vez no aplicativo. Informe a URL HTTPS do Worker e seu `RELAY_TOKEN`.
    O token fica no Keychain local do Scriptable, não no código.
-3. No Atalhos iOS, use a ação do Scriptable **Run Script** com parâmetro `check`
+4. No Atalhos iOS, use a ação do Scriptable **Run Script** com parâmetro `check`
    em automações de horário fixo, por exemplo 10h, 13h, 16h, 19h. Ela emite
    notificação local para o primeiro item vencido e ainda não notificado.
-4. Toque na notificação, ou execute `Relay X Queue` normalmente: ele reservará
+5. Toque na notificação, ou execute `Relay X Queue` normalmente: ele reservará
    **um** item por vez, copiará a legenda e abrirá o compartilhamento do vídeo.
-5. Após o post aparecer no X, confirme. Se desistir ou der erro, adie o item.
+6. Após o post aparecer no X, confirme. Se desistir ou der erro, adie o item.
 
-Para o Shortcut já existente, após a confirmação da entrega Telegram, você pode
+Para o Shortcut já existente (XTelegram v3.5.5), **não é necessária nenhuma
+etapa adicional de enfileiramento** quando `X_REPOST_AUTO_QUEUE=true`.
+Se quiser usar um worker com captura automática desativada, após a entrega Telegram você pode
 passar ao Scriptable um dicionário com `mode: "enqueue"`, `url`, `caption` e
 `hashtags`. Isso chama `POST /x/repost/queue`, sem exigir `x_repost` na
 requisição original. As duas maneiras são idempotentes por ID do post.
