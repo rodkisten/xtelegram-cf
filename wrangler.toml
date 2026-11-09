@@ -22,7 +22,15 @@ enabled = false
 persist = true
 head_sampling_rate = 1
 
+[[r2_buckets]]
+binding = "X_REPOST_MEDIA"
+bucket_name = "x-repost-media"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
 [vars]
+X_REPOST_AUTO_QUEUE = "true"
 MAX_MEDIA_BYTES = "32000000"
 CLIENT_COMPRESS_TARGET_BYTES = "47000000"
 THUMBNAIL_BASE64_MAX_BYTES = "393216"

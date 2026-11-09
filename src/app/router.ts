@@ -1,4 +1,5 @@
 import { handleRodx } from "../routes/rodx";
+import { handleXRepost } from "../routes/x-repost";
 import { handleGithubWebhook } from "../routes/github-webhook";
 import { handleNotificationSend } from "../routes/notifications";
 import { handleNotificationsPage } from "../routes/notifications-page";
@@ -41,6 +42,12 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
       return authorizationError;
     }
     return handleChannels(request, env);
+  }
+
+  if (url.pathname.startsWith("/x/repost/")) {
+    const authorizationError = authorizeRequest(request, env);
+    if (authorizationError) return authorizationError;
+    return handleXRepost(request, env);
   }
 
   if (url.pathname.startsWith("/rodx/v1/")) {
