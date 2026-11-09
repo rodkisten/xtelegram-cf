@@ -26,7 +26,7 @@ head_sampling_rate = 1
 crons = ["*/10 * * * *"]
 
 [vars]
-X_REPOST_AUTO_QUEUE = "false"
+X_REPOST_AUTO_QUEUE = "true"
 MAX_MEDIA_BYTES = "32000000"
 CLIENT_COMPRESS_TARGET_BYTES = "47000000"
 THUMBNAIL_BASE64_MAX_BYTES = "393216"
