@@ -20,8 +20,8 @@ cookies do X, interceptar endpoints privados, nem manter a interface aberta.
 5. Só após o usuário confirmar que publicou, o item vira `posted`.
 
 **Importante**: disponibilizar a mídia ao Scriptable no horário agendado requer uma
-cópia persistente, pois as URLs de vídeo do X podem expirar. Recomendado: criar um
-bucket R2 e configurar o binding `X_REPOST_MEDIA`. O Relay tenta armazenar MP4s
+cópia persistente. O bucket privado `x-repost-media` foi criado na Cloudflare e
+está associado ao binding `X_REPOST_MEDIA` nesta branch. O Relay tenta armazenar MP4s
 resolvidos de `video.twimg.com` se Content-Length existir e for de até 80 MB.
 O endpoint `PUT /x/repost/queue/:id/media` permite upload do MP4 pelo Shortcuts
 com Content-Type `video/mp4` e Content-Length, no mesmo token do Relay.
@@ -36,7 +36,7 @@ Sem R2, o Scriptable tenta usar a URL original temporária.
   Isso não automatiza publicações no X, apenas cria itens na fila.
 - Opcional: configure um segredo/variável `X_REPOST_NOTIFY_CHAT_ID` para receber
   aviso no Telegram a cada item que venceu seu horário. O cron roda a cada 10 min.
-- Para guardar vídeos de forma durável, crie um bucket R2 e adicione ao wrangler.toml:
+- Para guardar vídeos, a branch já contém o binding no wrangler.toml:
 
 ```toml
 [[r2_buckets]]
@@ -44,8 +44,8 @@ binding = "X_REPOST_MEDIA"
 bucket_name = "x-repost-media"
 ```
 
-O bucket precisa existir antes do deploy. Ele não é configurado automaticamente
-porque o projeto não deve falhar ao publicar quando o recurso ainda não existe.
+O bucket privado já existe. O acesso aos arquivos passa pelo Worker autenticado.
+O uso do R2 pode gerar custos acima da franquia gratuita.
 
 ## Setup no Scriptable
 
@@ -54,7 +54,8 @@ porque o projeto não deve falhar ao publicar quando o recurso ainda não existe
    detecta automaticamente a entrega e enfileira o post do X pelo backend.
 2. Crie um script auxiliar chamado **Relay X Queue** com o conteúdo
    de `scriptable/Relay-X-Queue.js`.
-3. Execute uma vez no aplicativo. Informe a URL HTTPS do Worker e seu `RELAY_TOKEN`.
+3. Execute uma vez no aplicativo. A URL `https://xtelegram-cf.migos.club` já é o padrão.
+   Informe o `RELAY_TOKEN` somente se ele não estiver no Keychain do Scriptable.
    O token fica no Keychain local do Scriptable, não no código.
 4. No Atalhos iOS, use a ação do Scriptable **Run Script** com parâmetro `check`
    em automações de horário fixo, por exemplo 10h, 13h, 16h, 19h. Ela emite
