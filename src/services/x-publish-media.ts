@@ -51,9 +51,6 @@ export async function serveSignedMedia(request: Request, env: Env): Promise<Resp
       expires <= now || expires > now + TTL_SECONDS ||
       !/^[0-9a-f]{64}$/i.test(sig)) return json({ ok: false }, 403);
   try {
-    const expected = await crypto.subtle.sign(
-      "HMAC", await hmac(env), encoder.encode(id + "." + expires),
-    );
     const supplied = new Uint8Array(sig.match(/../g)!.map(v => parseInt(v, 16)));
     if (!(await crypto.subtle.verify("HMAC", await hmac(env), supplied, encoder.encode(id + "." + expires)))) {
       return json({ ok: false }, 403);
