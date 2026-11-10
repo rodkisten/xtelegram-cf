@@ -33,6 +33,7 @@ crons = ["*/10 * * * *"]
 # The new X publisher is opt-in; neither paid fallback nor automatic publishing is enabled.
 X_PUBLISH_ENABLED = "false"
 X_PUBLISH_AUTO_ENABLED = "false"
+X_PUBLISH_NOTIFY_ENABLED = "false"
 X_PUBLISH_ENABLE_PAID_FALLBACK = "false"
 BUFFER_ENABLED = "false"
 X_API_ENABLED = "false"
