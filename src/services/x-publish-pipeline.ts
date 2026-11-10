@@ -301,7 +301,8 @@ export async function runOneDuePublisher(env: Env, queueId?: string): Promise<vo
 async function pendingJob(env: Env): Promise<Job | null> {
   return env.RELAY_DB.prepare(
     "SELECT * FROM x_publish_jobs WHERE " +
-      "(status IN ('pending','media_processing') AND updated_at<=unixepoch()-900) " +
+      "(status IN ('pending','media_processing') AND updated_at<=unixepoch()-900 " +
+      "AND next_attempt_at<=unixepoch()) " +
       "ORDER BY updated_at ASC LIMIT 1",
   ).first<Job>();
 }
@@ -353,6 +354,12 @@ export async function reconcileOnePublisher(env: Env): Promise<void> {
       });
       if (result.kind === "processing") {
         await updateJob(env, item.id, "media_processing", { nextAt: nextRetry(600) });
+      } else if (result.kind === "rate_limited") {
+        // Media was already uploaded: do not reinitialize it after a status/tweet 429.
+        await applyCooldown(env, result.retrySeconds);
+        await updateJob(env, item.id, "media_processing", {
+          error: "x_media_rate_limited", nextAt: nextRetry(result.retrySeconds),
+        });
       } else {
         await storeProviderResult(env, item, "x", result);
       }
