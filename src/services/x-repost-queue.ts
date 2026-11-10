@@ -168,6 +168,10 @@ export async function claimDueXRepost(env: Env): Promise<XRepostItem | null> {
       WHERE (status = 'queued' OR (status = 'claimed' AND lease_until < ?))
         AND scheduled_at <= ?
         AND NOT EXISTS (
+          SELECT 1 FROM x_publish_jobs j WHERE j.queue_id=x_repost_queue.id
+            AND j.status NOT IN ('blocked')
+        )
+        AND NOT EXISTS (
           SELECT 1 FROM x_repost_zernio_submissions z
           WHERE z.queue_id = x_repost_queue.id AND z.platform = 'twitter'
             AND z.status NOT IN ('failed_preflight', 'failed')

@@ -1,7 +1,11 @@
 import { routeRequest } from "./router";
 import { cacheXRepostVideo, queueXRepostAfterRelay } from "../services/x-repost-auto-queue";
 import { notifyDueXReposts } from "../routes/x-repost";
-import { processOneDueZernio, refreshOnePendingZernio } from "../services/zernio-publisher";
+import {
+  runOneDuePublisher,
+  reconcileOnePublisher,
+  notifyOnePublishedX,
+} from "../services/x-publish-pipeline";
 import { json } from "../http/response";
 import { getErrorMessage } from "../lib/errors";
 import {
@@ -68,14 +72,15 @@ const worker = {
     }
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(notifyDueXReposts(env));
     ctx.waitUntil((async () => {
       try {
-        await processOneDueZernio(env);
-        await refreshOnePendingZernio(env);
+        if (env.X_PUBLISH_AUTO_ENABLED !== "true") await notifyDueXReposts(env);
+        await reconcileOnePublisher(env);
+        if (env.X_PUBLISH_AUTO_ENABLED === "true") await runOneDuePublisher(env);
+        await notifyOnePublishedX(env);
       } catch (error) {
-        // Fail closed. D1 retains unknown outcomes; never blindly submit twice.
-        console.warn("[zernio] scheduled reconciliation unavailable",
+        // Never retry potentially successful provider writes automatically.
+        console.warn("[x-publish] scheduled reconciliation unavailable",
           error instanceof Error ? error.name : "error");
       }
     })());

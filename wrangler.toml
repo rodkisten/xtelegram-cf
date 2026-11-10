@@ -30,6 +30,17 @@ bucket_name = "x-repost-media"
 crons = ["*/10 * * * *"]
 
 [vars]
+# The new X publisher is opt-in; neither paid fallback nor automatic publishing is enabled.
+X_PUBLISH_ENABLED = "false"
+X_PUBLISH_AUTO_ENABLED = "false"
+X_PUBLISH_NOTIFY_ENABLED = "false"
+X_PUBLISH_ENABLE_PAID_FALLBACK = "false"
+BUFFER_ENABLED = "false"
+X_API_ENABLED = "false"
+X_PUBLISH_MAX_PER_24H = "20"
+X_PUBLISH_MAX_PER_HOUR = "2"
+X_PUBLISH_MIN_GAP_SECONDS = "3600"
+BUFFER_30D_REQUEST_CAP = "850"
 # Zernio never publishes until explicitly enabled and a connected account is configured.
 ZERNIO_ENABLED = "false"
 ZERNIO_AUTO_PUBLISH = "false"

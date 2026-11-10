@@ -1,5 +1,7 @@
 import { handleRodx } from "../routes/rodx";
 import { handleXRepost } from "../routes/x-repost";
+import { handleXPublisher } from "../routes/x-publisher";
+import { serveSignedMedia } from "../services/x-publish-media";
 import { handleZernioRepost } from "../routes/zernio";
 import { handleGithubWebhook } from "../routes/github-webhook";
 import { handleNotificationSend } from "../routes/notifications";
@@ -45,9 +47,14 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
     return handleChannels(request, env);
   }
 
+  // Buffer fetches an expiring HMAC-signed MP4 link without Relay credentials.
+  if (url.pathname.startsWith("/x/repost/public-media/")) {
+    return serveSignedMedia(request, env);
+  }
   if (url.pathname.startsWith("/x/repost/")) {
     const authorizationError = authorizeRequest(request, env);
     if (authorizationError) return authorizationError;
+    if (url.pathname.startsWith("/x/repost/publisher/")) return handleXPublisher(request, env);
     if (url.pathname.startsWith("/x/repost/zernio/")) return handleZernioRepost(request, env);
     return handleXRepost(request, env);
   }

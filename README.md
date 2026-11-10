@@ -1663,3 +1663,10 @@ An optional **disabled-by-default** backend adapter can publish or schedule MP4 
 from the existing D1 X repost queue using Zernio, with R2-to-presigned-media upload,
 provider idempotency keys, and D1 reconciliation. X posting through Zernio may incur
 pass-through API fees and needs explicit activation. See [Zernio integration setup](docs/ZERNIO-RELAY.md).
+
+## RodX X publishing: Buffer → Zernio → direct X API
+
+The existing Relay D1 video queue now has an optional **disabled-by-default**
+multi-provider pipeline with shared per-account budgets, a temporary signed R2
+media URL for Buffer, idempotent publication state and Telegram success alerts.
+Paid fallbacks must be enabled separately. See [publisher setup and limits](docs/X-PUBLISHER-PROVIDERS.md).

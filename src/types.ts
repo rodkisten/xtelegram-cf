@@ -1,4 +1,22 @@
 export interface Env {
+  /** All publisher switches are OFF unless explicitly enabled. */
+  X_PUBLISH_ENABLED?: string;
+  X_PUBLISH_AUTO_ENABLED?: string;
+  X_PUBLISH_ENABLE_PAID_FALLBACK?: string;
+  X_PUBLISH_MEDIA_ORIGIN?: string;
+  X_PUBLISH_MEDIA_SIGNING_KEY?: string;
+  X_PUBLISH_MAX_PER_24H?: string;
+  X_PUBLISH_MAX_PER_HOUR?: string;
+  X_PUBLISH_MIN_GAP_SECONDS?: string;
+  X_PUBLISH_NOTIFY_CHAT_ID?: string;
+  X_PUBLISH_NOTIFY_ENABLED?: string;
+  BUFFER_ENABLED?: string;
+  BUFFER_API_KEY?: string;
+  BUFFER_X_CHANNEL_ID?: string;
+  BUFFER_30D_REQUEST_CAP?: string;
+  X_API_ENABLED?: string;
+  /** OAuth 2 user-context token, not an app bearer token. */
+  X_API_USER_ACCESS_TOKEN?: string;
   /** Publishing provider secret. Set with Wrangler secret put, never commit its value. */
   ZERNIO_API_KEY?: string;
   /** Explicit feature gate; false by default even if a key is present. */
