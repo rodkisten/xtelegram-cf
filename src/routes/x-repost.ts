@@ -137,6 +137,11 @@ export async function notifyDueXReposts(env: Env): Promise<void> {
   const rows = (await repostDb(env).prepare(`
     SELECT id, source_url FROM x_repost_queue
     WHERE status = 'queued' AND scheduled_at <= ? AND notified_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM x_repost_zernio_submissions z
+        WHERE z.queue_id = x_repost_queue.id AND z.platform = 'twitter'
+          AND z.status NOT IN ('failed_preflight', 'failed')
+      )
     ORDER BY scheduled_at ASC LIMIT 3
   `).bind(now).all<{ id: string; source_url: string }>()).results;
 

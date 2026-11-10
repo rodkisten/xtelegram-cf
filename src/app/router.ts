@@ -1,5 +1,6 @@
 import { handleRodx } from "../routes/rodx";
 import { handleXRepost } from "../routes/x-repost";
+import { handleZernioRepost } from "../routes/zernio";
 import { handleGithubWebhook } from "../routes/github-webhook";
 import { handleNotificationSend } from "../routes/notifications";
 import { handleNotificationsPage } from "../routes/notifications-page";
@@ -47,6 +48,7 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   if (url.pathname.startsWith("/x/repost/")) {
     const authorizationError = authorizeRequest(request, env);
     if (authorizationError) return authorizationError;
+    if (url.pathname.startsWith("/x/repost/zernio/")) return handleZernioRepost(request, env);
     return handleXRepost(request, env);
   }
 

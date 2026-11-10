@@ -1,4 +1,13 @@
 export interface Env {
+  /** Publishing provider secret. Set with Wrangler secret put, never commit its value. */
+  ZERNIO_API_KEY?: string;
+  /** Explicit feature gate; false by default even if a key is present. */
+  ZERNIO_ENABLED?: string;
+  ZERNIO_TWITTER_ACCOUNT_ID?: string;
+  ZERNIO_INSTAGRAM_ACCOUNT_ID?: string;
+  /** Explicit second opt-in for cron-driven posts. */
+  ZERNIO_AUTO_PUBLISH?: string;
+  ZERNIO_AUTO_PLATFORM?: "twitter" | "instagram";
   /** Explicit opt-in to queue successful X/Twitter Relay deliveries without request flags. */
   X_REPOST_AUTO_QUEUE?: string;
   /** Optional Telegram chat for due-time Scriptable reminders. */
