@@ -62,9 +62,17 @@ export async function publisherStats(env: Env): Promise<Record<string, unknown>>
   const db = env.RELAY_DB;
   const limits = publisherLimits(env);
   const usage = await db.prepare(
-    "SELECT SUM(CASE WHEN reserved_at > unixepoch()-86400 THEN 1 ELSE 0 END) AS day, " +
-      "SUM(CASE WHEN reserved_at > unixepoch()-3600 THEN 1 ELSE 0 END) AS hour " +
-      "FROM x_publish_slots WHERE account_key='x-primary'",
+    "SELECT " +
+      "(SELECT COUNT(*) FROM x_publish_slots WHERE account_key='x-primary' AND " +
+        "reserved_at>unixepoch()-86400) + " +
+      "(SELECT COUNT(*) FROM x_repost_queue q WHERE q.status='posted' AND " +
+        "q.posted_at>unixepoch()-86400 AND NOT EXISTS " +
+        "(SELECT 1 FROM x_publish_slots s WHERE s.queue_id=q.id)) AS day, " +
+      "(SELECT COUNT(*) FROM x_publish_slots WHERE account_key='x-primary' AND " +
+        "reserved_at>unixepoch()-3600) + " +
+      "(SELECT COUNT(*) FROM x_repost_queue q WHERE q.status='posted' AND " +
+        "q.posted_at>unixepoch()-3600 AND NOT EXISTS " +
+        "(SELECT 1 FROM x_publish_slots s WHERE s.queue_id=q.id)) AS hour",
   ).first<{ day: number | null; hour: number | null }>();
   const control = await db.prepare(
     "SELECT cooldown_until FROM x_publish_control WHERE id = 1",
@@ -101,12 +109,22 @@ export async function reserveXPostingBudget(env: Env, queueId: string): Promise<
   const inserted = await db.prepare(
     "INSERT OR IGNORE INTO x_publish_slots(queue_id,account_key,reserved_at) " +
       "SELECT ?, 'x-primary', unixepoch() " +
-      "WHERE (SELECT COUNT(*) FROM x_publish_slots WHERE account_key='x-primary' " +
-        "AND reserved_at > unixepoch()-86400) < ? " +
-      "AND (SELECT COUNT(*) FROM x_publish_slots WHERE account_key='x-primary' " +
-        "AND reserved_at > unixepoch()-3600) < ? " +
-      "AND (SELECT COALESCE(MAX(reserved_at),0) FROM x_publish_slots " +
-        "WHERE account_key='x-primary') <= unixepoch()-? " +
+      "WHERE ((SELECT COUNT(*) FROM x_publish_slots WHERE account_key='x-primary' " +
+        "AND reserved_at > unixepoch()-86400) + " +
+        "(SELECT COUNT(*) FROM x_repost_queue q WHERE q.status='posted' " +
+        "AND q.posted_at>unixepoch()-86400 AND NOT EXISTS " +
+        "(SELECT 1 FROM x_publish_slots s WHERE s.queue_id=q.id))) < ? " +
+      "AND ((SELECT COUNT(*) FROM x_publish_slots WHERE account_key='x-primary' " +
+        "AND reserved_at > unixepoch()-3600) + " +
+        "(SELECT COUNT(*) FROM x_repost_queue q WHERE q.status='posted' " +
+        "AND q.posted_at>unixepoch()-3600 AND NOT EXISTS " +
+        "(SELECT 1 FROM x_publish_slots s WHERE s.queue_id=q.id))) < ? " +
+      "AND MAX(" +
+        "(SELECT COALESCE(MAX(reserved_at),0) FROM x_publish_slots " +
+        "WHERE account_key='x-primary')," +
+        "(SELECT COALESCE(MAX(posted_at),0) FROM x_repost_queue q WHERE q.status='posted' " +
+          "AND NOT EXISTS (SELECT 1 FROM x_publish_slots s WHERE s.queue_id=q.id))" +
+        ") <= unixepoch()-? " +
       "AND (SELECT cooldown_until FROM x_publish_control WHERE id=1) <= unixepoch()",
   ).bind(queueId, limits.day, limits.hour, limits.gap).run();
   return (inserted.meta.changes || 0) === 1;
