@@ -135,8 +135,8 @@ When the X queue entry is **confirmed published**, the cron sends a Telegram
 message with the original X source, successful provider and published URL.
 
 Receipts are OFF until X_PUBLISH_NOTIFY_ENABLED=true. The migration records an
-activation epoch so historical already-posted items do not trigger a backlog of
-messages. Recipient order: X_PUBLISH_NOTIFY_CHAT_ID, then TELEGRAM_CHAT_ID, then
+first-enabled epoch with an 11-minute lookback so historical posts do not
+trigger a backlog of messages. Recipient order: X_PUBLISH_NOTIFY_CHAT_ID, then TELEGRAM_CHAT_ID, then
 NOTIFICATION_CHAT_ID. Accepts a chat ID or chatID:threadID. Each queue ID has one
 D1 notification receipt, including Scriptable/manual X publications. Unknown
 Telegram responses are quarantined to avoid sending duplicate confirmations.
