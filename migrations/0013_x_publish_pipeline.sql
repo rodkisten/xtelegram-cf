@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS x_publish_jobs (
   tried TEXT NOT NULL DEFAULT '',
   remote_id TEXT,
   media_id TEXT,
+  media_ready INTEGER NOT NULL DEFAULT 0,
   post_url TEXT,
   error_code TEXT,
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
