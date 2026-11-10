@@ -237,7 +237,10 @@ export async function submitZernioVideo(
     "SELECT * FROM x_repost_queue WHERE id = ?",
   ).bind(queueId).first<XRepostItem>();
   if (!item) throw new ZernioError("queue_item_not_found", 404);
-  if (item.status !== "queued") throw new ZernioError("queue_item_not_available", 409);
+  // Publishing to Instagram must remain possible after the X repost was confirmed.
+  if (item.status !== "queued" && !(platform === "instagram" && item.status === "posted")) {
+    throw new ZernioError("queue_item_not_available", 409);
+  }
   if (!env.X_REPOST_MEDIA || !item.media_object_key) {
     throw new ZernioError("r2_video_not_ready", 409);
   }
