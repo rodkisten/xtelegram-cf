@@ -1,6 +1,7 @@
 import { routeRequest } from "./router";
 import { cacheXRepostVideo, queueXRepostAfterRelay } from "../services/x-repost-auto-queue";
 import { notifyDueXReposts } from "../routes/x-repost";
+import { processOneDueZernio, refreshOnePendingZernio } from "../services/zernio-publisher";
 import { json } from "../http/response";
 import { getErrorMessage } from "../lib/errors";
 import {
@@ -68,6 +69,16 @@ const worker = {
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(notifyDueXReposts(env));
+    ctx.waitUntil((async () => {
+      try {
+        await processOneDueZernio(env);
+        await refreshOnePendingZernio(env);
+      } catch (error) {
+        // Fail closed. D1 retains unknown outcomes; never blindly submit twice.
+        console.warn("[zernio] scheduled reconciliation unavailable",
+          error instanceof Error ? error.name : "error");
+      }
+    })());
   },
 };
 
