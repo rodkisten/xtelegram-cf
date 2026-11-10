@@ -146,8 +146,13 @@ export async function markXPublished(
       "post_url=COALESCE(?,post_url), claimed_at=NULL, claim_token=NULL, lease_until=0, " +
       "updated_at=unixepoch() WHERE id=? AND status='queued' RETURNING id",
   ).bind(normalizedUrl, id).first<{ id: string }>();
-  // No status regression when a successful provider callback arrives twice.
-  if (changed) await updateJob(env, id, "published", { provider, url: normalizedUrl || undefined });
+  // Zernio may already have marked the X queue row posted before this callback.
+  const alreadyPosted = changed || await env.RELAY_DB.prepare(
+    "SELECT id FROM x_repost_queue WHERE id=? AND status='posted'",
+  ).bind(id).first();
+  if (alreadyPosted) {
+    await updateJob(env, id, "published", { provider, url: normalizedUrl || undefined });
+  }
 }
 
 async function storeProviderResult(
@@ -163,8 +168,18 @@ async function storeProviderResult(
     return;
   }
   if (result.kind === "rate_limited") {
+    // Explicit HTTP 429 confirms no accepted creation. Retry the SAME provider
+    // only after cooldown, never hop to another provider to evade X limits.
     await applyCooldown(env, result.retrySeconds);
-    await updateJob(env, item.id, "blocked", {
+    await env.RELAY_DB.prepare(
+      "UPDATE x_publish_jobs SET tried=?,updated_at=unixepoch() WHERE queue_id=?",
+    ).bind(
+      (await env.RELAY_DB.prepare("SELECT tried FROM x_publish_jobs WHERE queue_id=?")
+        .bind(item.id).first<{ tried: string }>())?.tried
+        .split(",").filter(p => p && p !== provider).join(",") || "",
+      item.id,
+    ).run();
+    await updateJob(env, item.id, "ready", {
       provider, error: "provider_rate_limited", nextAt: nextRetry(result.retrySeconds),
     });
     return;
@@ -401,9 +416,10 @@ export async function notifyOnePublishedX(env: Env): Promise<void> {
       }),
       signal: AbortSignal.timeout(15000),
     });
+    const telegramResult = res.ok ? await res.json().catch(() => null) as { ok?: boolean } | null : null;
     await env.RELAY_DB.prepare(
       "UPDATE x_publish_notifications SET status=?,updated_at=unixepoch() WHERE queue_id=?",
-    ).bind(res.ok ? "sent" : "uncertain", row.id).run();
+    ).bind(res.ok && telegramResult?.ok === true ? "sent" : "uncertain", row.id).run();
   } catch {
     // Unknown Telegram delivery outcome: never risk spamming the same notification.
     await env.RELAY_DB.prepare(
