@@ -63,6 +63,7 @@ provider attempts, cooldown, and Telegram receipts remain on Cloudflare.
        BUFFER_ENABLED=true
        BUFFER_X_CHANNEL_ID=<actual Buffer X channel ID>
        X_PUBLISH_AUTO_ENABLED=false
+       X_PUBLISH_NOTIFY_ENABLED=false
        X_PUBLISH_ENABLE_PAID_FALLBACK=false
        X_PUBLISH_MAX_PER_24H=20
        X_PUBLISH_MAX_PER_HOUR=2
@@ -75,7 +76,8 @@ provider attempts, cooldown, and Telegram receipts remain on Cloudflare.
 5. Pilot ONE due video by calling the authenticated route below with
    confirmPublish=true. After verifying its actual X link, you may set
    X_PUBLISH_AUTO_ENABLED=true to let the existing 10-minute cron publish at
-   most one due item per run and reconcile accepted posts.
+   most one due item per run and reconcile accepted posts. Set
+   X_PUBLISH_NOTIFY_ENABLED=true to enable Telegram success receipts.
 
 ## Optional paid fallbacks
 
@@ -132,7 +134,9 @@ a complete month. The local counter cannot see Buffer calls from external tools.
 When the X queue entry is **confirmed published**, the cron sends a Telegram
 message with the original X source, successful provider and published URL.
 
-Recipient order: X_PUBLISH_NOTIFY_CHAT_ID, then TELEGRAM_CHAT_ID, then
+Receipts are OFF until X_PUBLISH_NOTIFY_ENABLED=true. The migration records an
+activation epoch so historical already-posted items do not trigger a backlog of
+messages. Recipient order: X_PUBLISH_NOTIFY_CHAT_ID, then TELEGRAM_CHAT_ID, then
 NOTIFICATION_CHAT_ID. Accepts a chat ID or chatID:threadID. Each queue ID has one
 D1 notification receipt, including Scriptable/manual X publications. Unknown
 Telegram responses are quarantined to avoid sending duplicate confirmations.
