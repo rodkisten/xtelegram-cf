@@ -387,12 +387,14 @@ function targetChat(env: Env): { chat: string; topic?: number } | null {
  * including manually confirmed Scriptable posts and older Zernio jobs.
  */
 export async function notifyOnePublishedX(env: Env): Promise<void> {
+  if (env.X_PUBLISH_NOTIFY_ENABLED !== "true") return;
   const target = targetChat(env);
   if (!env.TELEGRAM_BOT_TOKEN || !target) return;
   const row = await env.RELAY_DB.prepare(
     "SELECT q.id, q.source_url, q.post_url, j.provider FROM x_repost_queue q " +
       "LEFT JOIN x_publish_jobs j ON j.queue_id=q.id " +
-      "WHERE q.status='posted' " +
+      "WHERE q.status='posted' AND q.posted_at >= " +
+      "(SELECT started_at FROM x_publish_notification_epoch WHERE id=1) " +
       "AND NOT EXISTS (SELECT 1 FROM x_publish_notifications n WHERE n.queue_id=q.id) " +
       "ORDER BY q.posted_at DESC LIMIT 1",
   ).first<{ id: string; source_url: string; post_url: string | null; provider: string | null }>();
