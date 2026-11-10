@@ -3,7 +3,7 @@ import type { XRepostItem } from "./x-repost-queue";
 import type { ProviderResult } from "./x-publish-buffer";
 import { normalizeZernioCaption } from "./zernio-publisher";
 
-export type DirectResult = ProviderResult | { kind: "processing"; mediaId: string };
+export type DirectResult = ProviderResult | { kind: "processing"; mediaId: string; ready?: boolean };
 
 const ROOT = "https://api.x.com";
 const CHUNK = 4 * 1024 * 1024;
@@ -90,7 +90,8 @@ export async function initializeDirectXMedia(
   const done = await xRequest(env, "/2/media/upload/" + id + "/finalize", "POST");
   if (done.error) return done.error;
   // Always checkpoint media_id before trying POST /2/tweets on a later invocation.
-  return { kind: "processing", mediaId: id };
+  const info = done.body?.data?.processing_info;
+  return { kind: "processing", mediaId: id, ready: !info || info.state === "succeeded" };
 }
 
 export async function finishDirectXMedia(
@@ -98,14 +99,16 @@ export async function finishDirectXMedia(
   mediaId: string,
   item: XRepostItem,
   claimBeforeTweet: () => Promise<boolean>,
+  alreadyReady = false,
 ): Promise<DirectResult> {
   if (!directXAvailable(env) || !/^\d+$/.test(mediaId)) {
     return { kind: "rejected", code: "x_media_not_configured" };
   }
-  const response = await xRequest(
+  // FINALIZE without processing_info means the media is already ready.
+  const response = alreadyReady ? { body: { data: {} } } : await xRequest(
     env, "/2/media/upload?command=STATUS&media_id=" + encodeURIComponent(mediaId),
   );
-  if (response.error) return response.error;
+  if ("error" in response && response.error) return response.error;
   const processing = response.body?.data?.processing_info;
   if (processing && processing.state === "failed") {
     return { kind: "rejected", code: "x_video_processing_failed" };
