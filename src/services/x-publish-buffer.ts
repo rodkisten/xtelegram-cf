@@ -57,7 +57,7 @@ async function bufferRequest(
 ): Promise<{ result?: Record<string, unknown>; error?: ProviderResult }> {
   if (!env.BUFFER_API_KEY) return { error: { kind: "rejected", code: "buffer_not_configured" } };
   if (!(await consumeBufferBudget(env))) {
-    return { error: { kind: "rate_limited", retrySeconds: 86400 } };
+    return { error: { kind: "rejected", code: "buffer_local_30d_quota_exhausted" } };
   }
   let response: Response;
   try {
@@ -127,7 +127,8 @@ export async function checkBufferPost(
   env: Env, id: string,
 ): Promise<ProviderResult> {
   const { result, error } = await bufferRequest(env, GET, { input: { id } });
-  if (error) return error;
+  if (error) return error.kind === "rejected" && error.code === "buffer_local_30d_quota_exhausted"
+    ? { kind: "rate_limited", retrySeconds: 86400 } : error;
   const post = result?.post as Record<string, unknown> | undefined;
   if (!post || typeof post.id !== "string") {
     return { kind: "uncertain", code: "buffer_missing_post" };
