@@ -411,6 +411,12 @@ export async function notifyOnePublishedX(env: Env): Promise<void> {
   if (env.X_PUBLISH_NOTIFY_ENABLED !== "true") return;
   const target = targetChat(env);
   if (!env.TELEGRAM_BOT_TOKEN || !target) return;
+  // First opt-in: never replay the historical queue. The 11-minute lookback
+  // accommodates the 10-minute cron between post creation and first notice.
+  await env.RELAY_DB.prepare(
+    "UPDATE x_publish_notification_epoch SET started_at=unixepoch()-660 " +
+      "WHERE id=1 AND started_at=0",
+  ).run();
   const row = await env.RELAY_DB.prepare(
     "SELECT q.id, q.source_url, q.post_url, j.provider FROM x_repost_queue q " +
       "LEFT JOIN x_publish_jobs j ON j.queue_id=q.id " +
