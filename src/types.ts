@@ -9,6 +9,7 @@ export interface Env {
   X_PUBLISH_MAX_PER_HOUR?: string;
   X_PUBLISH_MIN_GAP_SECONDS?: string;
   X_PUBLISH_NOTIFY_CHAT_ID?: string;
+  X_PUBLISH_NOTIFY_ENABLED?: string;
   BUFFER_ENABLED?: string;
   BUFFER_API_KEY?: string;
   BUFFER_X_CHANNEL_ID?: string;
