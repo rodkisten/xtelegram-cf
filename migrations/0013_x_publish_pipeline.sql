@@ -37,6 +37,13 @@ CREATE TABLE IF NOT EXISTS x_publish_buffer_calls (
 );
 CREATE INDEX IF NOT EXISTS x_publish_buffer_calls_time ON x_publish_buffer_calls(created_at);
 
+-- Notifications begin at migration time, not for the entire historical X queue.
+CREATE TABLE IF NOT EXISTS x_publish_notification_epoch (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  started_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+INSERT OR IGNORE INTO x_publish_notification_epoch(id) VALUES (1);
+
 CREATE TABLE IF NOT EXISTS x_publish_notifications (
   queue_id TEXT PRIMARY KEY REFERENCES x_repost_queue(id),
   status TEXT NOT NULL CHECK(status IN ('sending','sent','uncertain')),
