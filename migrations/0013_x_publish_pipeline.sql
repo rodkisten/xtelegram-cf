@@ -38,10 +38,11 @@ CREATE TABLE IF NOT EXISTS x_publish_buffer_calls (
 );
 CREATE INDEX IF NOT EXISTS x_publish_buffer_calls_time ON x_publish_buffer_calls(created_at);
 
--- Notifications begin at migration time, not for the entire historical X queue.
+-- Notification cutoff is initialized on the first explicitly enabled cron run.
+-- A short lookback includes posts published shortly before that cron.
 CREATE TABLE IF NOT EXISTS x_publish_notification_epoch (
   id INTEGER PRIMARY KEY CHECK(id=1),
-  started_at INTEGER NOT NULL DEFAULT (unixepoch())
+  started_at INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO x_publish_notification_epoch(id) VALUES (1);
 
