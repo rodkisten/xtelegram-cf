@@ -47,9 +47,9 @@ async function consumeBufferBudget(env: Env): Promise<boolean> {
   const row = await env.RELAY_DB.prepare(
     "INSERT INTO x_publish_buffer_calls(created_at) SELECT unixepoch() " +
       "WHERE (SELECT COUNT(*) FROM x_publish_buffer_calls " +
-      "WHERE created_at >= unixepoch() - 2592000) < ? RETURNING id",
-  ).bind(cap).first<{ id: number }>();
-  return Boolean(row);
+      "WHERE created_at >= unixepoch() - 2592000) < ?",
+  ).bind(cap).run();
+  return (row.meta.changes || 0) > 0;
 }
 
 async function bufferRequest(
