@@ -19,6 +19,7 @@ interface Job {
   tried: string;
   remote_id: string | null;
   media_id: string | null;
+  media_ready: number;
   post_url: string | null;
   error_code: string | null;
   next_attempt_at: number;
@@ -141,15 +142,17 @@ async function applyCooldown(env: Env, seconds: number): Promise<void> {
 async function updateJob(
   env: Env, id: string, status: JobStatus,
   options: { provider?: XProvider; remoteId?: string; mediaId?: string;
-    url?: string; error?: string; nextAt?: number } = {},
+    url?: string; error?: string; nextAt?: number; mediaReady?: boolean } = {},
 ): Promise<void> {
   await env.RELAY_DB.prepare(
     "UPDATE x_publish_jobs SET status=?, " +
       "provider=COALESCE(?,provider), remote_id=COALESCE(?,remote_id), " +
-      "media_id=COALESCE(?,media_id), post_url=COALESCE(?,post_url), " +
+      "media_id=COALESCE(?,media_id), media_ready=COALESCE(?,media_ready), " +
+      "post_url=COALESCE(?,post_url), " +
       "error_code=?, next_attempt_at=?, updated_at=unixepoch() WHERE queue_id=?",
   ).bind(
     status, options.provider || null, options.remoteId || null, options.mediaId || null,
+    options.mediaReady === undefined ? null : options.mediaReady ? 1 : 0,
     options.url || null, options.error || null, options.nextAt || 0, id,
   ).run();
 }
@@ -303,7 +306,7 @@ export async function runOneDuePublisher(env: Env, queueId?: string): Promise<vo
       const result = await initializeDirectXMedia(env, item);
       if (result.kind === "processing") {
         await updateJob(env, item.id, "media_processing", {
-          provider: next, mediaId: result.mediaId,
+          provider: next, mediaId: result.mediaId, mediaReady: Boolean(result.ready),
           nextAt: nextRetry(600),
         });
       } else {
@@ -369,7 +372,7 @@ export async function reconcileOnePublisher(env: Env): Promise<void> {
             "WHERE queue_id=? AND status='media_processing'",
         ).bind(item.id).run();
         return (claimed.meta.changes || 0) > 0;
-      });
+      }, Boolean(job.media_ready));
       if (result.kind === "processing") {
         await updateJob(env, item.id, "media_processing", { nextAt: nextRetry(600) });
       } else if (result.kind === "rate_limited") {
