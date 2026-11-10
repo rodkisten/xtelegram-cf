@@ -114,7 +114,11 @@ export async function createBufferVideo(env: Env, item: XRepostItem): Promise<Pr
   }
   // GraphQL MutationError guarantees no PostActionSuccess payload was created.
   if (typeof action?.message === "string") {
-    return { kind: "rejected", code: "buffer_mutation_rejected" };
+    // Some mutation errors are limits, not media failures; do not evade those
+    // limits by falling back to the next provider.
+    return /rate|limit|quota|too many|daily/i.test(action.message)
+      ? { kind: "rate_limited", retrySeconds: 7200 }
+      : { kind: "rejected", code: "buffer_mutation_rejected" };
   }
   return { kind: "uncertain", code: "buffer_unknown_create_result" };
 }
