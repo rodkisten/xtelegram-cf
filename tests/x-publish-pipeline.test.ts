@@ -240,15 +240,17 @@ describe("X direct API video flow", () => {
       const first = await initializeDirectXMedia(env, item!);
       assert.equal(first.kind, "processing");
       assert.equal(calls.filter(x=>x.includes("/2/tweets")).length, 0);
+      assert.equal(first.kind === "processing" && first.ready, true);
       if (first.kind !== "processing") return;
       let claimed = 0;
       const second = await finishDirectXMedia(env, first.mediaId, item!, async () => {
         claimed++;
         return true;
-      });
+      }, Boolean(first.ready));
       assert.equal(second.kind, "accepted");
       assert.equal(claimed, 1);
       assert.equal(calls.filter(x=>x.endsWith("/2/tweets")).length, 1);
+      assert.equal(calls.filter(x=>x.includes("command=STATUS")).length, 0);
     } finally {
       globalThis.fetch = old;
       sqlite.close();
