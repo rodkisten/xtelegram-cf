@@ -30,6 +30,10 @@ bucket_name = "x-repost-media"
 crons = ["*/10 * * * *"]
 
 [vars]
+# Zernio never publishes until explicitly enabled and a connected account is configured.
+ZERNIO_ENABLED = "false"
+ZERNIO_AUTO_PUBLISH = "false"
+ZERNIO_AUTO_PLATFORM = "twitter"
 X_REPOST_AUTO_QUEUE = "true"
 MAX_MEDIA_BYTES = "32000000"
 CLIENT_COMPRESS_TARGET_BYTES = "47000000"
