@@ -176,6 +176,7 @@ describe("X publisher: Telegram publication confirmation", () => {
     const { env, db, sqlite } = fixture({
       TELEGRAM_BOT_TOKEN: "test-telegram-token",
       X_PUBLISH_NOTIFY_CHAT_ID: "-10012345678:42",
+      X_PUBLISH_NOTIFY_ENABLED: "true",
     });
     await addVideo(db);
     const previous = globalThis.fetch;
