@@ -1656,3 +1656,10 @@ Scriptable XTelegram 3.5.5. Não utiliza a API oficial do X. A publicação é
 concluída pelo usuário na interface do iPhone.
 
 Guia de configuração: [Scriptable e fila X](docs/X-REPOST-SCRIPTABLE.md).
+
+## Zernio third-party X/Instagram video publishing
+
+An optional **disabled-by-default** backend adapter can publish or schedule MP4 videos
+from the existing D1 X repost queue using Zernio, with R2-to-presigned-media upload,
+provider idempotency keys, and D1 reconciliation. X posting through Zernio may incur
+pass-through API fees and needs explicit activation. See [Zernio integration setup](docs/ZERNIO-RELAY.md).
