@@ -144,10 +144,10 @@ export async function markXPublished(
   const changed = await env.RELAY_DB.prepare(
     "UPDATE x_repost_queue SET status='posted', posted_at=unixepoch(), " +
       "post_url=COALESCE(?,post_url), claimed_at=NULL, claim_token=NULL, lease_until=0, " +
-      "updated_at=unixepoch() WHERE id=? AND status='queued' RETURNING id",
-  ).bind(normalizedUrl, id).first<{ id: string }>();
+      "updated_at=unixepoch() WHERE id=? AND status='queued'",
+  ).bind(normalizedUrl, id).run();
   // Zernio may already have marked the X queue row posted before this callback.
-  const alreadyPosted = changed || await env.RELAY_DB.prepare(
+  const alreadyPosted = (changed.meta.changes || 0) > 0 || await env.RELAY_DB.prepare(
     "SELECT id FROM x_repost_queue WHERE id=? AND status='posted'",
   ).bind(id).first();
   if (alreadyPosted) {
@@ -203,10 +203,9 @@ async function reserveJob(
   all.add(provider);
   const row = await env.RELAY_DB.prepare(
     "UPDATE x_publish_jobs SET status='submitting', provider=?, tried=?, error_code=NULL, " +
-      "updated_at=unixepoch() WHERE queue_id=? AND status='ready' AND next_attempt_at<=unixepoch() " +
-      "RETURNING queue_id",
-  ).bind(provider, Array.from(all).join(","), id).first<{ queue_id: string }>();
-  return Boolean(row);
+      "updated_at=unixepoch() WHERE queue_id=? AND status='ready' AND next_attempt_at<=unixepoch()",
+  ).bind(provider, Array.from(all).join(","), id).run();
+  return (row.meta.changes || 0) > 0;
 }
 
 async function dueItem(
@@ -272,7 +271,8 @@ export async function runOneDuePublisher(env: Env, queueId?: string): Promise<vo
         await updateJob(env, item.id, "pending", {
           provider: next, remoteId: result.remote_post_id || undefined,
         });
-      } else if (result.status === "failed_preflight") {
+      } else if ((result.status === "failed" && !result.platform_post_url) ||
+          result.status === "failed_preflight") {
         await updateJob(env, item.id, "ready", {
           provider: next, error: result.error_code || "zernio_preflight", nextAt: nextRetry(600),
         });
@@ -347,9 +347,9 @@ export async function reconcileOnePublisher(env: Env): Promise<void> {
       const result = await finishDirectXMedia(env, job.media_id, item, async () => {
         const claimed = await env.RELAY_DB.prepare(
           "UPDATE x_publish_jobs SET status='submitting', updated_at=unixepoch() " +
-            "WHERE queue_id=? AND status='media_processing' RETURNING queue_id",
-        ).bind(item.id).first();
-        return Boolean(claimed);
+            "WHERE queue_id=? AND status='media_processing'",
+        ).bind(item.id).run();
+        return (claimed.meta.changes || 0) > 0;
       });
       if (result.kind === "processing") {
         await updateJob(env, item.id, "media_processing", { nextAt: nextRetry(600) });
