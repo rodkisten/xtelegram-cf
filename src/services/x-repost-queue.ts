@@ -179,7 +179,7 @@ export async function enqueueXRepost(env: Env, input: XRepostEnqueueInput): Prom
   const row = await db.prepare("SELECT * FROM x_repost_queue WHERE source_key = ?")
     .bind(source.key).first<XRepostItem>();
   if (!row) throw new Error("Could not enqueue X repost.");
-  return row;
+  return { ...row, caption: transformXRepostCaption(row.caption) };
 }
 
 export async function listXReposts(
@@ -193,7 +193,10 @@ export async function listXReposts(
     ? db.prepare("SELECT * FROM x_repost_queue WHERE status = ? ORDER BY scheduled_at ASC LIMIT ?")
         .bind(status, count)
     : db.prepare("SELECT * FROM x_repost_queue ORDER BY created_at DESC LIMIT ?").bind(count);
-  return (await query.all<XRepostItem>()).results;
+  return (await query.all<XRepostItem>()).results.map(row => ({
+    ...row,
+    caption: transformXRepostCaption(row.caption),
+  }));
 }
 
 export async function claimDueXRepost(env: Env): Promise<XRepostItem | null> {
@@ -221,7 +224,7 @@ export async function claimDueXRepost(env: Env): Promise<XRepostItem | null> {
     )
     RETURNING *
   `).bind(now, token, now + CLAIM_SECONDS, now, now, now).first<XRepostItem>();
-  return result || null;
+  return result ? { ...result, caption: transformXRepostCaption(result.caption) } : null;
 }
 
 export async function transitionXRepost(
