@@ -56,6 +56,14 @@ describe("X repost queue caption and source identity", () => {
     assert.equal(transformXRepostCaption("Abrir no X https://x.com/foo/status/1"), "#dorkis10");
   });
 
+  it("caps optional hashtag overflow while keeping #dorkis10 at the end", () => {
+    const tags = Array.from({ length: 120 }, (_, i) => "#longhashtag" + i);
+    const caption = transformXRepostCaption("Vídeo", tags);
+    assert.ok(Array.from(caption).length <= 280);
+    assert.ok(caption.endsWith("#dorkis10"));
+    assert.equal((caption.match(/#dorkis10/gi) || []).length, 1);
+  });
+
   it("caps body length without truncating the final default hashtag", () => {
     const caption = transformXRepostCaption("a".repeat(350), ["#video"]);
     assert.ok(Array.from(caption).length <= 280);
