@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import { identifyXSource, repostDb, type XRepostItem } from "./x-repost-queue";
+import { identifyXSource, repostDb, sanitizeRepostCaption, type XRepostItem } from "./x-repost-queue";
 
 export type ZernioPlatform = "twitter" | "instagram";
 export type ZernioState =
@@ -48,32 +48,12 @@ function safeCode(value: unknown): string {
   return stringField(value).toLowerCase().replace(/[^a-z0-9_-]/g, "_").slice(0, 70) || "request_failed";
 }
 
+/**
+ * All publisher adapters share the same caption policy, including queued legacy items.
+ * Credits stay in the literal @/user format for both X and Instagram.
+ */
 export function normalizeZernioCaption(source: string, platform: ZernioPlatform): string {
-  const entities: Record<string, string> = {
-    amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
-  };
-  const cleaned = source
-    .replace(/<\s*br\s*\/?>/gi, "\n")
-    .replace(/<\s*\/(?:p|div|li)\s*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (full, key: string) => {
-      if (key[0] === "#") {
-        const point = key[1].toLowerCase() === "x"
-          ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10);
-        return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : full;
-      }
-      return entities[key.toLowerCase()] ?? full;
-    })
-    .replace(/\r\n?/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-  const caption = platform === "twitter"
-    ? cleaned.replace(/(^|[^\w/@])@([A-Za-z0-9_]{1,15})(?![\w/])/g, "$1@/$2")
-    : cleaned.replace(/@\/([A-Za-z0-9_]{1,15})/g, "@$1");
-  const max = platform === "twitter" ? 280 : 2200;
-  if (Array.from(caption).length > max) throw new ZernioError("caption_too_long");
-  return caption;
+  return sanitizeRepostCaption(source, [], platform === "instagram" ? 2200 : 280);
 }
 
 export function zernioIdempotencyKey(queueId: string, platform: ZernioPlatform): string {

@@ -77,7 +77,8 @@ describe("Zernio D1 idempotency and publishing", () => {
       assert.equal(seen.length, 3);
       assert.ok(seen[2].key?.includes(queueId));
       assert.match(seen[2].body || "", /"type":"video"/);
-      assert.match(seen[2].body || "", /@\/author/);
+      assert.doesNotMatch(seen[2].body || "", /@author/);
+      assert.match(seen[2].body || "", /#dorkis10/);
       const row = await db.prepare("SELECT status, post_url FROM x_repost_queue WHERE id=?")
         .bind(queueId).first<{ status: string; post_url: string }>();
       assert.equal(row?.status, "posted");
