@@ -115,7 +115,8 @@ describe("X publisher: automatic Buffer and D1 deduplication", () => {
       const body = JSON.parse(String(init?.body));
       assert.match(body.query, /mutation RodXCreate/);
       assert.equal(body.variables.input.mode, "shareNow");
-      assert.match(body.variables.input.text, /@\/author/);
+      assert.doesNotMatch(body.variables.input.text, /@author/);
+      assert.match(body.variables.input.text, /#dorkis10$/);
       assert.match(body.variables.input.assets[0].video.url, /public-media/);
       return Response.json({
         data: { createPost: { post: {
