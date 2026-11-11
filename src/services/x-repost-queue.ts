@@ -91,7 +91,8 @@ export function sanitizeRepostCaption(
     .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,24}(?::\d+)?(?:\/[^\s<>"'“”]*)?/gi, "")
     // Existing @/credits are NOT active mentions and must survive unchanged.
     .replace(/(^|[^\w/@])@[a-z0-9_]{1,30}(?![\w/])/gi, "$1")
-    .replace(/\babrir\s+no\s+x\b/gi, "")
+    .replace(/^[ \t]*(?:🔗[ \t]*)?abrir\s+no\s+x[ \t]*:?[ \t]*$/gim, "")
+    .replace(/\babrir\s+no\s+x\b[ \t]*:?[ \t]*/gi, "")
     // Remove earlier instances so the default hashtag appears just once at the end.
     .replace(/#dorkis10(?![\p{L}\p{N}_])/giu, "")
     .replace(/^[ \t]*(?:créditos?|credits?|via)\s*:\s*$/gim, "")
