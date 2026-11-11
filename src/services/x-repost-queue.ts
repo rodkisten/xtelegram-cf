@@ -106,6 +106,7 @@ export function sanitizeRepostCaption(
   const existing = new Set(Array.from(cleaned.matchAll(/#[\p{L}\p{N}_]+/gu),
     match => match[0].toLocaleLowerCase()));
   const appended: string[] = [];
+  let suffixLength = Array.from("#dorkis10").length;
 
   for (const raw of candidates) {
     const candidate = String(raw || "").trim().replace(/^#+/, "");
@@ -113,8 +114,11 @@ export function sanitizeRepostCaption(
     const hashtag = "#" + candidate;
     const normalized = hashtag.toLocaleLowerCase();
     if (normalized === "#dorkis10" || existing.has(normalized)) continue;
+    const additional = Array.from(hashtag).length + 1; // space before the default tag
+    if (suffixLength + additional > maxChars) continue;
     existing.add(normalized);
     appended.push(hashtag);
+    suffixLength += additional;
   }
 
   const suffix = [...appended, "#dorkis10"].join(" ");
