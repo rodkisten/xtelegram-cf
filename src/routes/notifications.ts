@@ -1,3 +1,4 @@
+import { appendNotificationGroup } from "../services/notification-groups";
 import { scheduleNotificationDeletion } from "../services/notification-retention";
 import { json } from "../http/response";
 import { parseTelegramDestination, resolveDefaultTelegramChatId } from "../services/channels";
@@ -94,6 +95,26 @@ export async function handleNotificationSend(request: Request, env: Env, require
   const deleteAfter = data.delete_after_minutes ?? 0;
   if (typeof deleteAfter !== 'number' || !Number.isSafeInteger(deleteAfter) || deleteAfter < 0 || deleteAfter > 43200) {
     return json({ ok: false, error: 'delete_after_minutes must be 0-43200' }, 422);
+  }
+  const groupKey = data.group_key;
+  if (groupKey !== undefined) {
+    const eventKey = data.event_key;
+    const severity = data.severity;
+    const title = data.title;
+    if (typeof groupKey !== "string" || !/^[a-zA-Z0-9_:./-]{1,170}$/.test(groupKey) ||
+      typeof eventKey !== "string" || !/^[a-zA-Z0-9_:./-]{1,170}$/.test(eventKey) ||
+      !["running", "success", "error"].includes(String(severity)) ||
+      typeof title !== "string" || !title.trim() || title.length > 160) {
+      return json({ ok: false, error: "Invalid group_key, event_key, severity or title" }, 422);
+    }
+    const receipt = await appendNotificationGroup(env, {
+      chatId: destination.chatId, threadId: messageThreadId, groupKey, eventKey,
+      title, detail: body, severity: severity as "running" | "success" | "error",
+      buttons, deleteAfterMinutes: deleteAfter,
+    });
+    if (!receipt.ok) return json({ ok: false, error: receipt.description || "Group delivery failed" }, receipt.busy ? 409 : 502);
+    if (receipt.messageId) await scheduleNotificationDeletion(env, destination.chatId, receipt.messageId, deleteAfter);
+    return json({ ok: true, grouped: true, message_id: receipt.messageId, edited: receipt.edited });
   }
   const messageId = data.message_id ?? data.messageId;
   const notificationKey = data.notification_key ?? data.notificationKey;
