@@ -1,7 +1,11 @@
 import type { Env } from "../types";
 
 export async function scheduleNotificationDeletion(env: Env, chatId: string, messageId: number, minutes: number): Promise<void> {
-  if (!minutes) return;
+  if (!minutes) {
+    await env.RELAY_DB.prepare("DELETE FROM notification_retention WHERE chat_id=? AND message_id=?")
+      .bind(chatId, messageId).run();
+    return;
+  }
   const due = Math.floor(Date.now() / 1000) + minutes * 60;
   await env.RELAY_DB.prepare(
     "INSERT INTO notification_retention(chat_id,message_id,delete_at) VALUES(?,?,?) " +

@@ -153,7 +153,7 @@ export async function handleNotificationSend(request: Request, env: Env, require
         telegramStatus: receipt.telegramStatus ?? null,
       }, receipt.busy ? 409 : receipt.description?.includes("migration 0010") ? 503 : 502);
     }
-    if (receipt.messageId && deleteAfter) await scheduleNotificationDeletion(env, destination.chatId, receipt.messageId, deleteAfter);
+    if (receipt.messageId && !receipt.stale) await scheduleNotificationDeletion(env, destination.chatId, receipt.messageId, deleteAfter);
     return json({
       ok: true, chat_id: destination.chatId,
       message_thread_id: messageThreadId, message_id: receipt.messageId,
@@ -179,7 +179,7 @@ export async function handleNotificationSend(request: Request, env: Env, require
       telegramStatus: result.httpStatus ?? null,
     }, 502);
   }
-  if (result.result?.message_id && deleteAfter) await scheduleNotificationDeletion(env, destination.chatId, result.result.message_id, deleteAfter);
+  if (result.result?.message_id) await scheduleNotificationDeletion(env, destination.chatId, result.result.message_id, deleteAfter);
   return json({
     ok: true,
     chat_id: String(result.result?.chat?.id ?? destination.chatId),
