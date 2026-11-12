@@ -4,6 +4,7 @@ import { handleXPublisher } from "../routes/x-publisher";
 import { serveSignedMedia } from "../services/x-publish-media";
 import { handleZernioRepost } from "../routes/zernio";
 import { handleGithubWebhook } from "../routes/github-webhook";
+import { handleTelegramGithubCallback } from "../routes/github-rerun";
 import { handleNotificationSend } from "../routes/notifications";
 import { handleNotificationsPage } from "../routes/notifications-page";
 import { authorizeRequest, isAuthorized } from "../http/auth";
@@ -62,6 +63,10 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   if (url.pathname.startsWith("/rodx/v1/")) {
     relayDebug(env, traceId, "router.dispatch", { handler: "rodx" });
     return handleRodx(request, env);
+  }
+
+  if (method === "POST" && url.pathname === "/webhooks/telegram/github") {
+    return handleTelegramGithubCallback(request, env);
   }
 
   if (method === "POST" && url.pathname === "/webhooks/github") {

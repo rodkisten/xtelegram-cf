@@ -40,6 +40,9 @@ export interface Env {
   NOTIFICATION_API_TOKEN?: string;
   /** HMAC-SHA256 secret supplied to GitHub repository/organization webhook settings. */
   GITHUB_WEBHOOK_SECRET?: string;
+  GITHUB_ACTIONS_TOKEN?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
+  GITHUB_RERUN_ALLOWED_USER_IDS?: string;
   /** Destination for GitHub Actions alerts (falls back to NOTIFICATION_CHAT_ID). */
   GITHUB_WEBHOOK_CHAT_ID?: string;
   /** Comma-separated workflow_run actions; default completed. */
