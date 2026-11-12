@@ -68,10 +68,11 @@ export function sanitizeRepostCaption(
   hashtags: string[] | string = [],
   maxChars = MAX_CAPTION_CHARS,
 ): string {
-  // Captions already normalized by this function must remain byte-for-byte stable.
-  // In particular, do not split an existing optional-tag suffix on a second pass.
-  if ((!hashtags || (Array.isArray(hashtags) && hashtags.length === 0)) &&
-      /^([^<>\\r]*?)(?:\\n\\n#[\\p{L}\\p{N}_]+(?: #[\\p{L}\\p{N}_]+)*)? #dorkis10$/u.test(String(text))) {
+  // Keep the canonical suffix together when processing an already-sanitized caption.
+  // This must use real regex escapes (\\n), not escaped backslash literals (\\\\n).
+  if ((Array.isArray(hashtags) ? hashtags.length === 0 : !String(hashtags).trim()) &&
+      Array.from(String(text)).length <= maxChars &&
+      /^(?:[^<>\\r]*?\\n\\n)?#[\\p{L}\\p{N}_]+(?: #[\\p{L}\\p{N}_]+)* #dorkis10$/u.test(String(text))) {
     return String(text);
   }
   const entities: Record<string, string> = {
