@@ -113,6 +113,10 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       run.run_attempt > 0 && run.run_attempt < 1000 ? run.run_attempt : 1;
     const stage = action === "requested" ? 1 : action === "in_progress" ? 2 : 99999;
     const key = "workflow:" + String(repository.full_name) + ":" + String(run.id);
+    // Only expose an actionable callback when the integration is configured.
+    if (!env.GITHUB_ACTIONS_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET || !env.GITHUB_RERUN_ALLOWED_USER_IDS) {
+      message.buttons = message.buttons.filter(row => !row.some(button => button.callback_data));
+    }
     const result = await deliverMutableNotification(env, {
       chatId: destination.chatId,
       threadId: destination.messageThreadId,
