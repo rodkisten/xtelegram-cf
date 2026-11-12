@@ -966,7 +966,7 @@ export async function sendTelegramText(options: {
   text: string;
   parseMode?: ParseMode | null;
   disableNotification?: boolean;
-  buttons?: { text: string; url: string }[][];
+  buttons?: { text: string; url?: string; callback_data?: string }[][];
 }): Promise<TelegramApiResult<TelegramMessage>> {
   const payload: Record<string, unknown> = {
     chat_id: options.chatId,
@@ -981,7 +981,7 @@ export async function sendTelegramText(options: {
   if (options.buttons?.length) {
     payload.reply_markup = {
       inline_keyboard: options.buttons.map((row) =>
-        row.map((button) => ({ text: button.text, url: button.url }))
+        row.map((button) => button.callback_data ? { text: button.text, callback_data: button.callback_data } : { text: button.text, url: button.url })
       ),
     };
   }
@@ -998,7 +998,7 @@ export async function editTelegramText(options: {
   messageId: number;
   text: string;
   parseMode?: ParseMode | null;
-  buttons?: { text: string; url: string }[][];
+  buttons?: { text: string; url?: string; callback_data?: string }[][];
 }): Promise<TelegramApiResult<TelegramMessage | true>> {
   const payload: Record<string, unknown> = {
     chat_id: options.chatId,
@@ -1008,7 +1008,7 @@ export async function editTelegramText(options: {
     // Explicitly clear obsolete Sentry buttons when a run recovers.
     reply_markup: {
       inline_keyboard: options.buttons?.map((row) =>
-        row.map((button) => ({ text: button.text, url: button.url }))
+        row.map((button) => button.callback_data ? { text: button.text, callback_data: button.callback_data } : { text: button.text, url: button.url })
       ) ?? [],
     },
   };
