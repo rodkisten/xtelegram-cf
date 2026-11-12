@@ -66,6 +66,25 @@ export async function handleTelegramGithubCallback(request: Request, env: Env): 
     return json({ ok: false, error: "Invalid repository" }, 400);
   }
 
+  // Verify the run is still failed before sending a state-changing request.
+  const runCheck = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${match[1]}`, {
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "xtelegram-cf",
+    },
+  }).catch(() => null);
+  if (!runCheck?.ok) {
+    await answer(env, callback.id, "Não foi possível verificar a execução no GitHub.");
+    return json({ ok: true, verified: false });
+  }
+  const run = await runCheck.json() as { status?: string; conclusion?: string | null };
+  if (run.status !== "completed" ||
+      !["failure", "timed_out", "startup_failure"].includes(run.conclusion ?? "")) {
+    await answer(env, callback.id, "Esta execução não está mais em estado de falha.");
+    return json({ ok: true, not_failed: true });
+  }
   // Atomic claim prevents double-taps and simultaneous callbacks.
   const claimed = await env.RELAY_DB.prepare(
     "INSERT OR IGNORE INTO github_rerun_requests (run_id, repository, user_id, status) " +
@@ -101,7 +120,7 @@ export async function handleTelegramGithubCallback(request: Request, env: Env): 
     ).bind(match[1]).run();
     await answer(env, callback.id, "🔄 Nova tentativa solicitada ao GitHub!");
     return json({ ok: true, rerun: true });
-  } catch (error) {
+  } catch {
     // Do not automatically retry an ambiguous GitHub network failure.
     await env.RELAY_DB.prepare(
       "UPDATE github_rerun_requests SET status='unknown' WHERE run_id=?1"
