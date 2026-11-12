@@ -102,8 +102,16 @@ export function sanitizeRepostCaption(
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  const candidates = Array.isArray(hashtags) ? hashtags : String(hashtags).split(/[\s,;]+/);
-  const existing = new Set(Array.from(cleaned.matchAll(/#[\p{L}\p{N}_]+/gu),
+  // Move an existing optional-tag paragraph back into the suffix before rebuilding it.
+  // Without this, a second pass moves #dorkis10 to its own paragraph.
+  const suffixMatch = cleaned.match(/(?:^|\n\n)(#[\p{L}\p{N}_]+(?: #[\p{L}\p{N}_]+)*)$/u);
+  const preservedTags = suffixMatch?.[1]?.split(" ") ?? [];
+  const bodyText = suffixMatch?.index !== undefined
+    ? cleaned.slice(0, suffixMatch.index).trimEnd()
+    : cleaned;
+  const requestedTags = Array.isArray(hashtags) ? hashtags : String(hashtags).split(/[\s,;]+/);
+  const candidates = [...preservedTags, ...requestedTags];
+  const existing = new Set(Array.from(bodyText.matchAll(/#[\p{L}\p{N}_]+/gu),
     match => match[0].toLocaleLowerCase()));
   const appended: string[] = [];
   let suffixLength = Array.from("#dorkis10").length;
@@ -122,11 +130,11 @@ export function sanitizeRepostCaption(
   }
 
   const suffix = [...appended, "#dorkis10"].join(" ");
-  const allowed = Math.max(0, Math.floor(maxChars) - Array.from(suffix).length - (cleaned ? 2 : 0));
-  const sourceChars = Array.from(cleaned);
+  const allowed = Math.max(0, Math.floor(maxChars) - Array.from(suffix).length - (bodyText ? 2 : 0));
+  const sourceChars = Array.from(bodyText);
   const body = sourceChars.length > allowed
     ? sourceChars.slice(0, Math.max(0, allowed - 1)).join("").trimEnd() + (allowed ? "…" : "")
-    : cleaned;
+    : bodyText;
   return [body, suffix].filter(Boolean).join("\n\n");
 }
 
