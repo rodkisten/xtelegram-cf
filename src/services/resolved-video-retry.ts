@@ -30,9 +30,10 @@ async function fingerprint(body: Payload): Promise<string> {
 }
 
 function failureIsAmbiguous(result: Payload, status: number): boolean {
-  if (status >= 500 || status === 408 || status === 409) return true;
+  if (status === 408 || status === 409) return true;
   const channels = result.channels as Payload | undefined;
   const notSent = Array.isArray(channels?.notSent) ? channels.notSent : [];
+  if (notSent.length === 0) return status >= 500;
   return notSent.some((item) => {
     const failure = item as Payload;
     const code = Number(failure.httpStatus || 0);
@@ -40,20 +41,20 @@ function failureIsAmbiguous(result: Payload, status: number): boolean {
   });
 }
 
-async function queueFailure(env: Env, body: Payload, result: Payload, status: number): Promise<string> {
+async function queueFailure(env: Env, body: Payload, result: Payload, status: number, ambiguous: boolean): Promise<string> {
   const id = await fingerprint(body);
   const now = Date.now();
   await env.RELAY_DB.prepare(
     `INSERT INTO resolved_video_retry
       (id, payload_json, last_result_json, status, attempts, next_attempt_at, created_at, updated_at)
-      VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)
+      VALUES (?, ?, ?, ?, 0, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         last_result_json = excluded.last_result_json,
         updated_at = excluded.updated_at,
-        status = CASE WHEN status = 'completed' THEN status ELSE 'pending' END,
+        status = CASE WHEN status IN ('completed', 'processing') THEN status ELSE excluded.status END,
         next_attempt_at = CASE WHEN status = 'completed' THEN next_attempt_at ELSE excluded.next_attempt_at END`,
   ).bind(id, JSON.stringify(body), JSON.stringify({ status, result }).slice(0, 16000),
-    now + HOUR, now, now).run();
+    ambiguous ? 'needs_review' : 'pending', now + HOUR, now, now).run();
   return id;
 }
 
@@ -68,16 +69,17 @@ export async function sendWithRecovery(request: Request, env: Env): Promise<Resp
   }
   const result = await response.clone().json().catch(() => ({})) as Payload;
   // Do not automatically replay ambiguous writes: Telegram may have accepted them.
-  if (failureIsAmbiguous(result, response.status)) return response;
+  const ambiguous = failureIsAmbiguous(result, response.status);
   try {
-    const id = await queueFailure(env, body, result, response.status);
+    const id = await queueFailure(env, body, result, response.status, ambiguous);
     return json({
       ok: true,
       queued: true,
       retryId: id,
-      status: "pending",
+      status: ambiguous ? "needs_review" : "pending",
       nextRetryInSeconds: 3600,
-      message: "Video media resolved; delivery queued for automatic recovery",
+      message: ambiguous ? "Video resolved; delivery requires reconciliation before safe retry" :
+        "Video media resolved; delivery queued for automatic recovery",
       originalStatus: response.status,
       channels: result.channels ?? null,
     }, 202);
