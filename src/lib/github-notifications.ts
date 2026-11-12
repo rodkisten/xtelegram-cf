@@ -1,6 +1,7 @@
 export interface NotificationButton {
   text: string;
-  url: string;
+  url?: string;
+  callback_data?: string;
 }
 
 export interface NotificationMessage {
@@ -107,6 +108,9 @@ export function formatGithubWorkflowRun(payload: unknown): NotificationMessage |
     { text: " 🔎 Abrir execução ", url: runUrl },
     { text: " 📁 Repositório ", url: repoUrl },
   ]];
+  if (action === "completed" && ["failure", "timed_out", "startup_failure"].includes(conclusion)) {
+    buttons.unshift([{ text: "🔄 Executar novamente", callback_data: "ghrerun:" + id }]);
+  }
   if (sha && /^[a-f0-9]{40}$/i.test(sha)) {
     buttons.push([{ text: " 🔖 Ver commit ", url: repoUrl + "/commit/" + sha }]);
   }
