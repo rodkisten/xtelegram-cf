@@ -109,7 +109,7 @@ async function putXRepostMedia(request: Request, env: Env, id: string): Promise<
   }
 
   const bytes = Number(request.headers.get("Content-Length") || 0);
-  const contentType = request.headers.get("Content-Type")?.split(";")[0].trim() || "";
+  const contentType = request.headers.get("Content-Type")?.split(";")[0]?.trim() || "";
   if (!bytes || bytes > MAX_UPLOAD_BYTES || contentType !== "video/mp4" || !request.body) {
     return json({ ok: false, error: "Provide MP4 with Content-Length from 1 to 80 MB" }, 413);
   }

@@ -44,7 +44,7 @@ const worker = {
         : routedResponse;
       if (queueRequest && response.ok) {
         ctx.waitUntil(
-          queueXRepostAfterRelay(queueRequest, response.clone(), env)
+          queueXRepostAfterRelay(queueRequest as unknown as Request, response.clone(), env)
             .then(async (item) => {
               if (item) await cacheXRepostVideo(env, item);
             })
