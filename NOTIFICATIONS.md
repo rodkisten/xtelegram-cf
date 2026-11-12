@@ -198,3 +198,59 @@ O deploy do Worker exige credenciais Cloudflare válidas e o segredo
 ⚠️ Tokens de bot e outros segredos não devem ficar em `wrangler.toml` nem
 ser impressos em logs; configure-os com `wrangler secret put` e rotacione
 quaisquer valores que já tenham sido comitados.
+
+
+## Rerun de workflows pelo Telegram
+
+Quando um evento `workflow_run.completed` termina com `failure`, `timed_out`
+ou `startup_failure`, o bot mostra **🔄 Executar novamente**. O callback
+consulta a execução no GitHub e chama `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun`.
+O mesmo run ID ganha uma nova tentativa; o webhook de status atualiza a
+notificação existente. O D1 bloqueia cliques repetidos para o mesmo run.
+
+### Secrets obrigatórios
+
+```sh
+npx wrangler secret put GITHUB_ACTIONS_TOKEN
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+npx wrangler secret put GITHUB_RERUN_ALLOWED_USER_IDS
+```
+
+`GITHUB_ACTIONS_TOKEN`: token fine-grained com acesso somente aos repositórios
+que receberão rerun, permissão **Actions: Read and write**. Nunca use um token
+no texto da mensagem, URL do botão ou no `wrangler.toml`.
+
+`TELEGRAM_WEBHOOK_SECRET`: valor aleatório usado no header
+`X-Telegram-Bot-Api-Secret-Token`, definido ao registrar o webhook Telegram.
+Use apenas caracteres permitidos pelo Telegram: `A-Z a-z 0-9 _ -`.
+
+`GITHUB_RERUN_ALLOWED_USER_IDS`: IDs numéricos de usuários Telegram
+autorizados, separados por vírgula. Não são IDs de chat nem usernames.
+
+### Ativação
+
+1. Aplicar a migration `0011_github_rerun.sql` em D1:
+   `npm run db:migrate:remote`.
+2. Publicar o Worker: `npm run deploy`.
+3. Conferir primeiro o webhook atual do bot com
+   `https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo`.
+4. **Não sobrescrever um webhook existente de outro serviço.**
+   Se o bot já recebe updates em outro endpoint, encaminhar os
+   `callback_query` para `POST /webhooks/telegram/github` preservando o
+   header de segredo, ou integrar o handler à rota atual.
+5. Se não houver webhook existente, registrar o endpoint:
+   `POST https://api.telegram.org/bot<BOT_TOKEN>/setWebhook` com
+   `url=https://SEU-WORKER/webhooks/telegram/github`,
+   `secret_token=<TELEGRAM_WEBHOOK_SECRET>` e
+   `allowed_updates=["callback_query"]`.
+6. Testar com uma execução de falha real e um usuário Telegram autorizado.
+
+O callback rejeita usuários fora da allowlist, exige o secret header,
+verifica se a mensagem é uma notificação persistida no D1 e confere o
+estado atual do run na API do GitHub. Uma resposta de rede ambígua não
+gera nova chamada automática para evitar disparos duplicados.
+
+**Atenção de segurança:** versões antigas do `wrangler.toml` contêm
+credenciais em texto claro. Rotacione os valores expostos e migre-os para
+Wrangler secrets antes do deploy. Remover valores do arquivo não revoga
+credenciais já publicadas no histórico Git.
