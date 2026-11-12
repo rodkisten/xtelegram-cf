@@ -1,3 +1,4 @@
+import { processResolvedVideoRetry, recoverExpiredVideoLeases } from "../services/resolved-video-retry";
 import { routeRequest } from "./router";
 import { cacheXRepostVideo, queueXRepostAfterRelay } from "../services/x-repost-auto-queue";
 import { notifyDueXReposts } from "../routes/x-repost";
@@ -72,6 +73,10 @@ const worker = {
     }
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (new Date().getUTCMinutes() < 10) ctx.waitUntil((async () => {
+      try { await recoverExpiredVideoLeases(env); await processResolvedVideoRetry(env); }
+      catch (error) { console.warn('[video-retry] hourly processing failed', error); }
+    })());
     ctx.waitUntil((async () => {
       try {
         if (env.X_PUBLISH_AUTO_ENABLED !== "true") await notifyDueXReposts(env);

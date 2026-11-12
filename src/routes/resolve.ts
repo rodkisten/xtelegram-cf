@@ -35,7 +35,7 @@ import {
   normalizeParseMode,
   normalizeTelegramChannels,
 } from "../validation/common";
-import { handleSend } from "./send";
+import { sendWithRecovery } from "../services/resolved-video-retry";
 import { normalizeRelayForceValue } from "../validation/send";
 
 interface ResolveRequestBody {
@@ -121,7 +121,7 @@ export async function handleResolve(
         const records = await checkStoredMediaDeliveries(requireRelayDb(env), [identity], destinations);
         const record = records.get(identity.key);
         if (record && destinations.every((channel) => record.deliveries.some((d) => d.channelId === channel))) {
-          const response = await handleSend(cloneAuthorizedJsonRequest(request, {
+          const response = await sendWithRecovery(cloneAuthorizedJsonRequest(request, {
             ...body, mediaUrl: normalized.href, sourceUrl: normalized.href,
             mediaKey: record.media.key, provider: record.media.provider, channels: destinations,
           }), env);
@@ -287,7 +287,7 @@ export async function handleResolve(
       mediaCount: resolution.media.length,
       channelCount: channelValidation.value.length,
     });
-    const response = await handleSend(
+    const response = await sendWithRecovery(
       cloneAuthorizedJsonRequest(request, {
         ...common,
         mediaItems: resolution.media.map((item) => ({
@@ -347,7 +347,7 @@ export async function handleResolve(
       mediaUrl: debugUrl(item.url),
       channelCount: channelValidation.value.length,
     });
-    const response = await handleSend(
+    const response = await sendWithRecovery(
       cloneAuthorizedJsonRequest(request, {
         ...common,
         ...perItemIdentity,

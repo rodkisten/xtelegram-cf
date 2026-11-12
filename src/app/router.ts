@@ -16,7 +16,7 @@ import { handleMediaCheck } from "../routes/media/check";
 import { handleMediaQuery } from "../routes/media/query";
 import { handleMediaRegister } from "../routes/media/register";
 import { handleResolve } from "../routes/resolve";
-import { handleSend } from "../routes/send";
+import { sendWithRecovery } from "../services/resolved-video-retry";
 import { relayDebug, relayTraceId } from "../lib/debug";
 import type { Env } from "../types";
 
@@ -120,7 +120,7 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   }
   if (method === "POST" && url.pathname === "/send") {
     relayDebug(env, traceId, "router.dispatch", { handler: "send" });
-    return handleSend(request, env);
+    return sendWithRecovery(request, env);
   }
   if (method === "POST" && url.pathname === "/resolve") {
     relayDebug(env, traceId, "router.dispatch", { handler: "resolve" });
