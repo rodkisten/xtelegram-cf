@@ -104,10 +104,12 @@ export function sanitizeRepostCaption(
 
   // Move an existing optional-tag paragraph back into the suffix before rebuilding it.
   // Without this, a second pass moves #dorkis10 to its own paragraph.
-  const suffixMatch = cleaned.match(/(?:^|\\n\\n)(#[\\p{L}\\p{N}_]+(?: #[\\p{L}\\p{N}_]+)*)$/u);
-  const preservedTags = suffixMatch ? suffixMatch[1].split(" ") : [];
-  const bodyText = suffixMatch ? cleaned.slice(0, suffixMatch.index).trimEnd() : cleaned;
-  const requestedTags = Array.isArray(hashtags) ? hashtags : String(hashtags).split(/[\\s,;]+/);
+  const suffixMatch = cleaned.match(/(?:^|\n\n)(#[\p{L}\p{N}_]+(?: #[\p{L}\p{N}_]+)*)$/u);
+  const preservedTags = suffixMatch?.[1]?.split(" ") ?? [];
+  const bodyText = suffixMatch?.index !== undefined
+    ? cleaned.slice(0, suffixMatch.index).trimEnd()
+    : cleaned;
+  const requestedTags = Array.isArray(hashtags) ? hashtags : String(hashtags).split(/[\s,;]+/);
   const candidates = [...preservedTags, ...requestedTags];
   const existing = new Set(Array.from(bodyText.matchAll(/#[\p{L}\p{N}_]+/gu),
     match => match[0].toLocaleLowerCase()));
