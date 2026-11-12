@@ -1,3 +1,4 @@
+import { processNotificationDeletions } from "../services/notification-retention";
 import { processResolvedVideoRetry, recoverExpiredVideoLeases } from "../services/resolved-video-retry";
 import { routeRequest } from "./router";
 import { cacheXRepostVideo, queueXRepostAfterRelay } from "../services/x-repost-auto-queue";
@@ -73,6 +74,7 @@ const worker = {
     }
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(processNotificationDeletions(env).catch(error => console.warn('[notifications] deletion failed', error)));
     if (new Date().getUTCMinutes() < 10) ctx.waitUntil((async () => {
       try { await recoverExpiredVideoLeases(env); await processResolvedVideoRetry(env); }
       catch (error) { console.warn('[video-retry] hourly processing failed', error); }

@@ -1,3 +1,4 @@
+import { scheduleNotificationDeletion } from "../services/notification-retention";
 import { json } from "../http/response";
 import { parseTelegramDestination, resolveDefaultTelegramChatId } from "../services/channels";
 import { sendTelegramText } from "../telegram";
@@ -90,6 +91,10 @@ export async function handleNotificationSend(request: Request, env: Env, require
     return json({ ok: false, error: "Missing TELEGRAM_BOT_TOKEN", stage: "configuration" }, 500);
   }
 
+  const deleteAfter = data.delete_after_minutes ?? 0;
+  if (typeof deleteAfter !== 'number' || !Number.isSafeInteger(deleteAfter) || deleteAfter < 0 || deleteAfter > 43200) {
+    return json({ ok: false, error: 'delete_after_minutes must be 0-43200' }, 422);
+  }
   const messageId = data.message_id ?? data.messageId;
   const notificationKey = data.notification_key ?? data.notificationKey;
   const sequence = data.sequence ?? 0;
@@ -127,6 +132,7 @@ export async function handleNotificationSend(request: Request, env: Env, require
         telegramStatus: receipt.telegramStatus ?? null,
       }, receipt.busy ? 409 : receipt.description?.includes("migration 0010") ? 503 : 502);
     }
+    if (receipt.messageId && deleteAfter) await scheduleNotificationDeletion(env, destination.chatId, receipt.messageId, deleteAfter);
     return json({
       ok: true, chat_id: destination.chatId,
       message_thread_id: messageThreadId, message_id: receipt.messageId,
@@ -152,6 +158,7 @@ export async function handleNotificationSend(request: Request, env: Env, require
       telegramStatus: result.httpStatus ?? null,
     }, 502);
   }
+  if (result.result?.message_id && deleteAfter) await scheduleNotificationDeletion(env, destination.chatId, result.result.message_id, deleteAfter);
   return json({
     ok: true,
     chat_id: String(result.result?.chat?.id ?? destination.chatId),
