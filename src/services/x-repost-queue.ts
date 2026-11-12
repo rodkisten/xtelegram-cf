@@ -134,7 +134,7 @@ export function sanitizeRepostCaption(
   const sourceChars = Array.from(bodyText);
   const body = sourceChars.length > allowed
     ? sourceChars.slice(0, Math.max(0, allowed - 1)).join("").trimEnd() + (allowed ? "…" : "")
-    : cleaned;
+    : bodyText;
   return [body, suffix].filter(Boolean).join("\n\n");
 }
 
