@@ -48,15 +48,15 @@ function statusInfo(action: string, conclusion: string): { icon: string; title: 
   if (action === "requested") return { icon: "📥", title: "Workflow solicitado" };
   if (action === "in_progress") return { icon: "🔄", title: "Workflow em execução" };
   const statuses: Record<string, { icon: string; title: string }> = {
-    success: { icon: "✅", title: "Workflow sucesso" },
-    failure: { icon: "❌", title: "Workflow falhou" },
-    cancelled: { icon: "🛑", title: "Workflow cancelado" },
-    timed_out: { icon: "⏱️", title: "Workflow excedeu o tempo" },
-    action_required: { icon: "⚠️", title: "Workflow exige atenção" },
-    neutral: { icon: "⚪", title: "Workflow concluído (neutro)" },
-    skipped: { icon: "⏭️", title: "Workflow ignorado" },
-    stale: { icon: "⌛", title: "Workflow obsoleto" },
-    startup_failure: { icon: "🚨", title: "Workflow não iniciou" },
+    success: { icon: "✅", title: "CI: sucesso" },
+    failure: { icon: "❌", title: "CI: falhou" },
+    cancelled: { icon: "🛑", title: "CI: cancelado" },
+    timed_out: { icon: "⏱️", title: "CI: excedeu o tempo" },
+    action_required: { icon: "⚠️", title: "CI: exige atenção" },
+    neutral: { icon: "⚪", title: "CI: concluído (neutro)" },
+    skipped: { icon: "⏭️", title: "CI: ignorado" },
+    stale: { icon: "⌛", title: "CI: obsoleto" },
+    startup_failure: { icon: "🚨", title: "CI: não iniciou" },
   };
   return statuses[conclusion] ?? { icon: "ℹ️", title: "Workflow concluído" };
 }
