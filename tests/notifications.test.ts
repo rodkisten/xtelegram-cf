@@ -134,15 +134,13 @@ describe("GitHub workflow webhook", () => {
     assert.equal(sends, 0);
   });
 
-  it("sends once and deduplicates repeated GitHub delivery IDs", async () => {
+  it("sends failed workflows to Telegram once and deduplicates deliveries", async () => {
     const db = fakeDb();
     let sends = 0;
     globalThis.fetch = async (_input, init) => {
       sends++;
       const data = JSON.parse(String(init?.body));
-      assert.match(data.text, /✅/);
-      assert.equal(data.chat_id, "-1001234");
-      assert.equal(data.message_thread_id, 55);
+      assert.match(data.text, /❌/);
       return Response.json({ ok: true, result: { message_id: 99 } });
     };
     const env = {
@@ -151,41 +149,37 @@ describe("GitHub workflow webhook", () => {
       GITHUB_WEBHOOK_CHAT_ID: "-1001234:55",
       RELAY_DB: db as unknown as D1Database,
     } as Env;
-    const response1 = await handleGithubWebhook(signedRequest(webhookPayload(), "secret"), env);
-    const response2 = await handleGithubWebhook(signedRequest(webhookPayload(), "secret"), env);
-    assert.equal(response1.status, 200);
-    assert.equal(response2.status, 200);
-    assert.equal((await response2.json() as { duplicate: boolean }).duplicate, true);
+    const request = () => signedRequest(webhookPayload("completed", "failure"), "secret");
+    assert.equal((await handleGithubWebhook(request(), env)).status, 200);
+    const repeated = await handleGithubWebhook(request(), env);
+    assert.equal((await repeated.json() as { duplicate: boolean }).duplicate, true);
     assert.equal(sends, 1);
-    assert.equal(db.sqlite.prepare(
-      "SELECT state FROM github_notification_deliveries WHERE delivery_id=?"
-    ).get("abcdef12-3456-4789-8765-abcdef123456")?.state, "sent");
   });
 
-  it("accepts requested/in_progress by default and filters them when configured", async () => {
+  it("never sends successful, requested, or in-progress workflows to Telegram", async () => {
     const db = fakeDb();
-    const env = {
-      GITHUB_WEBHOOK_SECRET: "secret",
-      TELEGRAM_BOT_TOKEN: "bot",
-      GITHUB_WEBHOOK_CHAT_ID: "42",
-      RELAY_DB: db as unknown as D1Database,
-    } as Env;
     let sends = 0;
-    globalThis.fetch = async () => {
-      sends++;
-      return Response.json({ ok: true, result: { message_id: 2 } });
-    };
-    const accepted = await handleGithubWebhook(signedRequest(webhookPayload("requested", ""), "secret"), env);
-    assert.equal(accepted.status, 200);
-    assert.equal(sends, 1);
-
-    const filtered = await handleGithubWebhook(signedRequest(webhookPayload("in_progress", ""), "secret",
-      "bcdefa12-3456-4789-8765-abcdef123456"), {
-      ...env, GITHUB_NOTIFY_ACTIONS: "completed",
-    });
-    assert.equal(filtered.status, 202);
-    assert.equal(sends, 1);
+    globalThis.fetch = async () => { sends++; throw new Error("unexpected send"); };
+    const env = { GITHUB_WEBHOOK_SECRET: "secret", RELAY_DB: db as unknown as D1Database } as Env;
+    for (const [index, action] of ["requested", "in_progress", "completed"].entries()) {
+      const request = signedRequest(webhookPayload(action, action === "completed" ? "success" : ""),
+        "secret", `abcdef1${index}-3456-4789-8765-abcdef123456`);
+      const response = await handleGithubWebhook(request, env);
+      assert.equal(response.status, 200);
+    }
+    assert.equal(sends, 0);
   });
+
+  it("filters actions when configured", async () => {
+    const db = fakeDb();
+    const response = await handleGithubWebhook(
+      signedRequest(webhookPayload("in_progress", ""), "secret"),
+      { GITHUB_WEBHOOK_SECRET: "secret", GITHUB_NOTIFY_ACTIONS: "completed",
+        RELAY_DB: db as unknown as D1Database } as Env,
+    );
+    assert.equal(response.status, 202);
+  });
+
 });
 
 describe("Notification Studio HTML page", () => {
