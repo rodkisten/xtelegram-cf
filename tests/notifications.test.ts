@@ -170,6 +170,39 @@ describe("GitHub workflow webhook", () => {
     assert.equal(sends, 0);
   });
 
+  it("uses the custom Notify icon and time-sensitive priority for successful workflows", async () => {
+    const db = fakeDb();
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push({ url, body });
+      if (url.includes("/live-activity/")) {
+        return Response.json({ success: true, activityId: "LA12345678" });
+      }
+      return Response.json({ success: true });
+    };
+    const env = {
+      GITHUB_WEBHOOK_SECRET: "secret",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
+      RELAY_DB: db as unknown as D1Database,
+    } as Env;
+    const started = await handleGithubWebhook(
+      signedRequest(webhookPayload("requested", ""), "secret"), env
+    );
+    assert.equal(started.status, 200);
+    const completed = await handleGithubWebhook(
+      signedRequest(webhookPayload("completed", "success"), "secret",
+        "abcdef12-3456-4789-8765-abcdef123457"), env
+    );
+    assert.equal(completed.status, 200);
+    assert.ok(requests.length >= 2);
+    assert.ok(requests.every(({ url }) => url.includes("timeSensitive=true")));
+    assert.ok(requests.every(({ url }) => url.includes("IMG_9928.png")));
+    assert.equal(requests.some(({ url }) => url.includes("api.telegram.org")), false);
+  });
+
   it("filters actions when configured", async () => {
     const db = fakeDb();
     const response = await handleGithubWebhook(
