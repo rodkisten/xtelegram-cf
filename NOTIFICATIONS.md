@@ -108,7 +108,20 @@ The endpoint verifies GitHub's signature against the raw bytes BEFORE parsing JS
 | `completed: cancelled` | Finaliza atividade e envia push | Não |
 | Outras conclusões de `completed` | Finaliza atividade e envia push | Não |
 
-- **Não existe allowlist ou denylist por nome de workflow.** Todos os workflows cujos eventos `workflow_run` chegam ao endpoint são processados se a ação estiver habilitada.
+- **Filtro por arquivo YAML:** `GITHUB_NOTIFY_WORKFLOWS` aceita caminhos exatos e globs sobre `workflow_run.path`. A configuração é opcional e, quando ausente, aceita todos os workflows.
+- Padrões positivos incluem; padrões iniciados por `!` excluem e têm prioridade. Sem padrões positivos, todos são incluídos exceto os excluídos. Se um filtro estiver configurado e o evento não trouxer `workflow_run.path`, o evento é ignorado.
+- Os padrões são separados por vírgula ou quebra de linha; `*` corresponde a caracteres dentro de um diretório, `**` atravessa diretórios e `?` corresponde a um caractere. Não é necessário consultar a API do GitHub.
+
+```toml
+GITHUB_NOTIFY_WORKFLOWS = """
+.github/workflows/*.yml
+.github/workflows/*.yaml
+!.github/workflows/repair-lockfile.yml
+!.github/workflows/cleanup-*.yml
+"""
+```
+
+**Exemplo com exclusões apenas:** `GITHUB_NOTIFY_WORKFLOWS = "!.github/workflows/repair-lockfile.yml"`.
 - **Não existe filtro por branch, repositório ou arquivo YAML no Worker.** O escopo dos repositórios é determinado pelos webhooks instalados no GitHub.
 - Apenas o evento `workflow_run` é aceito. Eventos `workflow_job` e progresso individual dos steps não são processados por esse webhook; o progresso exibido é do workflow.
 - Para receber somente conclusões, configure `GITHUB_NOTIFY_ACTIONS="completed"`. Isso desativa as atualizações de início e andamento.
