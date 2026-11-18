@@ -1,3 +1,4 @@
+import { selectGithubWorkflow } from "../lib/github-notify-config";
 import { json } from "../http/response";
 import { formatGithubWorkflowRun, verifyGithubSignature } from "../lib/github-notifications";
 import { parseTelegramDestination, resolveDefaultTelegramChatId } from "../services/channels";
@@ -13,31 +14,6 @@ function allowedActions(value?: string): Set<string> {
   return new Set(selected.split(",").map((item) => item.trim()).filter(Boolean));
 }
 
-
-/** Match GitHub workflow_run.path against newline/comma-separated YAML globs. */
-export function workflowPathAllowed(path: string, config?: string): boolean {
-  if (!config?.trim()) return true;
-  const rules = config.split(/[\n,]+/).map(s => s.trim()).filter(s => s && !s.startsWith("#"));
-  if (!rules.length) return true;
-  const includes = rules.filter(s => !s.startsWith("!"));
-  const excludes = rules.filter(s => s.startsWith("!")).map(s => s.slice(1).trim());
-  const matches = (pattern: string): boolean => {
-    if (!pattern || pattern.length > 256 || !/^[\w./*?+-]+$/.test(pattern)) return false;
-    let source = "^";
-    for (let i = 0; i < pattern.length; i++) {
-      const ch = pattern[i];
-      if (ch === "*" && pattern[i + 1] === "*") {
-        source += ".*";
-        i++;
-        if (pattern[i + 1] === "/") { source += "?"; i++; }
-      } else if (ch === "*") source += "[^/]*";
-      else if (ch === "?") source += "[^/]";
-      else source += (ch === "." || ch === "+" ? "\\" + ch : ch);
-    }
-    return new RegExp(source + "$").test(path);
-  };
-  return (includes.length === 0 || includes.some(matches)) && !excludes.some(matches);
-}
 
 async function readLimitedBody(request: Request): Promise<ArrayBuffer | null> {
   const contentLength = Number(request.headers.get("content-length") || 0);
@@ -102,12 +78,9 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     return json({ ok: true, ignored: true, reason: "action_filtered", action }, 202);
   }
 
-  const runForFilter = (payload as Record<string, unknown>).workflow_run;
-  const workflowPath = runForFilter && typeof runForFilter === "object" && !Array.isArray(runForFilter)
-    ? (runForFilter as Record<string, unknown>).path : undefined;
-  if (env.GITHUB_NOTIFY_WORKFLOWS?.trim() &&
-      (typeof workflowPath !== "string" || !workflowPathAllowed(workflowPath, env.GITHUB_NOTIFY_WORKFLOWS))) {
-    return json({ ok: true, ignored: true, reason: "workflow_path_filtered" }, 202);
+  const selection = selectGithubWorkflow(payload);
+  if (!selection.allowed) {
+    return json({ ok: true, ignored: true, reason: selection.reason }, 202);
   }
 
   const message = formatGithubWorkflowRun(payload);
