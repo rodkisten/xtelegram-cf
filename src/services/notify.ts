@@ -7,6 +7,7 @@ export interface NotifyEnv {
 }
 
 const BASE_URL = "https://push.getnotifyapp.com";
+const NOTIFY_ICON_URL = "https://raw.githubusercontent.com/rodkisten/xtelegram-cf/refs/heads/main/public/IMG_9928.png";
 const DEVICE_PATTERN = /^[A-Za-z0-9_-]{6,40}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 const ACTIVITY_PATTERN = /^LA[A-Za-z0-9]{6,20}$/;
@@ -77,9 +78,9 @@ async function send(
     method,
     headers: {
       "Content-Type": "application/json",
-      "User-Agent": "photointel-github-actions/1",
+      "User-Agent": "xtelegram-github-actions/1",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(endpoint === "notify-json" ? { iconUrl: NOTIFY_ICON_URL, timeSensitive: true, groupType: "github-actions", ...payload } : payload),
     signal: AbortSignal.timeout(7000),
   });
 
@@ -393,7 +394,7 @@ export async function handleAction(
         await send("notify-json", device, token, {
           title: workflow,
           text: `${message} · ${total}/${total}`,
-          groupType: `photointel-${runId || "actions"}`,
+          groupType: `github-${runId || "actions"}`,
         });
       } catch {
         // Best-effort
