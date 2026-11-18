@@ -80,7 +80,7 @@ async function send(
       "Content-Type": "application/json",
       "User-Agent": "xtelegram-github-actions/1",
     },
-    body: JSON.stringify(endpoint === "notify-json" ? { iconUrl: NOTIFY_ICON_URL, timeSensitive: true, groupType: "github-actions", ...payload } : payload),
+    body: JSON.stringify(endpoint === "notify-json" ? { iconUrl: NOTIFY_ICON_URL, timeSensitive: true, ...payload } : payload),
     signal: AbortSignal.timeout(7000),
   });
 
@@ -137,9 +137,7 @@ function shortWorkflow(name: string): string {
     "zip patch": "ZIP Patch",
   };
 
-  const result =
-    names[normalized] ??
-    (cleanLabel(name.replace(/^[^\p{L}\p{N}_]+/u, "").trim(), 42) || "Workflow");
+  const result = names[normalized] ?? (cleanLabel(name.replace(/^[^\p{L}\p{N}_]+/u, "").trim(), 42) || "Workflow");
 
   return result;
 }
@@ -386,8 +384,9 @@ export async function handleAction(
   }
 
   if (input.action === "end") {
-    const success = (input.outcome ?? "").toLowerCase().trim() === "success";
-    const message = success ? "✅ Concluído" : "❌ Falhou";
+    const outcome = (input.outcome ?? "").toLowerCase().trim();
+    const success = outcome === "success";
+    const message = success ? "✅ Concluído" : outcome === "cancelled" ? "⚠️ Cancelado" : "❌ Falhou";
 
     {
       try {
@@ -404,7 +403,7 @@ export async function handleAction(
     if (input.activityId && ACTIVITY_PATTERN.test(input.activityId)) {
       const payload: Record<string, unknown> = {
         title: workflow,
-        status: success ? "done" : "failed",
+        status: success ? "done" : outcome === "cancelled" ? "cancelled" : "failed",
         body: success ? `${message} · ${total}/${total}` : message,
         endsIn: null,
         keepFor: 60,
