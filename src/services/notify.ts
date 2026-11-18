@@ -388,7 +388,7 @@ export async function handleAction(
     const success = (input.outcome ?? "").toLowerCase().trim() === "success";
     const message = success ? "✅ Concluído" : "❌ Falhou";
 
-    if (success) {
+    {
       try {
         await send("notify-json", device, token, {
           title: workflow,
