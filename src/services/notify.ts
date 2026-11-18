@@ -1,4 +1,4 @@
-export interface Env {
+export interface NotifyEnv {
   NOTIFY_DEVICE_ID: string;
   NOTIFY_TOKEN: string;
   GITHUB_API_TOKEN?: string;
@@ -51,7 +51,7 @@ interface GitHubJob {
   steps?: GitHubStep[];
 }
 
-function getCredentials(env: Env): [string, string] | null {
+function getCredentials(env: NotifyEnv): [string, string] | null {
   const device = (env.NOTIFY_DEVICE_ID ?? "").trim();
   const token = (env.NOTIFY_TOKEN ?? "").trim();
 
@@ -189,7 +189,7 @@ function runContext(repository = "", runId = ""): [string, string, string] {
 }
 
 async function githubStepLink(
-  env: Env,
+  env: NotifyEnv,
   repository: string,
   runId: string,
   stepName: string,
@@ -293,7 +293,7 @@ function linkButton(url: string, label: string): LinkButton | null {
   return { title: label, url: url.slice(0, 512), open: true };
 }
 
-async function handleAction(
+export async function handleAction(
   input: NotifyPayloadInput,
   env: Env,
   device: string,
