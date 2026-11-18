@@ -1,4 +1,7 @@
 export interface Env {
+  NOTIFY_DEVICE_ID?: string;
+  NOTIFY_TOKEN?: string;
+  GITHUB_API_TOKEN?: string;
   /** All publisher switches are OFF unless explicitly enabled. */
   X_PUBLISH_ENABLED?: string;
   X_PUBLISH_AUTO_ENABLED?: string;
