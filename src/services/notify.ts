@@ -295,7 +295,7 @@ function linkButton(url: string, label: string): LinkButton | null {
 
 export async function handleAction(
   input: NotifyPayloadInput,
-  env: Env,
+  env: NotifyEnv,
   device: string,
   token: string
 ): Promise<{ activityId?: string }> {
@@ -424,7 +424,7 @@ export async function handleAction(
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: NotifyEnv): Promise<Response> {
     if (request.method !== "POST") {
       return Response.json({ ok: false, error: "Method not allowed" }, { status: 405 });
     }
