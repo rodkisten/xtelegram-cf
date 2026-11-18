@@ -1,4 +1,4 @@
-# Telegram Notification Sender + GitHub Actions Webhooks
+# Notify! + Telegram: GitHub Actions Webhooks
 
 The relay now supports text notifications independently from media uploads.
 
@@ -23,7 +23,7 @@ A prévia é uma simulação visual e não reproduz fielmente cada versão do Te
 | --- | --- | --- |
 | GET /notifications | Nenhuma (HTML público, sem tokens) | Compor e visualizar mensagens e gerar cURL/Fetch |
 | POST /notifications/send | Authorization: Bearer NOTIFICATION_API_TOKEN | Deliver text to a Telegram chat or forum topic |
-| POST /webhooks/github | X-Hub-Signature-256 (GitHub HMAC SHA-256) | Format and send GitHub Actions workflow_run status notifications |
+| POST /webhooks/github | X-Hub-Signature-256 (GitHub HMAC SHA-256) | Envia atualizações de workflow para Notify! e alertas de falha para Telegram |
 
 Both return JSON with ok and error details, and preserve X-Relay-Trace-Id response correlation. Never share bot tokens or API secrets in client-side code.
 
@@ -38,7 +38,7 @@ Set nonsecret destinations in Wrangler vars:
 
     NOTIFICATION_CHAT_ID="-1001234567890:73"
     GITHUB_WEBHOOK_CHAT_ID="-1001234567890:73"
-    GITHUB_NOTIFY_ACTIONS="completed"
+    GITHUB_NOTIFY_ACTIONS="requested,in_progress,completed"
 
 The destination supports numeric IDs, Telegram @channel usernames or -100...:73 for forum topics. For private messages, start the bot (/start) and use your own numeric Telegram chat ID. Bots cannot initiate a private chat before the user opens them.
 
@@ -92,9 +92,48 @@ For each repository, or at organization level (with the appropriate permissions)
 
 The endpoint verifies GitHub's signature against the raw bytes BEFORE parsing JSON. Unsigned or incorrectly signed requests return 401.
 
-By default, only workflow_run completed notifications are sent, covering success, failure, cancelled, timed_out, action_required, neutral, skipped, stale and startup_failure. For start/queue alerts too, set GITHUB_NOTIFY_ACTIONS="requested,in_progress,completed".
+### Seleção de workflows e roteamento
 
-Messages include status emoji, repository, workflow name, run/attempt number, branch, short SHA, actor, and an inline button linking to the GitHub run. A commit button is included when the SHA is available.
+**Configuração atual:** `GITHUB_NOTIFY_ACTIONS="requested,in_progress,completed"` no `wrangler.toml`. Essa variável filtra **ações do evento** `workflow_run`, não nomes de workflows.
+
+| Evento / conclusão | Notify! | Telegram |
+| --- | --- | --- |
+| `requested` | Inicia Live Activity | Não |
+| `in_progress` | Atualiza ou inicia Live Activity | Não |
+| `completed: success` | Finaliza atividade e envia push | Não |
+| `completed: failure` | Finaliza atividade e envia push | **Sim** |
+| `completed: timed_out` | Finaliza atividade e envia push | **Sim** |
+| `completed: startup_failure` | Finaliza atividade e envia push | **Sim** |
+| `completed: action_required` | Finaliza atividade e envia push | **Sim** |
+| `completed: cancelled` | Finaliza atividade e envia push | Não |
+| Outras conclusões de `completed` | Finaliza atividade e envia push | Não |
+
+- **Não existe allowlist ou denylist por nome de workflow.** Todos os workflows cujos eventos `workflow_run` chegam ao endpoint são processados se a ação estiver habilitada.
+- **Não existe filtro por branch, repositório ou arquivo YAML no Worker.** O escopo dos repositórios é determinado pelos webhooks instalados no GitHub.
+- Apenas o evento `workflow_run` é aceito. Eventos `workflow_job` e progresso individual dos steps não são processados por esse webhook; o progresso exibido é do workflow.
+- Para receber somente conclusões, configure `GITHUB_NOTIFY_ACTIONS="completed"`. Isso desativa as atualizações de início e andamento.
+- A autenticação HMAC é obrigatória, e o D1 deduplica o mesmo `X-GitHub-Delivery`.
+- O Telegram continua configurado com `GITHUB_WEBHOOK_CHAT_ID` (fallback para `NOTIFICATION_CHAT_ID` e `TELEGRAM_CHAT_ID`), mas só recebe alertas das conclusões de falha listadas acima.
+
+### Configuração Notify!
+
+Configure as credenciais do dispositivo **como secrets do Cloudflare Worker**, não em arquivos versionados:
+
+```sh
+npx wrangler secret put NOTIFY_DEVICE_ID
+npx wrangler secret put NOTIFY_TOKEN
+```
+
+O serviço usa `src/services/notify.ts` diretamente, sem uma chamada HTTP interna ao próprio Worker. Se as credenciais estiverem ausentes, o canal Notify! é ignorado; se o Notify! falhar, o webhook registra a falha e ainda tenta enviar o alerta Telegram quando a conclusão exigir.
+
+- **Ícone personalizado:** `https://raw.githubusercontent.com/rodkisten/xtelegram-cf/refs/heads/main/public/IMG_9928.png`
+- **Prioridade solicitada:** `timeSensitive=true` nos parâmetros de envio, e `timeSensitive: true` no corpo dos pushes `notify-json`. A apresentação final depende do suporte da API Notify! e das permissões do iOS.
+- **Live Activity:** identificador armazenado na tabela D1 `github_notify_activities`, separado por repositório, execução e tentativa.
+- **Migração:** `migrations/0010_github_notify_activities.sql`, aplicada automaticamente por `npm run deploy`.
+- **Links:** a notificação aponta para a execução do GitHub Actions.
+- **Sem garantias de entrega:** falhas de rede ou indisponibilidade do Notify! podem impedir notificações; não interpretar uma resposta do webhook como confirmação visual no iPhone.
+
+Mensagens de falha no Telegram incluem nome do repositório e workflow, execução/tentativa, branch, commit e link para o run.
 
 Repeated GitHub deliveries of the same X-GitHub-Delivery ID are deduplicated in D1. Failed attempts can retry; abandoned claims become retryable after five minutes. After ambiguous Telegram network failures, a redelivery may still produce a duplicate.
 
