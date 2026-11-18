@@ -1,4 +1,5 @@
 import { selectGithubWorkflow } from "../lib/github-notify-config";
+import { selectChangedPaths } from "../lib/github-notify-changes";
 import { json } from "../http/response";
 import { formatGithubWorkflowRun, verifyGithubSignature } from "../lib/github-notifications";
 import { parseTelegramDestination, resolveDefaultTelegramChatId } from "../services/channels";
@@ -81,6 +82,11 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
   const selection = selectGithubWorkflow(payload);
   if (!selection.allowed) {
     return json({ ok: true, ignored: true, reason: selection.reason }, 202);
+  }
+
+  const changedSelection = await selectChangedPaths(payload, env);
+  if (!changedSelection.allowed) {
+    return json({ ok: true, ignored: true, reason: changedSelection.reason }, 202);
   }
 
   const message = formatGithubWorkflowRun(payload);
