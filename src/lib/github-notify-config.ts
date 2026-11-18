@@ -1,5 +1,6 @@
 import configYaml from "../../config/github-notify.yaml";
 import YAML from "yaml";
+import picomatch from "picomatch";
 
 type Rules = { workflows: string[]; changed_paths: string[]; on_unknown_changes: string };
 type Config = { defaults: Rules; repositories: Record<string, Rules> };
@@ -37,27 +38,13 @@ export function readConfig(source: string): Config {
 
 const config = readConfig(configYaml);
 
-function matchesPath(path: string, pattern: string): boolean {
-  if (!pattern || pattern.length > 256 || !/^[\w./*?+-]+$/.test(pattern)) return false;
-  let regex = "^";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*" && pattern[i + 1] === "*") {
-      i++;
-      if (pattern[i + 1] === "/") { regex += "(?:.*/)?"; i++; }
-      else regex += ".*";
-    } else if (c === "*") regex += "[^/]*";
-    else if (c === "?") regex += "[^/]";
-    else regex += (c === "." || c === "+" ? "\\" + c : c);
-  }
-  return new RegExp(regex + "$").test(path);
-}
-
+/** picomatch provides globstar, braces, extglobs and standard path glob semantics. */
 export function matchesPatterns(path: string, patterns: string[]): boolean {
-  const positive = patterns.filter(p => !p.startsWith("!"));
-  const negative = patterns.filter(p => p.startsWith("!")).map(p => p.slice(1));
-  return (positive.length === 0 || positive.some(p => matchesPath(path, p))) &&
-    !negative.some(p => matchesPath(path, p));
+  const positive = patterns.filter(pattern => !pattern.startsWith("!"));
+  const negative = patterns.filter(pattern => pattern.startsWith("!")).map(pattern => pattern.slice(1));
+  const match = (pattern: string): boolean =>
+    picomatch.isMatch(path, pattern, { dot: true, nocase: false });
+  return (positive.length === 0 || positive.some(match)) && !negative.some(match);
 }
 
 export function selectGithubWorkflow(payload: unknown): { allowed: boolean; reason?: string } {
