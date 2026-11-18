@@ -18,6 +18,7 @@ function webhookPayload(action = "completed", conclusion = "success") {
     workflow_run: {
       id: 123456,
       name: "Deploy <production>",
+      path: ".github/workflows/deploy.yml",
       run_number: 19,
       run_attempt: 2,
       display_title: "Fix <em>escaping</em>",
