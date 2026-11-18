@@ -32,7 +32,7 @@ export function workflowPathAllowed(path: string, config?: string): boolean {
         if (pattern[i + 1] === "/") { source += "?"; i++; }
       } else if (ch === "*") source += "[^/]*";
       else if (ch === "?") source += "[^/]";
-      else source += ch.replace(/[-/\\^$+?.()|[\]{}]/g, "\\$&");
+      else source += (ch === "." || ch === "+" ? "\\" + ch : ch);
     }
     return new RegExp(source + "$").test(path);
   };
