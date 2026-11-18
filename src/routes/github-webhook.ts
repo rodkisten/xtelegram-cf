@@ -124,6 +124,7 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
         completed: action === "completed" ? 1 : 0,
         total: 1,
       };
+      try {
       const result = await sendWorkflowNotify(notifyInput, env);
       notifyStatus = result.disabled ? "disabled" : "sent";
       if (result.activityId) {
@@ -134,6 +135,10 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       }
       if (action === "completed") {
         await env.RELAY_DB.prepare("DELETE FROM github_notify_activities WHERE run_key=?1").bind(key).run();
+      }
+      } catch (notifyError) {
+        notifyStatus = "failed";
+        console.error("[github-webhook] Notify delivery failed", notifyError instanceof Error ? notifyError.message : String(notifyError));
       }
     }
 
