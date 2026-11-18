@@ -122,41 +122,63 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     let notifyStatus = "skipped";
 
     if (env.NOTIFY_DEVICE_ID && env.NOTIFY_TOKEN) {
+      const owner = deliveryId;
+      let acquired = false;
       try {
-        const activity = await env.RELAY_DB.prepare(
-      "SELECT activity_id FROM github_notify_activities WHERE run_key=?1"
-    ).bind(key).first<{ activity_id: string }>();
-      const notifyInput = {
-        action: action === "completed" ? "end" as const : activity?.activity_id ? "step" as const : "start" as const,
-        workflow: String(run.name || "GitHub Actions"),
-        job: "Workflow",
-        step: action === "in_progress" ? "Executando" : "Aguardando",
-        outcome: action === "completed" ? (failed ? "failure" : cancelled ? "cancelled" : "success") : "running",
-        activityId: activity?.activity_id,
-        repository: repo,
-        runId,
-        completed: action === "completed" ? 1 : 0,
-        total: 1,
-      };
-      try {
-      const result = await sendWorkflowNotify(notifyInput, env);
-      notifyStatus = result.disabled ? "disabled" : "sent";
-      if (result.activityId) {
-        await env.RELAY_DB.prepare(
-          "INSERT INTO github_notify_activities(run_key, activity_id, updated_at) VALUES(?1,?2,unixepoch()) " +
-          "ON CONFLICT(run_key) DO UPDATE SET activity_id=excluded.activity_id,updated_at=unixepoch()"
-        ).bind(key, result.activityId).run();
-      }
-      if (action === "completed") {
-        await env.RELAY_DB.prepare("DELETE FROM github_notify_activities WHERE run_key=?1").bind(key).run();
-      }
-      } catch (notifyError) {
-        notifyStatus = "failed";
-        console.error("[github-webhook] Notify delivery failed", notifyError instanceof Error ? notifyError.message : String(notifyError));
-      }
+        // One D1 atomic upsert owns the attempt; completed rows are immutable.
+        const lease = await env.RELAY_DB.prepare(
+          "INSERT INTO github_notify_run_states(run_key,state,lease_owner,lease_until) " +
+          "VALUES(?1,'processing',?2,unixepoch()+45) " +
+          "ON CONFLICT(run_key) DO UPDATE SET state='processing',lease_owner=excluded.lease_owner," +
+          "lease_until=excluded.lease_until,updated_at=unixepoch() " +
+          "WHERE state NOT IN ('completed') AND " +
+          "(state IN ('active','failed') OR (state='processing' AND lease_until < unixepoch()))"
+        ).bind(key, owner).run();
+        acquired = (lease.meta.changes ?? 0) > 0;
+        if (!acquired) {
+          const current = await env.RELAY_DB.prepare(
+            "SELECT state FROM github_notify_run_states WHERE run_key=?1"
+          ).bind(key).first<{ state: string }>();
+          notifyStatus = current?.state === "completed" ? "terminal" : "busy";
+        } else {
+          const current = await env.RELAY_DB.prepare(
+            "SELECT activity_id FROM github_notify_run_states WHERE run_key=?1 AND lease_owner=?2"
+          ).bind(key, owner).first<{ activity_id: string | null }>();
+          const activityId = current?.activity_id || undefined;
+          const notifyInput = {
+            action: action === "completed" ? "end" as const : activityId ? "step" as const : "start" as const,
+            workflow: String(run.name || "GitHub Actions"),
+            job: "Workflow",
+            step: action === "in_progress" ? "Executando" : "Aguardando",
+            outcome: action === "completed" ? (failed ? "failure" : cancelled ? "cancelled" : "success") : "running",
+            activityId,
+            repository: repo,
+            runId,
+            completed: action === "completed" ? 1 : 0,
+            total: 1,
+          };
+          try {
+            const result = await sendWorkflowNotify(notifyInput, env);
+            notifyStatus = result.disabled ? "disabled" : "sent";
+            const nextState = action === "completed" ? "completed" : "active";
+            await env.RELAY_DB.prepare(
+              "UPDATE github_notify_run_states SET state=?3,activity_id=COALESCE(?4,activity_id)," +
+              "lease_owner=NULL,lease_until=0,updated_at=unixepoch() WHERE run_key=?1 AND lease_owner=?2"
+            ).bind(key, owner, nextState, result.activityId || null).run();
+          } catch (notifyError) {
+            notifyStatus = "failed";
+            console.error("[github-webhook] Notify delivery failed",
+              notifyError instanceof Error ? notifyError.message : String(notifyError));
+            await env.RELAY_DB.prepare(
+              "UPDATE github_notify_run_states SET state='failed',lease_owner=NULL,lease_until=0," +
+              "updated_at=unixepoch() WHERE run_key=?1 AND lease_owner=?2"
+            ).bind(key, owner).run();
+          }
+        }
       } catch (notifyStorageError) {
         notifyStatus = "failed";
-        console.error("[github-webhook] Notify storage failed", notifyStorageError instanceof Error ? notifyStorageError.message : String(notifyStorageError));
+        console.error("[github-webhook] Notify state failed",
+          notifyStorageError instanceof Error ? notifyStorageError.message : String(notifyStorageError));
       }
     }
 
@@ -182,7 +204,7 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       if (!result.ok) throw new Error(result.description || "Telegram rejected the failure alert");
       telegramStatus = "sent";
     }
-    if (notifyStatus === "failed") {
+    if (notifyStatus === "failed" || notifyStatus === "busy") {
       await setDeliveryState(env.RELAY_DB, deliveryId, "failed");
       return json({ ok: false, delivery_id: deliveryId, event, action, notify: notifyStatus, telegram: telegramStatus, retryable: true }, 503);
     }
