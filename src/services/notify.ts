@@ -72,7 +72,7 @@ async function send(
   const { extra = {}, method = "POST" } = options;
   const pathId = encodeURIComponent(device);
   const query = new URLSearchParams({ token, ...extra }).toString();
-  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}`;
+  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}&groupType=github-actions&iconUrl=${encodeURIComponent(NOTIFY_ICON_URL)}&timeSensitive=true`;
 
   const response = await fetch(target, {
     method,
