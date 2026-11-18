@@ -29,7 +29,7 @@ export function readConfig(source: string): Config {
   const repos = object(root.repositories, "repositories");
   const repositories: Record<string, Rules> = Object.create(null);
   for (const [name, value] of Object.entries(repos)) {
-    if (!/^[\\w.-]+\\/[\\w.-]+$/.test(name)) throw new Error("Invalid repository: " + name);
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(name)) throw new Error("Invalid repository: " + name);
     repositories[name] = normalize(value, "repositories." + name);
   }
   return { defaults: normalize(root.defaults, "defaults"), repositories };
