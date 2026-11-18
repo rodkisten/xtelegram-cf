@@ -119,12 +119,13 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     const repo = String(repository.full_name || "");
     const runId = String(run.id || "");
     const key = "workflow:" + repo + ":" + runId + ":" + String(run.run_attempt || 1);
-    const activity = await env.RELAY_DB.prepare(
-      "SELECT activity_id FROM github_notify_activities WHERE run_key=?1"
-    ).bind(key).first<{ activity_id: string }>();
     let notifyStatus = "skipped";
 
     if (env.NOTIFY_DEVICE_ID && env.NOTIFY_TOKEN) {
+      try {
+        const activity = await env.RELAY_DB.prepare(
+      "SELECT activity_id FROM github_notify_activities WHERE run_key=?1"
+    ).bind(key).first<{ activity_id: string }>();
       const notifyInput = {
         action: action === "completed" ? "end" as const : activity?.activity_id ? "step" as const : "start" as const,
         workflow: String(run.name || "GitHub Actions"),
@@ -152,6 +153,10 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       } catch (notifyError) {
         notifyStatus = "failed";
         console.error("[github-webhook] Notify delivery failed", notifyError instanceof Error ? notifyError.message : String(notifyError));
+      }
+      } catch (notifyStorageError) {
+        notifyStatus = "failed";
+        console.error("[github-webhook] Notify storage failed", notifyStorageError instanceof Error ? notifyStorageError.message : String(notifyStorageError));
       }
     }
 
