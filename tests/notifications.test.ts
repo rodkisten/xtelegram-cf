@@ -5,6 +5,8 @@ import { formatGithubWorkflowRun, verifyGithubSignature } from "../src/lib/githu
 import { handleNotificationSend } from "../src/routes/notifications.ts";
 import { routeRequest } from "../src/app/router.ts";
 import { handleGithubWebhook } from "../src/routes/github-webhook.ts";
+import { matchesPatterns, selectGithubWorkflow, repositoryNotificationRules } from "../src/lib/github-notify-config.ts";
+import { selectChangedPaths } from "../src/lib/github-notify-changes.ts";
 import type { Env } from "../src/types.ts";
 import { createTestDb } from "./helpers/d1.ts";
 
@@ -248,5 +250,52 @@ describe("Notification Studio HTML page", () => {
       body: JSON.stringify({ body: "Hello", chat_id: "123" }),
     }), { NOTIFICATION_API_TOKEN: "private-token" } as Env);
     assert.equal(response.status, 401);
+  });
+});
+
+describe("Repository-scoped YAML notification routing", () => {
+  it("uses separate workflow and changed-path rules for each repository", () => {
+    assert.ok(repositoryNotificationRules("rodkisten/photointel").changed_paths.includes("infra/**"));
+    assert.ok(repositoryNotificationRules("rodkisten/userscripts-cf").changed_paths.includes("runtime/**"));
+    assert.equal(repositoryNotificationRules("rodkisten/shell").changed_paths.includes("infra/**"), false);
+    assert.equal(selectGithubWorkflow({
+      repository: { full_name: "rodkisten/photointel" },
+      workflow_run: { path: ".github/workflows/deploy.yml" },
+    }).allowed, true);
+    assert.equal(selectGithubWorkflow({
+      repository: { full_name: "rodkisten/photointel" },
+      workflow_run: { path: ".github/workflows/repair-lockfile.yml" },
+    }).allowed, false);
+  });
+
+  it("handles positive, negative, recursive and exact file globs", () => {
+    assert.equal(matchesPatterns("src/deep/file.ts", ["src/**"]), true);
+    assert.equal(matchesPatterns("src/deep/file.md", ["src/**", "!**/*.md"]), false);
+    assert.equal(matchesPatterns("src/a.ts", ["packages/**"]), false);
+    assert.equal(matchesPatterns("wrangler.toml", ["wrangler.toml"]), true);
+  });
+
+  it("filters PR files using GitHub API with repository-specific paths", async () => {
+    globalThis.fetch = async (url) => {
+      assert.match(String(url), /\/repos\/rodkisten\/userscripts-cf\/pulls\/12\/files/);
+      return Response.json([{ filename: "runtime/context.ts" }]);
+    };
+    const payload = {
+      repository: { full_name: "rodkisten/userscripts-cf" },
+      workflow_run: { pull_requests: [{ number: 12 }], event: "pull_request" },
+    };
+    assert.equal((await selectChangedPaths(payload, {} as Env)).allowed, true);
+    globalThis.fetch = async () => Response.json([{ filename: "README.md" }]);
+    const ignored = await selectChangedPaths(payload, {} as Env);
+    assert.equal(ignored.allowed, false);
+    assert.equal(ignored.reason, "changed_paths_filtered");
+  });
+
+  it("allows unknown changed paths per YAML policy", async () => {
+    const result = await selectChangedPaths({
+      repository: { full_name: "rodkisten/photointel" },
+      workflow_run: { event: "workflow_dispatch", pull_requests: [] },
+    }, {} as Env);
+    assert.equal(result.allowed, true);
   });
 });
