@@ -230,6 +230,61 @@ describe("GitHub workflow webhook", () => {
     assert.equal(attempts, 2);
   });
 
+  it("does not reopen a completed run when in_progress arrives late", async () => {
+    const db = fakeDb();
+    const requests: string[] = [];
+    globalThis.fetch = async (input) => {
+      requests.push(String(input));
+      return Response.json({ success: true, activityId: "LA12345678" });
+    };
+    const env = {
+      GITHUB_WEBHOOK_SECRET: "secret",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
+      RELAY_DB: db as unknown as D1Database,
+    } as Env;
+    const completed = await handleGithubWebhook(
+      signedRequest(webhookPayload("completed", "success"), "secret"), env
+    );
+    assert.equal(completed.status, 200);
+    const late = await handleGithubWebhook(
+      signedRequest(webhookPayload("in_progress", ""), "secret",
+        "abcdef12-3456-4789-8765-abcdef123459"), env
+    );
+    assert.equal(late.status, 200);
+    assert.equal((await late.json() as { notify: string }).notify, "terminal");
+    assert.equal(requests.length, 1);
+  });
+
+  it("serializes overlapping requested and in_progress events by run attempt", async () => {
+    const db = fakeDb();
+    let starts = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    globalThis.fetch = async () => {
+      starts++;
+      await gate;
+      return Response.json({ success: true, activityId: "LA12345678" });
+    };
+    const env = {
+      GITHUB_WEBHOOK_SECRET: "secret",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
+      RELAY_DB: db as unknown as D1Database,
+    } as Env;
+    const first = handleGithubWebhook(signedRequest(webhookPayload("requested", ""), "secret"), env);
+    // Let the first request acquire its D1 lease and reach Notify.
+    await new Promise(resolve => setImmediate(resolve));
+    const second = await handleGithubWebhook(
+      signedRequest(webhookPayload("in_progress", ""), "secret",
+        "abcdef12-3456-4789-8765-abcdef123458"), env
+    );
+    assert.equal(second.status, 503);
+    assert.equal(starts, 1);
+    release();
+    assert.equal((await first).status, 200);
+  });
+
   it("filters actions when configured", async () => {
     const db = fakeDb();
     const response = await handleGithubWebhook(
