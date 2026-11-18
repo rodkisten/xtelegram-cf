@@ -140,7 +140,7 @@ function shortWorkflow(name: string): string {
     names[normalized] ??
     (cleanLabel(name.replace(/^[^\p{L}\p{N}_]+/u, "").trim(), 42) || "Workflow");
 
-  return `PhotoIntel · ${result}`;
+  return result;
 }
 
 function shortStep(name: string): string {
@@ -362,7 +362,7 @@ export async function handleAction(
       await send("notify-json", device, token, {
         title: workflow,
         text: `${message} · ${fraction}`,
-        groupType: `photointel-${runId || "actions"}`,
+        groupType: `github-${runId || "actions"}`,
       });
     }
 
@@ -388,7 +388,7 @@ export async function handleAction(
     const success = (input.outcome ?? "").toLowerCase().trim() === "success";
     const message = success ? "✅ Concluído" : "❌ Falhou";
 
-    if (success && input.activityId && ACTIVITY_PATTERN.test(input.activityId)) {
+    if (success) {
       try {
         await send("notify-json", device, token, {
           title: workflow,
