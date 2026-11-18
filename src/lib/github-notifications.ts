@@ -45,8 +45,9 @@ function githubUrl(value: unknown): string | null {
 }
 
 function statusInfo(action: string, conclusion: string): { icon: string; title: string } {
-  if (action === "requested") return { icon: "📥", title: "Workflow solicitado" };
-  if (action === "in_progress") return { icon: "🔄", title: "Workflow em execução" };
+  if (action === "requested") return { icon: "📥", title: "CI: iniciou" };
+  if (action === "in_progress") return { icon: "🔄", title: "CI: rodando" };
+ 
   const statuses: Record<string, { icon: string; title: string }> = {
     success: { icon: "✅", title: "CI: sucesso" },
     failure: { icon: "❌", title: "CI: falhou" },
@@ -58,7 +59,7 @@ function statusInfo(action: string, conclusion: string): { icon: string; title: 
     stale: { icon: "⌛", title: "CI: obsoleto" },
     startup_failure: { icon: "🚨", title: "CI: não iniciou" },
   };
-  return statuses[conclusion] ?? { icon: "ℹ️", title: "Workflow concluído" };
+  return statuses[conclusion] ?? { icon: "ℹ️", title: "CI: concluído" };
 }
 
 export function formatGithubWorkflowRun(payload: unknown): NotificationMessage | null {
