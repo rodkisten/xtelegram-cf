@@ -182,6 +182,10 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       if (!result.ok) throw new Error(result.description || "Telegram rejected the failure alert");
       telegramStatus = "sent";
     }
+    if (notifyStatus === "failed") {
+      await setDeliveryState(env.RELAY_DB, deliveryId, "failed");
+      return json({ ok: false, delivery_id: deliveryId, event, action, notify: notifyStatus, telegram: telegramStatus, retryable: true }, 503);
+    }
     await setDeliveryState(env.RELAY_DB, deliveryId, "sent");
     return json({ ok: true, delivery_id: deliveryId, event, action, notify: notifyStatus, telegram: telegramStatus });
 
