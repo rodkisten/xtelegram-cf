@@ -50,6 +50,8 @@ export interface Env {
   GITHUB_WEBHOOK_CHAT_ID?: string;
   /** Comma-separated workflow_run actions; default completed. */
   GITHUB_NOTIFY_ACTIONS?: string;
+  /** Optional newline/comma-separated workflow YAML path globs; ! excludes. */
+  GITHUB_NOTIFY_WORKFLOWS?: string;
   TELEGRAM_CHAT_ID?: string;
   /** @deprecated Use TELEGRAM_CHAT_ID. Kept for backwards compatibility. */
   TELEGRAM_CHANNEL_ID?: string;
