@@ -1,6 +1,6 @@
 export interface NotifyEnv {
-  NOTIFY_DEVICE_ID: string;
-  NOTIFY_TOKEN: string;
+  NOTIFY_DEVICE_ID?: string;
+  NOTIFY_TOKEN?: string;
   GITHUB_API_TOKEN?: string;
   /** Segredo opcional para autenticar as chamadas vindas do GitHub Actions */
   WORKER_AUTH_TOKEN?: string;
