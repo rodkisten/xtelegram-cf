@@ -423,6 +423,13 @@ export async function handleAction(
   return {};
 }
 
+/** Shared entry point for authenticated GitHub webhooks. */
+export async function sendWorkflowNotify(input: NotifyPayloadInput, env: NotifyEnv): Promise<{ activityId?: string; disabled?: boolean }> {
+  const credentials = getCredentials(env);
+  if (!credentials) return { disabled: true };
+  return handleAction(input, env, ...credentials);
+}
+
 export default {
   async fetch(request: Request, env: NotifyEnv): Promise<Response> {
     if (request.method !== "POST") {
