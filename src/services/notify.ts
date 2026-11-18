@@ -220,14 +220,18 @@ async function githubStepLink(
 
     let job: GitHubJob;
     if (jobs.length === 1) {
-      job = jobs[0];
+      const onlyJob = jobs[0];
+      if (!onlyJob) return fallback;
+      job = onlyJob;
     } else {
       const loweredKey = jobKey.toLowerCase();
       const matching = jobs.filter((item) =>
         String(item.name ?? "").toLowerCase().includes(loweredKey)
       );
       if (matching.length !== 1) return fallback;
-      job = matching[0];
+      const matchedJob = matching[0];
+      if (!matchedJob) return fallback;
+      job = matchedJob;
     }
 
     const jobId = job.id;
@@ -243,7 +247,9 @@ async function githubStepLink(
     );
 
     if (candidates.length === 1) {
-      return `${url}#step:${candidates[0].number}:1`;
+      const onlyStep = candidates[0];
+      if (!onlyStep) return url;
+      return `${url}#step:${onlyStep.number}:1`;
     }
     if (STEP_INDEX_RE.test(stepIndex)) {
       return `${url}#step:${Number.parseInt(stepIndex, 10)}:1`;
