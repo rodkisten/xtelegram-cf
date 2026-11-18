@@ -206,6 +206,30 @@ describe("GitHub workflow webhook", () => {
     assert.equal(requests.some(({ url }) => url.includes("api.telegram.org")), false);
   });
 
+  it("keeps a failed Notify delivery retryable without sending successful workflows to Telegram", async () => {
+    const db = fakeDb();
+    let attempts = 0;
+    globalThis.fetch = async (input) => {
+      if (String(input).includes("api.telegram.org")) throw new Error("Telegram must not receive success alerts");
+      attempts++;
+      if (attempts === 1) return Response.json({ success: false });
+      return Response.json({ success: true, activityId: "LA12345678" });
+    };
+    const env = {
+      GITHUB_WEBHOOK_SECRET: "secret",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
+      RELAY_DB: db as unknown as D1Database,
+    } as Env;
+    const request = () => signedRequest(webhookPayload("requested", ""), "secret");
+    const failed = await handleGithubWebhook(request(), env);
+    assert.equal(failed.status, 503);
+    assert.equal((await failed.json() as { retryable: boolean }).retryable, true);
+    const retry = await handleGithubWebhook(request(), env);
+    assert.equal(retry.status, 200);
+    assert.equal(attempts, 2);
+  });
+
   it("filters actions when configured", async () => {
     const db = fakeDb();
     const response = await handleGithubWebhook(
