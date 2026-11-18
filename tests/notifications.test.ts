@@ -5,6 +5,8 @@ import { formatGithubWorkflowRun, verifyGithubSignature } from "../src/lib/githu
 import { handleNotificationSend } from "../src/routes/notifications.ts";
 import { routeRequest } from "../src/app/router.ts";
 import { handleGithubWebhook } from "../src/routes/github-webhook.ts";
+import { matchesPatterns, selectGithubWorkflow, repositoryNotificationRules } from "../src/lib/github-notify-config.ts";
+import { selectChangedPaths } from "../src/lib/github-notify-changes.ts";
 import type { Env } from "../src/types.ts";
 import { createTestDb } from "./helpers/d1.ts";
 
@@ -18,6 +20,7 @@ function webhookPayload(action = "completed", conclusion = "success") {
     workflow_run: {
       id: 123456,
       name: "Deploy <production>",
+      path: ".github/workflows/deploy.yml",
       run_number: 19,
       run_attempt: 2,
       display_title: "Fix <em>escaping</em>",
@@ -134,15 +137,13 @@ describe("GitHub workflow webhook", () => {
     assert.equal(sends, 0);
   });
 
-  it("sends once and deduplicates repeated GitHub delivery IDs", async () => {
+  it("sends failed workflows to Telegram once and deduplicates deliveries", async () => {
     const db = fakeDb();
     let sends = 0;
     globalThis.fetch = async (_input, init) => {
       sends++;
       const data = JSON.parse(String(init?.body));
-      assert.match(data.text, /✅/);
-      assert.equal(data.chat_id, "-1001234");
-      assert.equal(data.message_thread_id, 55);
+      assert.match(data.text, /❌/);
       return Response.json({ ok: true, result: { message_id: 99 } });
     };
     const env = {
@@ -151,41 +152,149 @@ describe("GitHub workflow webhook", () => {
       GITHUB_WEBHOOK_CHAT_ID: "-1001234:55",
       RELAY_DB: db as unknown as D1Database,
     } as Env;
-    const response1 = await handleGithubWebhook(signedRequest(webhookPayload(), "secret"), env);
-    const response2 = await handleGithubWebhook(signedRequest(webhookPayload(), "secret"), env);
-    assert.equal(response1.status, 200);
-    assert.equal(response2.status, 200);
-    assert.equal((await response2.json() as { duplicate: boolean }).duplicate, true);
+    const request = () => signedRequest(webhookPayload("completed", "failure"), "secret");
+    assert.equal((await handleGithubWebhook(request(), env)).status, 200);
+    const repeated = await handleGithubWebhook(request(), env);
+    assert.equal((await repeated.json() as { duplicate: boolean }).duplicate, true);
     assert.equal(sends, 1);
-    assert.equal(db.sqlite.prepare(
-      "SELECT state FROM github_notification_deliveries WHERE delivery_id=?"
-    ).get("abcdef12-3456-4789-8765-abcdef123456")?.state, "sent");
   });
 
-  it("accepts requested/in_progress by default and filters them when configured", async () => {
+  it("never sends successful, requested, or in-progress workflows to Telegram", async () => {
     const db = fakeDb();
+    let sends = 0;
+    globalThis.fetch = async () => { sends++; throw new Error("unexpected send"); };
+    const env = { GITHUB_WEBHOOK_SECRET: "secret", RELAY_DB: db as unknown as D1Database } as Env;
+    for (const [index, action] of ["requested", "in_progress", "completed"].entries()) {
+      const request = signedRequest(webhookPayload(action, action === "completed" ? "success" : ""),
+        "secret", `abcdef1${index}-3456-4789-8765-abcdef123456`);
+      const response = await handleGithubWebhook(request, env);
+      assert.equal(response.status, 200);
+    }
+    assert.equal(sends, 0);
+  });
+
+  it("uses the custom Notify icon and time-sensitive priority for successful workflows", async () => {
+    const db = fakeDb();
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = async (input, init) => {
+      const url = String(input);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push({ url, body });
+      if (url.includes("/live-activity/")) {
+        return Response.json({ success: true, activityId: "LA12345678" });
+      }
+      return Response.json({ success: true });
+    };
     const env = {
       GITHUB_WEBHOOK_SECRET: "secret",
-      TELEGRAM_BOT_TOKEN: "bot",
-      GITHUB_WEBHOOK_CHAT_ID: "42",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
       RELAY_DB: db as unknown as D1Database,
     } as Env;
-    let sends = 0;
-    globalThis.fetch = async () => {
-      sends++;
-      return Response.json({ ok: true, result: { message_id: 2 } });
-    };
-    const accepted = await handleGithubWebhook(signedRequest(webhookPayload("requested", ""), "secret"), env);
-    assert.equal(accepted.status, 200);
-    assert.equal(sends, 1);
-
-    const filtered = await handleGithubWebhook(signedRequest(webhookPayload("in_progress", ""), "secret",
-      "bcdefa12-3456-4789-8765-abcdef123456"), {
-      ...env, GITHUB_NOTIFY_ACTIONS: "completed",
-    });
-    assert.equal(filtered.status, 202);
-    assert.equal(sends, 1);
+    const started = await handleGithubWebhook(
+      signedRequest(webhookPayload("requested", ""), "secret"), env
+    );
+    assert.equal(started.status, 200);
+    const completed = await handleGithubWebhook(
+      signedRequest(webhookPayload("completed", "success"), "secret",
+        "abcdef12-3456-4789-8765-abcdef123457"), env
+    );
+    assert.equal(completed.status, 200);
+    assert.ok(requests.length >= 2);
+    assert.ok(requests.every(({ url }) => url.includes("timeSensitive=true")));
+    assert.ok(requests.every(({ url }) => url.includes("IMG_9928.png")));
+    assert.equal(requests.some(({ url }) => url.includes("api.telegram.org")), false);
   });
+
+  it("keeps a failed Notify delivery retryable without sending successful workflows to Telegram", async () => {
+    const db = fakeDb();
+    let attempts = 0;
+    globalThis.fetch = async (input) => {
+      if (String(input).includes("api.telegram.org")) throw new Error("Telegram must not receive success alerts");
+      attempts++;
+      if (attempts === 1) return Response.json({ success: false });
+      return Response.json({ success: true, activityId: "LA12345678" });
+    };
+    const env = {
+      GITHUB_WEBHOOK_SECRET: "secret",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
+      RELAY_DB: db as unknown as D1Database,
+    } as Env;
+    const request = () => signedRequest(webhookPayload("requested", ""), "secret");
+    const failed = await handleGithubWebhook(request(), env);
+    assert.equal(failed.status, 503);
+    assert.equal((await failed.json() as { retryable: boolean }).retryable, true);
+    const retry = await handleGithubWebhook(request(), env);
+    assert.equal(retry.status, 200);
+    assert.equal(attempts, 2);
+  });
+
+  it("does not reopen a completed run when in_progress arrives late", async () => {
+    const db = fakeDb();
+    const requests: string[] = [];
+    globalThis.fetch = async (input) => {
+      requests.push(String(input));
+      return Response.json({ success: true, activityId: "LA12345678" });
+    };
+    const env = {
+      GITHUB_WEBHOOK_SECRET: "secret",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
+      RELAY_DB: db as unknown as D1Database,
+    } as Env;
+    const completed = await handleGithubWebhook(
+      signedRequest(webhookPayload("completed", "success"), "secret"), env
+    );
+    assert.equal(completed.status, 200);
+    const late = await handleGithubWebhook(
+      signedRequest(webhookPayload("in_progress", ""), "secret",
+        "abcdef12-3456-4789-8765-abcdef123459"), env
+    );
+    assert.equal(late.status, 200);
+    assert.equal((await late.json() as { notify: string }).notify, "terminal");
+    assert.equal(requests.length, 1);
+  });
+
+  it("serializes overlapping requested and in_progress events by run attempt", async () => {
+    const db = fakeDb();
+    let starts = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    globalThis.fetch = async () => {
+      starts++;
+      await gate;
+      return Response.json({ success: true, activityId: "LA12345678" });
+    };
+    const env = {
+      GITHUB_WEBHOOK_SECRET: "secret",
+      NOTIFY_DEVICE_ID: "device123",
+      NOTIFY_TOKEN: "token12345678",
+      RELAY_DB: db as unknown as D1Database,
+    } as Env;
+    const first = handleGithubWebhook(signedRequest(webhookPayload("requested", ""), "secret"), env);
+    // Let the first request acquire its D1 lease and reach Notify.
+    await new Promise(resolve => setImmediate(resolve));
+    const second = await handleGithubWebhook(
+      signedRequest(webhookPayload("in_progress", ""), "secret",
+        "abcdef12-3456-4789-8765-abcdef123458"), env
+    );
+    assert.equal(second.status, 503);
+    assert.equal(starts, 1);
+    release();
+    assert.equal((await first).status, 200);
+  });
+
+  it("filters actions when configured", async () => {
+    const db = fakeDb();
+    const response = await handleGithubWebhook(
+      signedRequest(webhookPayload("in_progress", ""), "secret"),
+      { GITHUB_WEBHOOK_SECRET: "secret", GITHUB_NOTIFY_ACTIONS: "completed",
+        RELAY_DB: db as unknown as D1Database } as Env,
+    );
+    assert.equal(response.status, 202);
+  });
+
 });
 
 describe("Notification Studio HTML page", () => {
@@ -220,5 +329,52 @@ describe("Notification Studio HTML page", () => {
       body: JSON.stringify({ body: "Hello", chat_id: "123" }),
     }), { NOTIFICATION_API_TOKEN: "private-token" } as Env);
     assert.equal(response.status, 401);
+  });
+});
+
+describe("Repository-scoped YAML notification routing", () => {
+  it("uses separate workflow and changed-path rules for each repository", () => {
+    assert.ok(repositoryNotificationRules("rodkisten/photointel").changed_paths.includes("infra/**"));
+    assert.ok(repositoryNotificationRules("rodkisten/userscripts-cf").changed_paths.includes("runtime/**"));
+    assert.equal(repositoryNotificationRules("rodkisten/shell").changed_paths.includes("infra/**"), false);
+    assert.equal(selectGithubWorkflow({
+      repository: { full_name: "rodkisten/photointel" },
+      workflow_run: { path: ".github/workflows/deploy.yml" },
+    }).allowed, true);
+    assert.equal(selectGithubWorkflow({
+      repository: { full_name: "rodkisten/photointel" },
+      workflow_run: { path: ".github/workflows/repair-lockfile.yml" },
+    }).allowed, false);
+  });
+
+  it("handles positive, negative, recursive and exact file globs", () => {
+    assert.equal(matchesPatterns("src/deep/file.ts", ["src/**"]), true);
+    assert.equal(matchesPatterns("src/deep/file.md", ["src/**", "!**/*.md"]), false);
+    assert.equal(matchesPatterns("src/a.ts", ["packages/**"]), false);
+    assert.equal(matchesPatterns("wrangler.toml", ["wrangler.toml"]), true);
+  });
+
+  it("filters PR files using GitHub API with repository-specific paths", async () => {
+    globalThis.fetch = async (url) => {
+      assert.match(String(url), /\/repos\/rodkisten\/userscripts-cf\/pulls\/12\/files/);
+      return Response.json([{ filename: "runtime/context.ts" }]);
+    };
+    const payload = {
+      repository: { full_name: "rodkisten/userscripts-cf" },
+      workflow_run: { pull_requests: [{ number: 12 }], event: "pull_request" },
+    };
+    assert.equal((await selectChangedPaths(payload, {} as Env)).allowed, true);
+    globalThis.fetch = async () => Response.json([{ filename: "README.md" }]);
+    const ignored = await selectChangedPaths(payload, {} as Env);
+    assert.equal(ignored.allowed, false);
+    assert.equal(ignored.reason, "changed_paths_filtered");
+  });
+
+  it("allows unknown changed paths per YAML policy", async () => {
+    const result = await selectChangedPaths({
+      repository: { full_name: "rodkisten/photointel" },
+      workflow_run: { event: "workflow_dispatch", pull_requests: [] },
+    }, {} as Env);
+    assert.equal(result.allowed, true);
   });
 });

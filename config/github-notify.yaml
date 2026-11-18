@@ -1,0 +1,90 @@
+# GitHub Actions notification routing, evaluated independently for each repository.
+# Paths are repository-relative; * matches one directory level, ** matches any depth.
+# Exclusions (!) take precedence. An empty include list means all paths.
+# This file is bundled with the Worker, so changes require deployment.
+version: 1
+defaults:
+  workflows:
+    - ".github/workflows/*.yml"
+    - ".github/workflows/*.yaml"
+  changed_paths: []
+  on_unknown_changes: allow
+repositories:
+  rodkisten/photointel:
+    workflows:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+      - "!.github/workflows/repair-lockfile.yml"
+    changed_paths:
+      - "src/**"
+      - "apps/**"
+      - "packages/**"
+      - "infra/**"
+      - ".github/workflows/**"
+      - "!**/*.md"
+    on_unknown_changes: allow
+  rodkisten/userscripts-cf:
+    workflows:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+      - "!.github/workflows/repair-lockfile.yml"
+    changed_paths:
+      - "src/**"
+      - "runtime/**"
+      - "packages/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+      - "!**/*.md"
+    on_unknown_changes: allow
+  rodkisten/xtelegram-cf:
+    workflows:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+    changed_paths:
+      - "src/**"
+      - "tests/**"
+      - "migrations/**"
+      - "wrangler.toml"
+      - "package.json"
+      - ".github/workflows/**"
+    on_unknown_changes: allow
+  rodkisten/shell:
+    workflows:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+    changed_paths:
+      - "src/**"
+      - "packages/**"
+      - "scripts/**"
+      - ".github/workflows/**"
+    on_unknown_changes: allow
+  rodkisten/roteador:
+    workflows:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+    changed_paths:
+      - "src/**"
+      - "tests/**"
+      - "packages/**"
+      - ".github/workflows/**"
+    on_unknown_changes: allow
+  rodkisten/codespaces:
+    workflows:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+    changed_paths:
+      - ".devcontainer/**"
+      - "scripts/**"
+      - "zsh/**"
+      - ".github/workflows/**"
+    on_unknown_changes: allow
+  rodkisten/ejc:
+    workflows:
+      - ".github/workflows/*.yml"
+      - ".github/workflows/*.yaml"
+    changed_paths:
+      - "src/**"
+      - "app/**"
+      - "public/**"
+      - ".github/workflows/**"
+    on_unknown_changes: allow

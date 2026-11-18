@@ -1,4 +1,7 @@
 export interface Env {
+  NOTIFY_DEVICE_ID?: string;
+  NOTIFY_TOKEN?: string;
+  GITHUB_API_TOKEN?: string;
   /** All publisher switches are OFF unless explicitly enabled. */
   X_PUBLISH_ENABLED?: string;
   X_PUBLISH_AUTO_ENABLED?: string;
@@ -47,6 +50,7 @@ export interface Env {
   GITHUB_WEBHOOK_CHAT_ID?: string;
   /** Comma-separated workflow_run actions; default completed. */
   GITHUB_NOTIFY_ACTIONS?: string;
+  /** Optional newline/comma-separated workflow YAML path globs; ! excludes. */
   TELEGRAM_CHAT_ID?: string;
   /** @deprecated Use TELEGRAM_CHAT_ID. Kept for backwards compatibility. */
   TELEGRAM_CHANNEL_ID?: string;

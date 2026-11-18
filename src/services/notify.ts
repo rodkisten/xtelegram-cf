@@ -1,12 +1,13 @@
-export interface Env {
-  NOTIFY_DEVICE_ID: string;
-  NOTIFY_TOKEN: string;
+export interface NotifyEnv {
+  NOTIFY_DEVICE_ID?: string;
+  NOTIFY_TOKEN?: string;
   GITHUB_API_TOKEN?: string;
   /** Segredo opcional para autenticar as chamadas vindas do GitHub Actions */
   WORKER_AUTH_TOKEN?: string;
 }
 
 const BASE_URL = "https://push.getnotifyapp.com";
+const NOTIFY_ICON_URL = "https://raw.githubusercontent.com/rodkisten/xtelegram-cf/refs/heads/main/public/IMG_9928.png";
 const DEVICE_PATTERN = /^[A-Za-z0-9_-]{6,40}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 const ACTIVITY_PATTERN = /^LA[A-Za-z0-9]{6,20}$/;
@@ -51,7 +52,7 @@ interface GitHubJob {
   steps?: GitHubStep[];
 }
 
-function getCredentials(env: Env): [string, string] | null {
+function getCredentials(env: NotifyEnv): [string, string] | null {
   const device = (env.NOTIFY_DEVICE_ID ?? "").trim();
   const token = (env.NOTIFY_TOKEN ?? "").trim();
 
@@ -71,15 +72,15 @@ async function send(
   const { extra = {}, method = "POST" } = options;
   const pathId = encodeURIComponent(device);
   const query = new URLSearchParams({ token, ...extra }).toString();
-  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}&groupType=github-actions&iconUrl=https://photos.migos.club/icon-192.png`;
+  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}&groupType=github-actions&iconUrl=${encodeURIComponent(NOTIFY_ICON_URL)}&timeSensitive=true`;
 
   const response = await fetch(target, {
     method,
     headers: {
       "Content-Type": "application/json",
-      "User-Agent": "photointel-github-actions/1",
+      "User-Agent": "xtelegram-github-actions/1",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(endpoint === "notify-json" ? { iconUrl: NOTIFY_ICON_URL, timeSensitive: true, ...payload } : payload),
     signal: AbortSignal.timeout(7000),
   });
 
@@ -136,11 +137,9 @@ function shortWorkflow(name: string): string {
     "zip patch": "ZIP Patch",
   };
 
-  const result =
-    names[normalized] ??
-    (cleanLabel(name.replace(/^[^\p{L}\p{N}_]+/u, "").trim(), 42) || "Workflow");
+  const result = names[normalized] ?? (cleanLabel(name.replace(/^[^\p{L}\p{N}_]+/u, "").trim(), 42) || "Workflow");
 
-  return `PhotoIntel · ${result}`;
+  return result;
 }
 
 function shortStep(name: string): string {
@@ -189,7 +188,7 @@ function runContext(repository = "", runId = ""): [string, string, string] {
 }
 
 async function githubStepLink(
-  env: Env,
+  env: NotifyEnv,
   repository: string,
   runId: string,
   stepName: string,
@@ -221,14 +220,18 @@ async function githubStepLink(
 
     let job: GitHubJob;
     if (jobs.length === 1) {
-      job = jobs[0];
+      const onlyJob = jobs[0];
+      if (!onlyJob) return fallback;
+      job = onlyJob;
     } else {
       const loweredKey = jobKey.toLowerCase();
       const matching = jobs.filter((item) =>
         String(item.name ?? "").toLowerCase().includes(loweredKey)
       );
       if (matching.length !== 1) return fallback;
-      job = matching[0];
+      const matchedJob = matching[0];
+      if (!matchedJob) return fallback;
+      job = matchedJob;
     }
 
     const jobId = job.id;
@@ -244,7 +247,9 @@ async function githubStepLink(
     );
 
     if (candidates.length === 1) {
-      return `${url}#step:${candidates[0].number}:1`;
+      const onlyStep = candidates[0];
+      if (!onlyStep) return url;
+      return `${url}#step:${onlyStep.number}:1`;
     }
     if (STEP_INDEX_RE.test(stepIndex)) {
       return `${url}#step:${Number.parseInt(stepIndex, 10)}:1`;
@@ -293,9 +298,9 @@ function linkButton(url: string, label: string): LinkButton | null {
   return { title: label, url: url.slice(0, 512), open: true };
 }
 
-async function handleAction(
+export async function handleAction(
   input: NotifyPayloadInput,
-  env: Env,
+  env: NotifyEnv,
   device: string,
   token: string
 ): Promise<{ activityId?: string }> {
@@ -362,7 +367,7 @@ async function handleAction(
       await send("notify-json", device, token, {
         title: workflow,
         text: `${message} · ${fraction}`,
-        groupType: `photointel-${runId || "actions"}`,
+        groupType: `github-${runId || "actions"}`,
       });
     }
 
@@ -385,15 +390,16 @@ async function handleAction(
   }
 
   if (input.action === "end") {
-    const success = (input.outcome ?? "").toLowerCase().trim() === "success";
-    const message = success ? "✅ Concluído" : "❌ Falhou";
+    const outcome = (input.outcome ?? "").toLowerCase().trim();
+    const success = outcome === "success";
+    const message = success ? "✅ Concluído" : outcome === "cancelled" ? "⚠️ Cancelado" : "❌ Falhou";
 
-    if (success && input.activityId && ACTIVITY_PATTERN.test(input.activityId)) {
+    {
       try {
         await send("notify-json", device, token, {
           title: workflow,
           text: `${message} · ${total}/${total}`,
-          groupType: `photointel-${runId || "actions"}`,
+          groupType: `github-${runId || "actions"}`,
         });
       } catch {
         // Best-effort
@@ -403,7 +409,7 @@ async function handleAction(
     if (input.activityId && ACTIVITY_PATTERN.test(input.activityId)) {
       const payload: Record<string, unknown> = {
         title: workflow,
-        status: success ? "done" : "failed",
+        status: success ? "done" : outcome === "cancelled" ? "cancelled" : "failed",
         body: success ? `${message} · ${total}/${total}` : message,
         endsIn: null,
         keepFor: 60,
@@ -423,8 +429,15 @@ async function handleAction(
   return {};
 }
 
+/** Shared entry point for authenticated GitHub webhooks. */
+export async function sendWorkflowNotify(input: NotifyPayloadInput, env: NotifyEnv): Promise<{ activityId?: string; disabled?: boolean }> {
+  const credentials = getCredentials(env);
+  if (!credentials) return { disabled: true };
+  return handleAction(input, env, ...credentials);
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: NotifyEnv): Promise<Response> {
     if (request.method !== "POST") {
       return Response.json({ ok: false, error: "Method not allowed" }, { status: 405 });
     }

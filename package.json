@@ -19,7 +19,9 @@
     "db:migrate:check:remote": "wrangler d1 migrations list RELAY_DB --remote"
   },
   "dependencies": {
-    "mux.js": "7.1.0"
+    "mux.js": "7.1.0",
+    "yaml": "2.8.1",
+    "picomatch": "4.0.3"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
