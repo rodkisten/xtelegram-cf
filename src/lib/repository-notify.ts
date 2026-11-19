@@ -96,6 +96,7 @@ export function resolveRepositoryNotify(repository: RepositoryNotify, entry: Ove
 
 /** Optional authenticated Manage bridge via the Actions variable in PhotoIntel. */
 export async function loadManageNotifyOverrides(repository: string, token?: string): Promise<OverrideEntry> {
+  if (!REPOSITORY.test(repository)) throw new Error("Invalid repository");
   if (!token) return {};
   const response = await fetch(
     "https://api.github.com/repos/rodkisten/photointel/actions/variables/PHOTOINTEL_NOTIFY_OVERRIDES",
@@ -120,7 +121,7 @@ export async function loadManageNotifyOverrides(repository: string, token?: stri
     // Reuse the exact schema validation applied to the YAML file.
     parseRepositoryNotify(YAML.stringify({ version: 1, notifications: selected.overrides }));
   }
-  if (selected.choices !== undefined && (typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
+  if (selected.choices !== undefined && (!selected.choices || typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
     Object.entries(selected.choices).some(([key, choice]) => !/^(events|grouping|windowSeconds|updateMode|template|retentionMinutes\.(running|success|error))$/.test(key) || (choice !== "repository" && choice !== "manage"))))
     throw new Error("Invalid conflict choices");
   return selected;
