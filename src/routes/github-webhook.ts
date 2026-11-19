@@ -10,6 +10,35 @@ import { sendWorkflowNotify } from "../services/notify";
 const MAX_WEBHOOK_BYTES = 512 * 1024;
 const DELIVERY_ID_PATTERN = /^[a-f0-9-]{32,64}$/i;
 
+type GithubWebhookLog = {
+  stage: "filter" | "delivery" | "notify" | "telegram" | "storage";
+  status: "filtered" | "disabled" | "failed" | "sent" | "busy" | "terminal" | "skipped";
+  reason?: string;
+  repository?: string;
+  run_id?: string;
+  action?: string;
+  delivery_id?: string;
+};
+
+function logGithubWebhook(entry: GithubWebhookLog): void {
+  const line = JSON.stringify({ component: "github-webhook", ...entry });
+  if (entry.status === "failed") console.error("[github-webhook]", line);
+  else console.info("[github-webhook]", line);
+}
+
+function webhookIdentity(payload: unknown): Pick<GithubWebhookLog, "repository" | "run_id" | "action"> {
+  if (!payload || typeof payload !== "object") return {};
+  const root = payload as Record<string, unknown>;
+  const repo = root.repository;
+  const run = root.workflow_run;
+  return {
+    repository: repo && typeof repo === "object" ? String((repo as Record<string, unknown>).full_name || "") : "",
+    run_id: run && typeof run === "object" ? String((run as Record<string, unknown>).id || "") : "",
+    action: typeof root.action === "string" ? root.action : "",
+  };
+}
+
+
 function allowedActions(value?: string): Set<string> {
   const selected = value?.trim() || "requested,in_progress,completed";
   return new Set(selected.split(",").map((item) => item.trim()).filter(Boolean));
@@ -76,16 +105,19 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
   }
   const action = (payload as Record<string, unknown>).action;
   if (typeof action !== "string" || !allowedActions(env.GITHUB_NOTIFY_ACTIONS).has(action)) {
+    logGithubWebhook({ stage: "filter", status: "filtered", reason: "action_filtered", ...webhookIdentity(payload) });
     return json({ ok: true, ignored: true, reason: "action_filtered", action }, 202);
   }
 
   const selection = selectGithubWorkflow(payload);
   if (!selection.allowed) {
+    logGithubWebhook({ stage: "filter", status: "filtered", reason: selection.reason, ...webhookIdentity(payload) });
     return json({ ok: true, ignored: true, reason: selection.reason }, 202);
   }
 
   const changedSelection = await selectChangedPaths(payload, env);
   if (!changedSelection.allowed) {
+    logGithubWebhook({ stage: "filter", status: "filtered", reason: changedSelection.reason, ...webhookIdentity(payload) });
     return json({ ok: true, ignored: true, reason: changedSelection.reason }, 202);
   }
 
@@ -101,13 +133,17 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
   try {
     claimed = await claimDelivery(env.RELAY_DB, deliveryId);
   } catch {
+    logGithubWebhook({ stage: "storage", status: "failed", reason: "delivery_registry_unavailable", ...webhookIdentity(payload), delivery_id: deliveryId });
     return json({
       ok: false,
       error: "Webhook delivery registry unavailable; apply D1 migration 0009",
       stage: "storage",
     }, 503);
   }
-  if (!claimed) return json({ ok: true, duplicate: true, delivery_id: deliveryId });
+  if (!claimed) {
+    logGithubWebhook({ stage: "delivery", status: "skipped", reason: "duplicate", ...webhookIdentity(payload), delivery_id: deliveryId });
+    return json({ ok: true, duplicate: true, delivery_id: deliveryId });
+  }
 
   try {
     const root = payload as Record<string, unknown>;
@@ -204,6 +240,8 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
       if (!result.ok) throw new Error(result.description || "Telegram rejected the failure alert");
       telegramStatus = "sent";
     }
+    logGithubWebhook({ stage: "notify", status: notifyStatus as GithubWebhookLog["status"], repository: repo, run_id: runId, action, delivery_id: deliveryId });
+    logGithubWebhook({ stage: "telegram", status: telegramStatus as GithubWebhookLog["status"], repository: repo, run_id: runId, action, delivery_id: deliveryId });
     if (notifyStatus === "failed" || notifyStatus === "busy") {
       await setDeliveryState(env.RELAY_DB, deliveryId, "failed");
       return json({ ok: false, delivery_id: deliveryId, event, action, notify: notifyStatus, telegram: telegramStatus, retryable: true }, 503);
@@ -215,6 +253,7 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     // A network failure can have an ambiguous outcome; re-delivery is
     // at-least-once, not exactly-once.
     try { await setDeliveryState(env.RELAY_DB, deliveryId, "failed"); } catch {}
+    logGithubWebhook({ stage: "delivery", status: "failed", reason: error instanceof Error ? error.message : String(error), ...webhookIdentity(payload), delivery_id: deliveryId });
     console.error("[github-webhook] delivery failed", {
       deliveryId,
       error: error instanceof Error ? error.message : String(error),
