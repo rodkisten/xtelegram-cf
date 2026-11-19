@@ -121,7 +121,7 @@ export async function loadManageNotifyOverrides(repository: string, token?: stri
     parseRepositoryNotify(YAML.stringify({ version: 1, notifications: selected.overrides }));
   }
   if (selected.choices !== undefined && (typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
-    Object.entries(selected.choices).some(([key, choice]) => !/^(events|grouping|windowSeconds|updateMode|template|retentionMinutes\\.(running|success|error))$/.test(key) || (choice !== "repository" && choice !== "manage"))))
+    Object.entries(selected.choices).some(([key, choice]) => !/^(events|grouping|windowSeconds|updateMode|template|retentionMinutes\.(running|success|error))$/.test(key) || (choice !== "repository" && choice !== "manage"))))
     throw new Error("Invalid conflict choices");
   return selected;
 }
