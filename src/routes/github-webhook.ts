@@ -157,7 +157,9 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     const key = "workflow:" + repo + ":" + runId + ":" + String(run.run_attempt || 1);
     let notifyStatus = "skipped";
 
-    if (env.NOTIFY_DEVICE_ID && env.NOTIFY_TOKEN) {
+    // Avoid opening a second Live Activity on the requested -> in_progress transition.
+    // Only in_progress starts an activity; completed closes it when one exists.
+    if (env.NOTIFY_DEVICE_ID && env.NOTIFY_TOKEN && action !== "requested") {
       const owner = deliveryId;
       let acquired = false;
       try {
@@ -194,7 +196,10 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
             total: 1,
           };
           try {
-            const result = await sendWorkflowNotify(notifyInput, env);
+            // No Live Activity was ever opened: do not create a completion-only push.
+            const result = action === "completed" && !activityId
+              ? { disabled: true }
+              : await sendWorkflowNotify(notifyInput, env);
             notifyStatus = result.disabled ? "disabled" : "sent";
             const nextState = action === "completed" ? "completed" : "active";
             await env.RELAY_DB.prepare(
