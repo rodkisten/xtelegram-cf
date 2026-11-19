@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseRepositoryNotify, resolveRepositoryNotify, repositoryEvent, renderRepositoryTemplate } from "../src/lib/repository-notify.ts";
+import { parseRepositoryNotify, resolveRepositoryNotify, shouldNotifyEvent, repositoryEvent, renderRepositoryTemplate } from "../src/lib/repository-notify.ts";
 
 describe("repository notify.yml integration", () => {
   it("accepts Manage schema and partial nested settings", () => {
@@ -25,6 +25,22 @@ describe("repository notify.yml integration", () => {
     assert.equal(result.retentionMinutes.running, 10);
     assert.throws(() => resolveRepositoryNotify(yaml, { overrides: entry.overrides }));
     assert.equal(resolveRepositoryNotify(yaml, { ...entry, choices: { "retentionMinutes.error": "manage" } }).retentionMinutes.error, 90);
+  });
+  it("preserves legacy behavior without an explicit events filter", () => {
+    assert.equal(shouldNotifyEvent("completed", "success", {}), true);
+    assert.equal(shouldNotifyEvent("requested", "", { template: "Custom" }), true);
+  });
+  it("honors an explicit empty events list", () => {
+    assert.equal(shouldNotifyEvent("completed", "failure", { events: [] }), false);
+    assert.equal(shouldNotifyEvent("completed", "success", { events: ["workflow_failure"] }), false);
+    assert.equal(shouldNotifyEvent("completed", "failure", { events: ["workflow_failure"] }), true);
+  });
+  it("uses Manage conflict choices for event filters", () => {
+    const yaml = { events: ["workflow_failure"] };
+    const overrides = { events: ["workflow_success"] };
+    assert.equal(shouldNotifyEvent("completed", "success", yaml, overrides, { events: "manage" }), true);
+    assert.equal(shouldNotifyEvent("completed", "success", yaml, overrides, { events: "repository" }), false);
+    assert.throws(() => shouldNotifyEvent("completed", "success", yaml, overrides));
   });
   it("maps workflow actions to supported notification events", () => {
     assert.equal(repositoryEvent("in_progress", ""), "workflow_started");
