@@ -308,6 +308,7 @@ export async function handleAction(
 ): Promise<{ activityId?: string }> {
   const repoLabel = input.repository?.split("/").pop() || "";
   const workflow = `${repoLabel ? repoLabel + " · " : ""}${shortWorkflow(input.workflow ?? "")}`.slice(0, 65);
+  const bannerTitle = cleanLabel(`❌ ${repoLabel || "GitHub"} · ${shortWorkflow(input.workflow ?? "")}`, 40);
   const [, runId, runUrl] = runContext(input.repository, input.runId);
   const parsedTotal =
     typeof input.total === "number" ? input.total : Number.parseInt(String(input.total ?? "1"), 10);
@@ -341,7 +342,7 @@ export async function handleAction(
 
   if (input.action === "step") {
     const outcome = (input.outcome ?? "").toLowerCase().trim();
-    if (!["running", "success", "failure", "cancelled"].includes(outcome)) {
+    if (!["running", "success", "failure"].includes(outcome)) {
       return {};
     }
 
@@ -360,17 +361,12 @@ export async function handleAction(
     let buttonTitle = "Ver step";
 
     if (failed) {
-      const gcpUrl = gcpFailureUrl(stepName, input.project ?? "", input.region ?? "us-central1");
-      if (gcpUrl) {
-        link = gcpUrl;
-        buttonTitle = "Logs GCP";
-      }
-
-      const message = outcome === "failure" ? `❌ ${label}` : `⚠️ ${label}`;
-      const button = linkButton(link, buttonTitle);
+      // A push must open the failing GitHub run; diagnostic links belong in Manage.
+      const message = `Falha: ${label}`;
+      const button = linkButton(runUrl || link, "Abrir execução");
       await send("notify-json", device, token, {
-        title: workflow,
-        text: `${message} · ${fraction}`,
+        title: bannerTitle,
+        text: cleanLabel(`${message} · ${fraction}`, 60),
         groupType: `github-${cleanLabel(repoLabel, 48) || "actions"}`,
         ...(button ? { button } : {}),
       });
