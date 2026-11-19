@@ -92,7 +92,7 @@ export function formatGithubWorkflowRun(payload: unknown): NotificationMessage |
 
   const lines = [
     icon + " <b>" + escapeTelegramHtml(title) + " : " + escapeTelegramHtml(workflow.replace(/^\p{Extended_Pictographic}+/u, "")) + "</b>",
-   // "📦 <b>" + escapeTelegramHtml(fullName) + "</b>",
+    "📦 <b>" + escapeTelegramHtml(fullName) + "</b>",
       (Number.isSafeInteger(runNumber) && runNumber > 0 ? "  #" + runNumber + " • " : "") +
       (Number.isSafeInteger(attempt) && attempt > 1 ? " · tentativa " + attempt : ""),
   ];
