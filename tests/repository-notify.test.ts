@@ -57,6 +57,21 @@ describe("repository notify.yml integration", () => {
       globalThis.fetch = originalFetch;
     }
   });
+  it("rejects invalid repository names before any GitHub request", async () => {
+    await assert.rejects(loadManageNotifyOverrides("../owner/repo", "test-token"), /Invalid repository/);
+    await assert.rejects(loadManageNotifyOverrides("owner/repo/extra", "test-token"), /Invalid repository/);
+  });
+  it("rejects null conflict choices rather than ignoring them", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      value: JSON.stringify({ "owner/repo": { choices: null } }),
+    }), { status: 200 });
+    try {
+      await assert.rejects(loadManageNotifyOverrides("owner/repo", "test-token"), /Invalid conflict choices/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
   it("preserves legacy behavior without an explicit events filter", () => {
     assert.equal(shouldNotifyEvent("completed", "success", {}), true);
     assert.equal(shouldNotifyEvent("requested", "", { template: "Custom" }), true);
