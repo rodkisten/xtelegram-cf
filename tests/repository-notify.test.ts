@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseRepositoryNotify, repositoryEvent, renderRepositoryTemplate } from "../src/lib/repository-notify.ts";
+import { parseRepositoryNotify, resolveRepositoryNotify, repositoryEvent, renderRepositoryTemplate } from "../src/lib/repository-notify.ts";
 
 describe("repository notify.yml integration", () => {
   it("accepts Manage schema and partial nested settings", () => {
@@ -16,6 +16,15 @@ describe("repository notify.yml integration", () => {
       "version: 1\nnotifications:\n  retentionMinutes:\n    error: -1",
       "version: 1\nnotifications:\n  __proto__: test",
     ]) assert.throws(() => parseRepositoryNotify(source));
+  });
+  it("resolves leaf conflicts exactly as Manage does", () => {
+    const yaml = { retentionMinutes: { error: 60 }, events: ["workflow_failure"] };
+    const entry = { overrides: { retentionMinutes: { error: 90, running: 10 } }, choices: { "retentionMinutes.error": "repository" as const } };
+    const result = resolveRepositoryNotify(yaml, entry);
+    assert.equal(result.retentionMinutes.error, 60);
+    assert.equal(result.retentionMinutes.running, 10);
+    assert.throws(() => resolveRepositoryNotify(yaml, { overrides: entry.overrides }));
+    assert.equal(resolveRepositoryNotify(yaml, { ...entry, choices: { "retentionMinutes.error": "manage" } }).retentionMinutes.error, 90);
   });
   it("maps workflow actions to supported notification events", () => {
     assert.equal(repositoryEvent("in_progress", ""), "workflow_started");
