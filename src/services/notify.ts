@@ -14,8 +14,6 @@ const ACTIVITY_PATTERN = /^LA[A-Za-z0-9]{6,20}$/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const RUN_RE = /^[0-9]{1,20}$/;
 const STEP_INDEX_RE = /^[1-9][0-9]{0,2}$/;
-const GCP_PROJECT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
-const GCP_REGION_RE = /^[a-z]+-[a-z]+[0-9]$/;
 
 export interface NotifyPayloadInput {
   action: "start" | "step" | "end";
@@ -260,26 +258,6 @@ async function githubStepLink(
   } catch {
     return fallback;
   }
-}
-
-function gcpFailureUrl(step: string, project: string, region: string): string {
-  if (!GCP_PROJECT_RE.test(project) || !GCP_REGION_RE.test(region)) {
-    return "";
-  }
-
-  const normalized = step.toLowerCase();
-  const base = "https://photos-manage.migos.club/?tab=logs&source=gcp";
-
-  if (normalized.includes("api") || normalized.includes("cloud run")) {
-    return `${base}&search=photointel-api`;
-  }
-  if (normalized.includes("jobs") || normalized.includes("worker")) {
-    return `${base}&search=photointel-worker`;
-  }
-  if (normalized.includes("build")) {
-    return "https://photos-manage.migos.club/?tab=deploy";
-  }
-  return "";
 }
 
 function stageCount(value: number | string | undefined, total: number): number {
