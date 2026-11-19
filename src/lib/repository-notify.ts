@@ -63,7 +63,7 @@ export async function loadRepositoryNotify(repository: string, token?: string): 
 
 const DEFAULTS: Required<RepositoryNotify> = {
   events: ["workflow_failure", "workflow_recovered", "deploy_failed", "job_failed"],
-  template: "❌ {{workflow}} #{{run_number}}\\nJob: {{job}}\\nEtapa: {{step}}\\nErro: {{error}}\\nDiagnóstico: {{diagnosis}}\\n{{url}}",
+  template: "❌ {{workflow}} #{{run_number}}\nJob: {{job}}\nEtapa: {{step}}\nErro: {{error}}\nDiagnóstico: {{diagnosis}}\n{{url}}",
   grouping: "window", windowSeconds: 5, updateMode: "edit",
   retentionMinutes: { running: 30, success: 60, error: 0 },
 };
