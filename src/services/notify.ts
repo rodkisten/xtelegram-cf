@@ -348,7 +348,7 @@ export async function handleAction(
     const stepName = input.step ?? "";
     const jobName = input.job ?? "";
     const label = shortStep(input.label || stepName);
-    const failed = outcome === "failure" || outcome === "cancelled";
+    const failed = outcome === "failure";
     let link = await githubStepLink(
       env,
       input.repository ?? "",
@@ -367,10 +367,12 @@ export async function handleAction(
       }
 
       const message = outcome === "failure" ? `❌ ${label}` : `⚠️ ${label}`;
+      const button = linkButton(link, buttonTitle);
       await send("notify-json", device, token, {
         title: workflow,
         text: `${message} · ${fraction}`,
         groupType: `github-${cleanLabel(repoLabel, 48) || "actions"}`,
+        ...(button ? { button } : {}),
       });
     }
 
