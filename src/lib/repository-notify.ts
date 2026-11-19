@@ -114,14 +114,30 @@ export async function loadManageNotifyOverrides(repository: string, token?: stri
   if (entry === undefined) return {};
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Invalid repository overrides");
   const selected = entry as OverrideEntry;
+  if (selected.overrides !== undefined && (!selected.overrides || typeof selected.overrides !== "object" || Array.isArray(selected.overrides)))
+    throw new Error("Invalid repository overrides mapping");
   if (selected.overrides) {
     // Reuse the exact schema validation applied to the YAML file.
     parseRepositoryNotify(YAML.stringify({ version: 1, notifications: selected.overrides }));
   }
-  if (selected.choices && (typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
+  if (selected.choices !== undefined && (typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
     Object.entries(selected.choices).some(([key, choice]) => !/^(events|grouping|windowSeconds|updateMode|template|retentionMinutes\\.(running|success|error))$/.test(key) || (choice !== "repository" && choice !== "manage"))))
     throw new Error("Invalid conflict choices");
   return selected;
+}
+
+/** Distinguish a missing config from a policy explicitly excluding every event. */
+export function shouldNotifyEvent(
+  action: string,
+  conclusion: string,
+  repository: RepositoryNotify,
+  overrides: RepositoryNotify = {},
+  choices: Record<string, "repository" | "manage"> = {},
+): boolean {
+  if (repository.events === undefined && overrides.events === undefined) return true;
+  const event = repositoryEvent(action, conclusion);
+  if (!event) return false;
+  return resolveRepositoryNotify(repository, { overrides, choices }).events.includes(event);
 }
 
 export function repositoryEvent(action: string, conclusion: string): string | null {
