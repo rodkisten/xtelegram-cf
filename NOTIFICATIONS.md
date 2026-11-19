@@ -250,3 +250,7 @@ O deploy do Worker exige credenciais Cloudflare válidas e o segredo
 ⚠️ Tokens de bot e outros segredos não devem ficar em `wrangler.toml` nem
 ser impressos em logs; configure-os com `wrangler secret put` e rotacione
 quaisquer valores que já tenham sido comitados.
+
+### iOS Notify! grouping by repository
+
+For workflow step failure pushes, the Notify! sender now uses `groupType=github-<repo>` instead of a per-run group. The group type is included in the Notify! request query and JSON payload. This is a **visual grouping hint**, not server-side five-second batching or an edit of a delivered iOS push. The existing workflow run link behavior and Live Activities remain unchanged. `cancelled` and `skipped` completion events do not produce additional completion-only push notifications; existing Live Activities may still be closed.

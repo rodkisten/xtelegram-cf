@@ -72,7 +72,9 @@ async function send(
   const { extra = {}, method = "POST" } = options;
   const pathId = encodeURIComponent(device);
   const query = new URLSearchParams({ token, ...extra }).toString();
-  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}&groupType=github-actions&iconUrl=${encodeURIComponent(NOTIFY_ICON_URL)}&timeSensitive=true`;
+  const groupType = typeof payload.groupType === "string" && /^github-[A-Za-z0-9_.-]{1,48}$/.test(payload.groupType)
+    ? payload.groupType : "github-actions";
+  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}&groupType=${encodeURIComponent(groupType)}&iconUrl=${encodeURIComponent(NOTIFY_ICON_URL)}&timeSensitive=true`;
 
   const response = await fetch(target, {
     method,
@@ -306,6 +308,7 @@ export async function handleAction(
 ): Promise<{ activityId?: string }> {
   const repoLabel = input.repository?.split("/").pop() || "";
   const workflow = `${repoLabel ? repoLabel + " · " : ""}${shortWorkflow(input.workflow ?? "")}`.slice(0, 65);
+  const bannerTitle = cleanLabel(`❌ ${repoLabel || "GitHub"} · ${shortWorkflow(input.workflow ?? "")}`, 40);
   const [, runId, runUrl] = runContext(input.repository, input.runId);
   const parsedTotal =
     typeof input.total === "number" ? input.total : Number.parseInt(String(input.total ?? "1"), 10);
@@ -339,14 +342,14 @@ export async function handleAction(
 
   if (input.action === "step") {
     const outcome = (input.outcome ?? "").toLowerCase().trim();
-    if (!["running", "success", "failure", "cancelled"].includes(outcome)) {
+    if (!["running", "success", "failure"].includes(outcome)) {
       return {};
     }
 
     const stepName = input.step ?? "";
     const jobName = input.job ?? "";
     const label = shortStep(input.label || stepName);
-    const failed = outcome === "failure" || outcome === "cancelled";
+    const failed = outcome === "failure";
     let link = await githubStepLink(
       env,
       input.repository ?? "",
@@ -358,17 +361,21 @@ export async function handleAction(
     let buttonTitle = "Ver step";
 
     if (failed) {
-      const gcpUrl = gcpFailureUrl(stepName, input.project ?? "", input.region ?? "us-central1");
-      if (gcpUrl) {
-        link = gcpUrl;
+      const diagnosticUrl = gcpFailureUrl(stepName, input.project ?? "", input.region ?? "us-central1");
+      if (diagnosticUrl) {
+        link = diagnosticUrl;
         buttonTitle = "Logs GCP";
       }
-
-      const message = outcome === "failure" ? `❌ ${label}` : `⚠️ ${label}`;
+      const message = `Falha: ${label}`;
+      // Keep the GitHub run as the primary action and expose contextual logs separately.
+      const button = linkButton(runUrl || link, "Abrir execução");
+      const diagnosticButton = diagnosticUrl ? linkButton(diagnosticUrl, "Logs GCP") : null;
       await send("notify-json", device, token, {
-        title: workflow,
-        text: `${message} · ${fraction}`,
-        groupType: `github-${runId || "actions"}`,
+        title: bannerTitle,
+        text: cleanLabel(`${message} · ${fraction}`, 60),
+        groupType: `github-${cleanLabel(repoLabel, 48) || "actions"}`,
+        ...(button ? { button } : {}),
+        ...(diagnosticButton ? { diagnosticButton } : {}),
       });
     }
 

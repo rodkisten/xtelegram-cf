@@ -5,6 +5,7 @@ import { formatGithubWorkflowRun, verifyGithubSignature } from "../src/lib/githu
 import { handleNotificationSend } from "../src/routes/notifications.ts";
 import { routeRequest } from "../src/app/router.ts";
 import { handleGithubWebhook } from "../src/routes/github-webhook.ts";
+import { handleAction } from "../src/services/notify.ts";
 import { matchesPatterns, selectGithubWorkflow, repositoryNotificationRules } from "../src/lib/github-notify-config.ts";
 import { selectChangedPaths } from "../src/lib/github-notify-changes.ts";
 import type { Env } from "../src/types.ts";
@@ -376,5 +377,38 @@ describe("Repository-scoped YAML notification routing", () => {
       workflow_run: { event: "workflow_dispatch", pull_requests: [] },
     }, {} as Env);
     assert.equal(result.allowed, true);
+  });
+});
+
+describe("Notify! repository grouping", () => {
+  const env = {} as Parameters<typeof handleAction>[1];
+  it("sends a linked failure push grouped by repository", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+      return Response.json({ success: true });
+    };
+    await handleAction({
+      action: "step", repository: "rodkisten/photointel", runId: "123456",
+      workflow: "Deploy", job: "Build", step: "Build", outcome: "failure",
+    }, env, "device123", "token12345678");
+    assert.equal(calls.length, 1);
+    assert.equal(new URL(calls[0]!.url).searchParams.get("groupType"), "github-photointel");
+    assert.equal(calls[0]!.body.groupType, "github-photointel");
+    const button = calls[0]!.body.button as { url: string; open: boolean };
+    assert.equal(button.url, "https://github.com/rodkisten/photointel/actions/runs/123456");
+    assert.equal(button.open, true);
+  });
+
+  it("does not send push for cancelled or skipped steps", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; return Response.json({ success: true }); };
+    for (const outcome of ["cancelled", "skipped"]) {
+      await handleAction({
+        action: "step", repository: "rodkisten/photointel", runId: "123456",
+        workflow: "Deploy", step: "Build", outcome,
+      }, env, "device123", "token12345678");
+    }
+    assert.equal(calls, 0);
   });
 });
