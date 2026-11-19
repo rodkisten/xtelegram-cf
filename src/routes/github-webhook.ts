@@ -141,8 +141,7 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     logGithubWebhook({ stage: "filter", status: "failed", reason: error instanceof Error ? error.message : "notify_config_error", ...webhookIdentity(payload) });
     return json({ ok: false, error: "Repository notify.yml unavailable or invalid", stage: "configuration", retryable: true }, 503);
   }
-  const eventName = repositoryEvent(action, conclusionPolicy);
-  if (configured && repositoryConfig?.events && (!eventName || !repositoryConfig.events.includes(eventName))) {
+  if (!eventAllowed) {
     logGithubWebhook({ stage: "filter", status: "filtered", reason: "repository_event_filtered", ...webhookIdentity(payload) });
     return json({ ok: true, ignored: true, reason: "repository_event_filtered" }, 202);
   }
