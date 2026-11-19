@@ -60,6 +60,70 @@ export async function loadRepositoryNotify(repository: string, token?: string): 
   return parseRepositoryNotify(await response.text());
 }
 
+
+const DEFAULTS: Required<RepositoryNotify> = {
+  events: ["workflow_failure", "workflow_recovered", "deploy_failed", "job_failed"],
+  template: "❌ {{workflow}} #{{run_number}}\\n{{url}}",
+  grouping: "window", windowSeconds: 5, updateMode: "edit",
+  retentionMinutes: { running: 30, success: 60, error: 0 },
+};
+type OverrideEntry = { overrides?: RepositoryNotify; choices?: Record<string, "repository" | "manage"> };
+function entries(value: RepositoryNotify): Array<[string, unknown]> {
+  return Object.entries(value).flatMap(([key, item]) =>
+    key === "retentionMinutes" && item && typeof item === "object"
+      ? Object.entries(item).map(([sub, nested]) => [key + "." + sub, nested] as [string, unknown])
+      : [[key, item] as [string, unknown]]);
+}
+function setPath(target: RepositoryNotify, path: string, value: unknown): void {
+  if (path.startsWith("retentionMinutes.")) {
+    const key = path.slice("retentionMinutes.".length) as keyof NonNullable<RepositoryNotify["retentionMinutes"]>;
+    target.retentionMinutes = { ...target.retentionMinutes, [key]: value };
+  } else Object.assign(target, { [path]: value });
+}
+export function resolveRepositoryNotify(repository: RepositoryNotify, entry: OverrideEntry = {}): Required<RepositoryNotify> {
+  const output: RepositoryNotify = { ...DEFAULTS, retentionMinutes: { ...DEFAULTS.retentionMinutes } };
+  const repositoryFields = new Map(entries(repository));
+  const overrides = entry.overrides ?? {};
+  for (const [path, value] of repositoryFields) setPath(output, path, value);
+  for (const [path, value] of entries(overrides)) {
+    const conflict = repositoryFields.has(path) && JSON.stringify(repositoryFields.get(path)) !== JSON.stringify(value);
+    if (conflict && entry.choices?.[path] !== "manage" && entry.choices?.[path] !== "repository")
+      throw new Error("Unresolved notification conflict: " + path);
+    if (!conflict || entry.choices?.[path] === "manage") setPath(output, path, value);
+  }
+  return output as Required<RepositoryNotify>;
+}
+
+/** Optional authenticated Manage bridge via the Actions variable in PhotoIntel. */
+export async function loadManageNotifyOverrides(repository: string, token?: string): Promise<OverrideEntry> {
+  if (!token) return {};
+  const response = await fetch(
+    "https://api.github.com/repos/rodkisten/photointel/actions/variables/PHOTOINTEL_NOTIFY_OVERRIDES",
+    { headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token,
+      "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "xtelegram-repository-notify" },
+      redirect: "manual", signal: AbortSignal.timeout(7000) },
+  );
+  if (response.status === 404) return {};
+  if (!response.ok) throw new Error("Manage notification overrides HTTP " + response.status);
+  const variable: unknown = await response.json();
+  const raw = (variable as { value?: unknown })?.value;
+  if (typeof raw !== "string" || raw.length > 100000) throw new Error("Invalid Manage overrides");
+  const all: unknown = JSON.parse(raw);
+  if (!all || typeof all !== "object" || Array.isArray(all)) throw new Error("Invalid Manage overrides object");
+  const entry = (all as Record<string, unknown>)[repository];
+  if (entry === undefined) return {};
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Invalid repository overrides");
+  const selected = entry as OverrideEntry;
+  if (selected.overrides) {
+    // Reuse the exact schema validation applied to the YAML file.
+    parseRepositoryNotify(YAML.stringify({ version: 1, notifications: selected.overrides }));
+  }
+  if (selected.choices && (typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
+    Object.values(selected.choices).some(x => x !== "repository" && x !== "manage")))
+    throw new Error("Invalid conflict choices");
+  return selected;
+}
+
 export function repositoryEvent(action: string, conclusion: string): string | null {
   if (action === "requested" || action === "in_progress") return "workflow_started";
   if (action !== "completed") return null;
