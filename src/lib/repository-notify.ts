@@ -151,5 +151,5 @@ export function repositoryEvent(action: string, conclusion: string): string | nu
 export function renderRepositoryTemplate(template: string, values: Record<string, string>): string {
   // Escape every untrusted field before embedding into Telegram HTML.
   return template.replace(/{{\s*([a-z_]+)\s*}}/g, (_, key: string) =>
-    escapeTelegramHtml(values[key] ?? ""));
+    Object.hasOwn(values, key) ? escapeTelegramHtml(values[key]) : "");
 }
