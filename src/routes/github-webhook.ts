@@ -128,12 +128,14 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
   const repositoryName = String(repoPolicy?.full_name || "");
   const conclusionPolicy = String(runPolicy?.conclusion || "").toLowerCase();
   let repositoryConfig;
-  let configured = false;
+  let eventsConfigured = false;
+  let templateConfigured = false;
   try {
     const token = env.GITHUB_API_TOKEN || env.GITHUB_ACTIONS_TOKEN;
     const yaml = await loadRepositoryNotify(repositoryName, token);
     const manage = await loadManageNotifyOverrides(repositoryName, token);
-    configured = yaml !== null || manage.overrides !== undefined;
+    eventsConfigured = yaml?.events !== undefined || manage.overrides?.events !== undefined;
+    templateConfigured = yaml?.template !== undefined || manage.overrides?.template !== undefined;
     repositoryConfig = resolveRepositoryNotify(yaml ?? {}, manage);
   } catch (error) {
     logGithubWebhook({ stage: "filter", status: "failed", reason: error instanceof Error ? error.message : "notify_config_error", ...webhookIdentity(payload) });
@@ -145,7 +147,7 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     return json({ ok: true, ignored: true, reason: "repository_event_filtered" }, 202);
   }
   const message = formatGithubWorkflowRun(payload);
-  if (message && configured && repositoryConfig?.template) {
+  if (message && templateConfigured && repositoryConfig?.template) {
     const runUrl = String(runPolicy?.html_url || "");
     const safeUrl = /^https:\/\/github\.com\/[^\s<>]+$/.test(runUrl) ? runUrl : "https://github.com/" + repositoryName + "/actions";
     message.text = renderRepositoryTemplate(repositoryConfig.template, {
