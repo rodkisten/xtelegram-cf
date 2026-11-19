@@ -72,7 +72,9 @@ async function send(
   const { extra = {}, method = "POST" } = options;
   const pathId = encodeURIComponent(device);
   const query = new URLSearchParams({ token, ...extra }).toString();
-  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}&groupType=github-actions&iconUrl=${encodeURIComponent(NOTIFY_ICON_URL)}&timeSensitive=true`;
+  const groupType = typeof payload.groupType === "string" && /^github-[A-Za-z0-9_.-]{1,48}$/.test(payload.groupType)
+    ? payload.groupType : "github-actions";
+  const target = `${BASE_URL}/${endpoint}/${pathId}?${query}&groupType=${encodeURIComponent(groupType)}&iconUrl=${encodeURIComponent(NOTIFY_ICON_URL)}&timeSensitive=true`;
 
   const response = await fetch(target, {
     method,
@@ -368,7 +370,7 @@ export async function handleAction(
       await send("notify-json", device, token, {
         title: workflow,
         text: `${message} · ${fraction}`,
-        groupType: `github-${runId || "actions"}`,
+        groupType: `github-${cleanLabel(repoLabel, 48) || "actions"}`,
       });
     }
 
