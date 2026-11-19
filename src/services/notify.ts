@@ -304,7 +304,8 @@ export async function handleAction(
   device: string,
   token: string
 ): Promise<{ activityId?: string }> {
-  const workflow = shortWorkflow(input.workflow ?? "");
+  const repoLabel = input.repository?.split("/").pop() || "";
+  const workflow = `${repoLabel ? repoLabel + " · " : ""}${shortWorkflow(input.workflow ?? "")}`.slice(0, 65);
   const [, runId, runUrl] = runContext(input.repository, input.runId);
   const parsedTotal =
     typeof input.total === "number" ? input.total : Number.parseInt(String(input.total ?? "1"), 10);
@@ -394,17 +395,8 @@ export async function handleAction(
     const success = outcome === "success";
     const message = success ? "✅ Concluído" : outcome === "cancelled" ? "⚠️ Cancelado" : "❌ Falhou";
 
-    {
-      try {
-        await send("notify-json", device, token, {
-          title: workflow,
-          text: `${message} · ${total}/${total}`,
-          groupType: `github-${runId || "actions"}`,
-        });
-      } catch {
-        // Best-effort
-      }
-    }
+    // Workflow completion updates the existing Live Activity only.
+    // Do not send an additional push for every successful/cancelled run.
 
     if (input.activityId && ACTIVITY_PATTERN.test(input.activityId)) {
       const payload: Record<string, unknown> = {
