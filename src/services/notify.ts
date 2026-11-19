@@ -369,13 +369,11 @@ export async function handleAction(
       const message = `Falha: ${label}`;
       // Keep the GitHub run as the primary action and expose contextual logs separately.
       const button = linkButton(runUrl || link, "Abrir execução");
-      const diagnosticButton = diagnosticUrl ? linkButton(diagnosticUrl, "Logs GCP") : null;
       await send("notify-json", device, token, {
         title: bannerTitle,
         text: cleanLabel(`${message} · ${fraction}`, 60),
         groupType: `github-${cleanLabel(repoLabel, 48) || "actions"}`,
         ...(button ? { button } : {}),
-        ...(diagnosticButton ? { diagnosticButton } : {}),
       });
     }
 
