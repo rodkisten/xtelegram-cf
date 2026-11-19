@@ -63,7 +63,7 @@ export async function loadRepositoryNotify(repository: string, token?: string): 
 
 const DEFAULTS: Required<RepositoryNotify> = {
   events: ["workflow_failure", "workflow_recovered", "deploy_failed", "job_failed"],
-  template: "❌ {{workflow}} #{{run_number}}\\n{{url}}",
+  template: "❌ {{workflow}} #{{run_number}}\\nJob: {{job}}\\nEtapa: {{step}}\\nErro: {{error}}\\nDiagnóstico: {{diagnosis}}\\n{{url}}",
   grouping: "window", windowSeconds: 5, updateMode: "edit",
   retentionMinutes: { running: 30, success: 60, error: 0 },
 };
@@ -119,7 +119,7 @@ export async function loadManageNotifyOverrides(repository: string, token?: stri
     parseRepositoryNotify(YAML.stringify({ version: 1, notifications: selected.overrides }));
   }
   if (selected.choices && (typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
-    Object.values(selected.choices).some(x => x !== "repository" && x !== "manage")))
+    Object.entries(selected.choices).some(([key, choice]) => !/^(events|grouping|windowSeconds|updateMode|template|retentionMinutes\\.(running|success|error))$/.test(key) || (choice !== "repository" && choice !== "manage"))))
     throw new Error("Invalid conflict choices");
   return selected;
 }
