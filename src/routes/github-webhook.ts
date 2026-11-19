@@ -1,4 +1,5 @@
 import { selectGithubWorkflow } from "../lib/github-notify-config";
+import { loadRepositoryNotify, repositoryEvent, renderRepositoryTemplate } from "../lib/repository-notify";
 import { selectChangedPaths } from "../lib/github-notify-changes";
 import { json } from "../http/response";
 import { formatGithubWorkflowRun, verifyGithubSignature } from "../lib/github-notifications";
@@ -121,7 +122,38 @@ export async function handleGithubWebhook(request: Request, env: Env): Promise<R
     return json({ ok: true, ignored: true, reason: changedSelection.reason }, 202);
   }
 
+  const rootPolicy = payload as Record<string, unknown>;
+  const runPolicy = rootPolicy.workflow_run as Record<string, unknown> | undefined;
+  const repoPolicy = rootPolicy.repository as Record<string, unknown> | undefined;
+  const repositoryName = String(repoPolicy?.full_name || "");
+  const conclusionPolicy = String(runPolicy?.conclusion || "").toLowerCase();
+  let repositoryConfig;
+  try {
+    repositoryConfig = await loadRepositoryNotify(repositoryName, env.GITHUB_API_TOKEN || env.GITHUB_ACTIONS_TOKEN);
+  } catch (error) {
+    logGithubWebhook({ stage: "filter", status: "failed", reason: error instanceof Error ? error.message : "notify_config_error", ...webhookIdentity(payload) });
+    return json({ ok: false, error: "Repository notify.yml unavailable or invalid", stage: "configuration", retryable: true }, 503);
+  }
+  const eventName = repositoryEvent(action, conclusionPolicy);
+  if (repositoryConfig?.events && (!eventName || !repositoryConfig.events.includes(eventName))) {
+    logGithubWebhook({ stage: "filter", status: "filtered", reason: "repository_event_filtered", ...webhookIdentity(payload) });
+    return json({ ok: true, ignored: true, reason: "repository_event_filtered" }, 202);
+  }
   const message = formatGithubWorkflowRun(payload);
+  if (message && repositoryConfig?.template) {
+    const runUrl = String(runPolicy?.html_url || "");
+    const safeUrl = /^https:\/\/github\.com\/[^\s<>]+$/.test(runUrl) ? runUrl : "https://github.com/" + repositoryName + "/actions";
+    message.text = renderRepositoryTemplate(repositoryConfig.template, {
+      repository: repositoryName,
+      workflow: String(runPolicy?.name || "GitHub Actions"),
+      run_number: String(runPolicy?.run_number || ""),
+      job: "Workflow",
+      step: action,
+      error: conclusionPolicy === "failure" ? "Workflow failed" : "",
+      diagnosis: conclusionPolicy,
+      url: safeUrl,
+    });
+  }
   if (!message) return json({ ok: false, error: "Invalid workflow_run fields" }, 422);
 
   const deliveryId = request.headers.get("X-GitHub-Delivery") || "";
