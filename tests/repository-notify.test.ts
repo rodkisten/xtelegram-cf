@@ -14,6 +14,9 @@ describe("repository notify.yml integration", () => {
       "version: 2\nnotifications: {}",
       "version: 1\nnotifications:\n  events: [unexpected]",
       "version: 1\nnotifications:\n  retentionMinutes:\n    error: -1",
+      "version: 1\nnotifications:\n  windowSeconds: '5'",
+      "version: 1\nnotifications:\n  grouping: 5",
+      "version: 1\nnotifications:\n  updateMode: 1",
       "version: 1\nnotifications:\n  __proto__: test",
     ]) assert.throws(() => parseRepositoryNotify(source));
   });
@@ -60,6 +63,7 @@ describe("repository notify.yml integration", () => {
   it("rejects invalid repository names before any GitHub request", async () => {
     await assert.rejects(loadManageNotifyOverrides("../owner/repo", "test-token"), /Invalid repository/);
     await assert.rejects(loadManageNotifyOverrides("owner/repo/extra", "test-token"), /Invalid repository/);
+    await assert.rejects(loadManageNotifyOverrides("owner/..", "test-token"), /Invalid repository/);
   });
   it("rejects null conflict choices rather than ignoring them", async () => {
     const originalFetch = globalThis.fetch;
