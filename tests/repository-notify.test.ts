@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseRepositoryNotify, resolveRepositoryNotify, shouldNotifyEvent, repositoryEvent, renderRepositoryTemplate } from "../src/lib/repository-notify.ts";
+import { parseRepositoryNotify, resolveRepositoryNotify, loadManageNotifyOverrides, shouldNotifyEvent, repositoryEvent, renderRepositoryTemplate } from "../src/lib/repository-notify.ts";
 
 describe("repository notify.yml integration", () => {
   it("accepts Manage schema and partial nested settings", () => {
@@ -14,6 +14,9 @@ describe("repository notify.yml integration", () => {
       "version: 2\nnotifications: {}",
       "version: 1\nnotifications:\n  events: [unexpected]",
       "version: 1\nnotifications:\n  retentionMinutes:\n    error: -1",
+      "version: 1\nnotifications:\n  windowSeconds: '5'",
+      "version: 1\nnotifications:\n  grouping: 5",
+      "version: 1\nnotifications:\n  updateMode: 1",
       "version: 1\nnotifications:\n  __proto__: test",
     ]) assert.throws(() => parseRepositoryNotify(source));
   });
@@ -25,6 +28,53 @@ describe("repository notify.yml integration", () => {
     assert.equal(result.retentionMinutes.running, 10);
     assert.throws(() => resolveRepositoryNotify(yaml, { overrides: entry.overrides }));
     assert.equal(resolveRepositoryNotify(yaml, { ...entry, choices: { "retentionMinutes.error": "manage" } }).retentionMinutes.error, 90);
+  });
+  it("loads nested retention choices from the authenticated Manage variable", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (_input, init) => {
+      assert.equal((init?.headers as Record<string, string>).Authorization, "Bearer test-token");
+      return new Response(JSON.stringify({
+        value: JSON.stringify({
+          "owner/repo": {
+            overrides: { retentionMinutes: { error: 90 } },
+            choices: { "retentionMinutes.error": "manage" },
+          },
+        }),
+      }), { status: 200 });
+    };
+    try {
+      const entry = await loadManageNotifyOverrides("owner/repo", "test-token");
+      assert.equal(resolveRepositoryNotify({ retentionMinutes: { error: 60 } }, entry).retentionMinutes.error, 90);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+  it("rejects unknown Manage conflict paths", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      value: JSON.stringify({ "owner/repo": { choices: { "retentionMinutesXerror": "manage" } } }),
+    }), { status: 200 });
+    try {
+      await assert.rejects(loadManageNotifyOverrides("owner/repo", "test-token"), /Invalid conflict choices/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+  it("rejects invalid repository names before any GitHub request", async () => {
+    await assert.rejects(loadManageNotifyOverrides("../owner/repo", "test-token"), /Invalid repository/);
+    await assert.rejects(loadManageNotifyOverrides("owner/repo/extra", "test-token"), /Invalid repository/);
+    await assert.rejects(loadManageNotifyOverrides("owner/..", "test-token"), /Invalid repository/);
+  });
+  it("rejects null conflict choices rather than ignoring them", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({
+      value: JSON.stringify({ "owner/repo": { choices: null } }),
+    }), { status: 200 });
+    try {
+      await assert.rejects(loadManageNotifyOverrides("owner/repo", "test-token"), /Invalid conflict choices/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
   it("preserves legacy behavior without an explicit events filter", () => {
     assert.equal(shouldNotifyEvent("completed", "success", {}), true);

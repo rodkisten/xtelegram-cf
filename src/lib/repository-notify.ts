@@ -1,7 +1,7 @@
 import YAML from "yaml";
 import { escapeTelegramHtml } from "./github-notifications";
 
-const REPOSITORY = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/;
+const REPOSITORY = /^(?!\.{1,2}\/)[a-zA-Z0-9_.-]+\/(?!\.{1,2}$)[a-zA-Z0-9_.-]+$/;
 const EVENTS = new Set(["workflow_started", "workflow_success", "workflow_failure", "workflow_recovered", "deploy_failed", "job_failed"]);
 export type RepositoryNotify = {
   events?: string[];
@@ -28,9 +28,9 @@ export function parseRepositoryNotify(source: string): RepositoryNotify {
     throw new Error("Invalid notification events");
   if (config.template !== undefined && (typeof config.template !== "string" || !config.template.trim() || config.template.length > 3500))
     throw new Error("Invalid notification template");
-  if (config.grouping !== undefined && !["window", "run", "none"].includes(String(config.grouping))) throw new Error("Invalid grouping");
-  if (config.windowSeconds !== undefined && ![5, 10, 15, 30].includes(Number(config.windowSeconds))) throw new Error("Invalid windowSeconds");
-  if (config.updateMode !== undefined && !["edit", "new"].includes(String(config.updateMode))) throw new Error("Invalid updateMode");
+  if (config.grouping !== undefined && !["window", "run", "none"].includes(config.grouping as string)) throw new Error("Invalid grouping");
+  if (config.windowSeconds !== undefined && (typeof config.windowSeconds !== "number" || ![5, 10, 15, 30].includes(config.windowSeconds))) throw new Error("Invalid windowSeconds");
+  if (config.updateMode !== undefined && !["edit", "new"].includes(config.updateMode as string)) throw new Error("Invalid updateMode");
   if (config.retentionMinutes !== undefined) {
     const retention = config.retentionMinutes;
     if (!retention || typeof retention !== "object" || Array.isArray(retention)) throw new Error("Invalid retentionMinutes");
@@ -96,6 +96,7 @@ export function resolveRepositoryNotify(repository: RepositoryNotify, entry: Ove
 
 /** Optional authenticated Manage bridge via the Actions variable in PhotoIntel. */
 export async function loadManageNotifyOverrides(repository: string, token?: string): Promise<OverrideEntry> {
+  if (!REPOSITORY.test(repository)) throw new Error("Invalid repository");
   if (!token) return {};
   const response = await fetch(
     "https://api.github.com/repos/rodkisten/photointel/actions/variables/PHOTOINTEL_NOTIFY_OVERRIDES",
@@ -120,8 +121,8 @@ export async function loadManageNotifyOverrides(repository: string, token?: stri
     // Reuse the exact schema validation applied to the YAML file.
     parseRepositoryNotify(YAML.stringify({ version: 1, notifications: selected.overrides }));
   }
-  if (selected.choices !== undefined && (typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
-    Object.entries(selected.choices).some(([key, choice]) => !/^(events|grouping|windowSeconds|updateMode|template|retentionMinutes\\.(running|success|error))$/.test(key) || (choice !== "repository" && choice !== "manage"))))
+  if (selected.choices !== undefined && (!selected.choices || typeof selected.choices !== "object" || Array.isArray(selected.choices) ||
+    Object.entries(selected.choices).some(([key, choice]) => !/^(events|grouping|windowSeconds|updateMode|template|retentionMinutes\.(running|success|error))$/.test(key) || (choice !== "repository" && choice !== "manage"))))
     throw new Error("Invalid conflict choices");
   return selected;
 }
@@ -150,5 +151,5 @@ export function repositoryEvent(action: string, conclusion: string): string | nu
 export function renderRepositoryTemplate(template: string, values: Record<string, string>): string {
   // Escape every untrusted field before embedding into Telegram HTML.
   return template.replace(/{{\s*([a-z_]+)\s*}}/g, (_, key: string) =>
-    escapeTelegramHtml(values[key] ?? ""));
+    Object.hasOwn(values, key) ? escapeTelegramHtml(values[key]) : "");
 }
